@@ -2,7 +2,7 @@
 """
 Meeting Assistant — 一键启动脚本
 同时启动后端（FastAPI/Uvicorn :8765）和前端（Vite/Electron :5173）
-用法：python3 start.py
+用法：python start.py  或  python3 start.py
 """
 
 import os
@@ -11,8 +11,29 @@ import subprocess
 import threading
 import signal
 import shutil
+import platform
 
-# ─── ANSI 颜色 ────────────────────────────────────────────────
+IS_WINDOWS = platform.system() == "Windows"
+
+# ─── ANSI 颜色（Windows 需启用虚拟终端序列） ──────────────────
+def _enable_windows_ansi():
+    """在 Windows 上启用 ANSI 转义码支持"""
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        # STD_OUTPUT_HANDLE = -11
+        handle = kernel32.GetStdHandle(-11)
+        # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        mode = ctypes.c_ulong()
+        kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+        kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+    except Exception:
+        pass  # 降级为无颜色输出
+
+_enable_windows_ansi()
+
 RESET  = "\033[0m"
 BOLD   = "\033[1m"
 GREEN  = "\033[32m"
@@ -21,10 +42,10 @@ RED    = "\033[31m"
 CYAN   = "\033[36m"
 BLUE   = "\033[34m"
 
-def ok(msg):    print(f"  {GREEN}✅ {msg}{RESET}")
-def warn(msg):  print(f"  {YELLOW}⚠️  {msg}{RESET}")
-def err(msg):   print(f"  {RED}❌ {msg}{RESET}")
-def info(msg):  print(f"  {CYAN}ℹ️  {msg}{RESET}")
+def ok(msg):    print(f"  {GREEN}[OK] {msg}{RESET}")
+def warn(msg):  print(f"  {YELLOW}[WARN] {msg}{RESET}")
+def err(msg):   print(f"  {RED}[ERR] {msg}{RESET}")
+def info(msg):  print(f"  {CYAN}[INFO] {msg}{RESET}")
 
 # ─── 项目路径 ──────────────────────────────────────────────────
 ROOT_DIR    = os.path.dirname(os.path.abspath(__file__))
@@ -102,19 +123,20 @@ def check_node_deps():
 
 def check_optional_deps():
     """检测可选依赖（不阻塞）"""
-    optional = {
-        "lancedb":    "向量检索（RAG）",
-        "fitz":       "PDF 解析（PyMuPDF）",
-        "docx":       "Word 文档解析（python-docx）",
-        "openpyxl":   "Excel 解析",
-    }
-    for mod, desc in optional.items():
+    # (import_name, pip_package, description)
+    optional = [
+        ("lancedb",  "lancedb",     "向量检索（RAG）"),
+        ("fitz",     "PyMuPDF",     "PDF 解析（PyMuPDF）"),
+        ("docx",     "python-docx", "Word 文档解析（python-docx）"),
+        ("openpyxl", "openpyxl",    "Excel 解析"),
+    ]
+    for mod, pip_name, desc in optional:
         try:
             __import__(mod)
             ok(f"[可选] {desc}")
         except ImportError:
-            warn(f"[可选] {desc} 未安装 — 相关功能不可用")
-            info(f"可运行：pip install {mod if mod != 'fitz' else 'PyMuPDF'} {mod if mod != 'docx' else 'python-docx'}")
+            warn(f"[可选] {desc} 未安装 -- 相关功能不可用")
+            info(f"可运行：pip install {pip_name}")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -153,13 +175,16 @@ def launch_backend() -> subprocess.Popen:
 
 
 def launch_frontend() -> subprocess.Popen:
+    # Windows 上 npm 是 npm.cmd，需要 shell=True 才能找到
+    npm_cmd = "npm" if not IS_WINDOWS else "npm.cmd"
     proc = subprocess.Popen(
-        ["npm", "run", "dev"],
+        [npm_cmd, "run", "dev"],
         cwd=ROOT_DIR,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        shell=IS_WINDOWS,  # Windows 需要 shell 来解析 .cmd 脚本
     )
     _procs.append(proc)
     t = threading.Thread(
@@ -208,14 +233,15 @@ def main():
     info("后端：http://127.0.0.1:8765   (FastAPI + uvicorn --reload)")
     info("前端：http://localhost:5173   (Vite dev server + Electron)")
 
-    # 注册 Ctrl+C 处理
-    signal.signal(signal.SIGINT,  shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
+    # 注册 Ctrl+C 处理（Windows 不支持 SIGTERM）
+    signal.signal(signal.SIGINT, shutdown)
+    if not IS_WINDOWS:
+        signal.signal(signal.SIGTERM, shutdown)
 
     backend = launch_backend()
     frontend = launch_frontend()
 
-    print(f"\n{GREEN}{BOLD}✅ 服务已启动！按 Ctrl+C 停止。{RESET}\n")
+    print(f"\n{GREEN}{BOLD}[OK] 服务已启动！按 Ctrl+C 停止。{RESET}\n")
 
     # 等待任意进程退出，若退出则关闭全部
     try:

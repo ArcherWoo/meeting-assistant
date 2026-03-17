@@ -36,7 +36,9 @@ export class PythonManager {
     const backendDir = path.join(__dirname, '..', 'backend');
 
     // 开发环境直接用 python，生产环境用打包的可执行文件
-    const pythonCmd = process.env.VITE_DEV_SERVER_URL ? 'python3' : path.join(backendDir, 'meeting-assistant-backend');
+    // Windows 通常使用 'python'，macOS/Linux 使用 'python3'
+    const devPythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+    const pythonCmd = process.env.VITE_DEV_SERVER_URL ? devPythonCmd : path.join(backendDir, 'meeting-assistant-backend');
 
     const args = process.env.VITE_DEV_SERVER_URL
       ? ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(this.port)]
@@ -82,11 +84,24 @@ export class PythonManager {
   /** 停止 Python 后端 */
   async stop(): Promise<void> {
     if (this.process) {
-      this.process.kill('SIGTERM');
-      // 给进程 3 秒优雅退出时间
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      if (this.process && !this.process.killed) {
-        this.process.kill('SIGKILL');
+      if (process.platform === 'win32') {
+        // Windows: 使用 taskkill 强制终止进程树
+        const pid = this.process.pid;
+        if (pid) {
+          try {
+            spawn('taskkill', ['/pid', String(pid), '/f', '/t'], { stdio: 'ignore' });
+          } catch {
+            this.process.kill();
+          }
+        }
+      } else {
+        // macOS/Linux: 使用 SIGTERM 优雅退出
+        this.process.kill('SIGTERM');
+        // 给进程 3 秒优雅退出时间
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        if (this.process && !this.process.killed) {
+          this.process.kill('SIGKILL');
+        }
       }
       this.process = null;
       this.running = false;

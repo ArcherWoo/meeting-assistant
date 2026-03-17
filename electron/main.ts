@@ -14,13 +14,17 @@ const pythonManager = new PythonManager();
 
 /** 创建主窗口 */
 function createWindow(): void {
+  const isMac = process.platform === 'darwin';
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 1024,
     minHeight: 680,
-    titleBarStyle: 'hiddenInset', // macOS 红绿灯样式
-    trafficLightPosition: { x: 16, y: 16 },
+    // macOS: 隐藏标题栏 + 红绿灯样式；Windows/Linux: 使用默认标题栏
+    ...(isMac
+      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 16 } }
+      : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
