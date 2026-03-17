@@ -1,0 +1,436 @@
+/**
+ * API 服务层
+ * 封装与 Python FastAPI 后端的所有 HTTP 通信
+ * 支持流式 SSE 和普通 REST 请求
+ */
+import type {
+  LLMConfig, LLMConnectionTestResult, PPTParseResult,
+  SkillMeta, SkillMatch,
+  KnowhowRule, KnowledgeStats, IngestResult,
+  AgentMatchResult, AgentExecutionEvent,
+} from '@/types';
+
+/** 获取后端 API 基础 URL */
+function getBaseUrl(): string {
+  // Electron 环境：通过 preload 获取动态端口
+  // 开发环境：使用固定端口
+  const port = (window as any).__BACKEND_PORT__ || 8765;
+  return `http://127.0.0.1:${port}/api`;
+}
+
+// ===== 健康检查 =====
+
+export async function checkHealth(): Promise<boolean> {
+  try {
+    const res = await fetch(`${getBaseUrl()}/health`);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ===== 聊天接口 =====
+
+interface ChatMessage {
+  role: string;
+  content: string;
+}
+
+/**
+ * 流式聊天 - 返回 SSE 事件流
+ * @param messages 消息列表
+ * @param config LLM 配置
+ * @param onChunk 每收到一个 chunk 的回调
+ * @param onDone 流结束回调
+ * @param onError 错误回调
+ */
+export async function streamChat(
+  messages: ChatMessage[],
+  config: LLMConfig,
+  onChunk: (content: string) => void,
+  onDone: () => void,
+  onError: (error: string) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  try {
+    const res = await fetch(`${getBaseUrl()}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages,
+        model: config.model,
+        temperature: config.temperature,
+        max_tokens: config.maxTokens,
+        stream: true,
+        api_url: config.apiUrl,
+        api_key: config.apiKey,
+      }),
+      signal,
+    });
+
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ detail: '请求失败' }));
+      onError(error.detail || `HTTP ${res.status}`);
+      return;
+    }
+
+    const reader = res.body?.getReader();
+    if (!reader) {
+      onError('无法读取响应流');
+      return;
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // 保留未完成的行
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+
+        if (data === '[DONE]') {
+          onDone();
+          return;
+        }
+
+        try {
+          const parsed = JSON.parse(data);
+          const content = parsed.choices?.[0]?.delta?.content;
+          if (content) {
+            onChunk(content);
+          }
+        } catch {
+          // 忽略无法解析的行
+        }
+      }
+    }
+    onDone();
+  } catch (error: any) {
+    if (error.name === 'AbortError') {
+      onDone();
+    } else {
+      onError(error.message || '网络错误');
+    }
+  }
+}
+
+// ===== 连接测试 =====
+
+export async function testLLMConnection(
+  apiUrl: string,
+  apiKey: string,
+  model?: string
+): Promise<LLMConnectionTestResult> {
+  const res = await fetch(`${getBaseUrl()}/chat/test-connection`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_url: apiUrl, api_key: apiKey, model: model ?? '' }),
+  });
+  const data = await res.json().catch(() => ({ detail: '连接测试失败' }));
+  if (!res.ok) {
+    throw new Error(data.detail || data.message || '连接测试失败');
+  }
+  return data;
+}
+
+// ===== PPT 解析 =====
+
+export async function parsePPT(file: File): Promise<PPTParseResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${getBaseUrl()}/ppt/parse`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'PPT 解析失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+// ===== Phase 2: Skill 接口 =====
+
+/** 获取所有已加载的 Skill 列表 */
+export async function listSkills(): Promise<SkillMeta[]> {
+  const res = await fetch(`${getBaseUrl()}/skills`);
+  if (!res.ok) throw new Error('获取 Skill 列表失败');
+  const data = await res.json();
+  // 后端返回 { skills: [...], total: N }
+  return Array.isArray(data) ? data : (data.skills ?? []);
+}
+
+/** 获取单个 Skill 详情 */
+export async function getSkill(skillId: string): Promise<SkillMeta> {
+  const res = await fetch(`${getBaseUrl()}/skills/${encodeURIComponent(skillId)}`);
+  if (!res.ok) throw new Error('获取 Skill 详情失败');
+  return res.json();
+}
+
+/** 获取 Skill 原始 Markdown 内容 */
+export async function getSkillContent(skillId: string): Promise<{ id: string; content: string; source_path: string; is_builtin: boolean }> {
+  const res = await fetch(`${getBaseUrl()}/skills/${encodeURIComponent(skillId)}/content`);
+  if (!res.ok) throw new Error('获取 Skill 内容失败');
+  return res.json();
+}
+
+/** 保存新 Skill（后端返回 {id, name, message, source_path}） */
+export async function saveSkill(content: string, filename?: string): Promise<{ id: string; name: string; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/skills`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content, filename }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '保存 Skill 失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+/** 更新已有 Skill 内容 */
+export async function updateSkill(skillId: string, content: string): Promise<{ id: string; name: string; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/skills/${encodeURIComponent(skillId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '更新 Skill 失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+/** 匹配用户输入到最佳 Skill，返回命中列表（后端返回 {matches: [...], total: N}） */
+export async function matchSkill(query: string): Promise<SkillMatch[]> {
+  const res = await fetch(`${getBaseUrl()}/skills/match`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+  });
+  if (!res.ok) throw new Error('Skill 匹配失败');
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.matches ?? []);
+}
+
+// ===== Phase 2: Know-how 接口 =====
+
+/** 获取 Know-how 规则列表（后端返回 {rules: [...], total: N}） */
+export async function listKnowhowRules(category?: string, activeOnly?: boolean): Promise<KnowhowRule[]> {
+  const params = new URLSearchParams();
+  if (category) params.set('category', category);
+  if (typeof activeOnly === 'boolean') params.set('active_only', String(activeOnly));
+
+  const query = params.toString();
+  const res = await fetch(`${getBaseUrl()}/knowhow${query ? `?${query}` : ''}`);
+  if (!res.ok) throw new Error('获取规则列表失败');
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.rules ?? []);
+}
+
+/** 创建 Know-how 规则（后端返回 {id, message}） */
+export async function createKnowhowRule(
+  rule: Pick<KnowhowRule, 'category' | 'rule_text' | 'weight' | 'source'>
+): Promise<{ id: string; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/knowhow`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(rule),
+  });
+  if (!res.ok) throw new Error('创建规则失败');
+  return res.json();
+}
+
+/** 更新 Know-how 规则（后端返回完整规则对象） */
+export async function updateKnowhowRule(
+  ruleId: string,
+  updates: Partial<Pick<KnowhowRule, 'category' | 'rule_text' | 'weight' | 'is_active'>>
+): Promise<KnowhowRule> {
+  const res = await fetch(`${getBaseUrl()}/knowhow/${encodeURIComponent(ruleId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) throw new Error('更新规则失败');
+  return res.json();
+}
+
+/** 删除 Know-how 规则 */
+export async function deleteKnowhowRule(ruleId: string): Promise<void> {
+  const res = await fetch(`${getBaseUrl()}/knowhow/${encodeURIComponent(ruleId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('删除规则失败');
+}
+
+/** 获取 Know-how 统计信息（后端返回 {total_rules, active_rules, categories, total_hits}） */
+export async function getKnowhowStats(): Promise<{
+  total_rules: number;
+  active_rules: number;
+  categories: string[];
+  total_hits: number;
+}> {
+  const res = await fetch(`${getBaseUrl()}/knowhow/stats`);
+  if (!res.ok) throw new Error('获取规则统计失败');
+  return res.json();
+}
+
+// ===== Phase 2: 知识库接口 =====
+
+/** 上传文件到知识库（支持 PPT/PDF/DOCX/图片/文本等） */
+export async function uploadFile(file: File): Promise<IngestResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${getBaseUrl()}/knowledge/ingest`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '知识库导入失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+/** 提取文件文本内容（不写入知识库，用于附件模式） */
+export async function extractFileText(file: File): Promise<{ filename: string; file_type: string; text: string; char_count: number }> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${getBaseUrl()}/knowledge/extract-text`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '文件文本提取失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+/** 获取已导入文件列表 */
+export async function listKnowledgeImports(): Promise<{ imports: Array<{ id: string; file_name: string; file_size: number; slide_count: number; import_status: string; imported_at: string }>; total: number }> {
+  const res = await fetch(`${getBaseUrl()}/knowledge/imports`);
+  if (!res.ok) throw new Error('获取导入列表失败');
+  return res.json();
+}
+
+/** 删除知识库导入记录 */
+export async function deleteKnowledgeImport(importId: string): Promise<{ deleted: boolean; filename: string }> {
+  const res = await fetch(`${getBaseUrl()}/knowledge/imports/${encodeURIComponent(importId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '删除失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+/** 知识库混合检索 */
+export async function queryKnowledge(
+  query: string,
+  filters?: { category?: string; min_amount?: number; max_amount?: number }
+): Promise<{ results: Record<string, unknown>[]; analysis?: string }> {
+  const res = await fetch(`${getBaseUrl()}/knowledge/query`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, ...filters }),
+  });
+  if (!res.ok) throw new Error('知识库检索失败');
+  return res.json();
+}
+
+/** 获取知识库统计信息 */
+export async function getKnowledgeStats(): Promise<KnowledgeStats> {
+  const res = await fetch(`${getBaseUrl()}/knowledge/stats`);
+  if (!res.ok) throw new Error('获取知识库统计失败');
+  return res.json();
+}
+
+// ===== Phase 2: Agent 执行接口 =====
+
+/** Agent 模式 - 匹配 Skill */
+export async function agentMatch(
+  query: string
+): Promise<AgentMatchResult> {
+  const res = await fetch(`${getBaseUrl()}/agent/match`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+  });
+  if (!res.ok) throw new Error('Agent 匹配失败');
+  return res.json();
+}
+
+/** Agent 模式 - 执行 Skill（SSE 流式） */
+export async function agentExecute(
+  skillId: string,
+  params: Record<string, unknown>,
+  onEvent: (event: AgentExecutionEvent) => void,
+  onError: (error: string) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  try {
+    const res = await fetch(`${getBaseUrl()}/agent/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skill_id: skillId, params }),
+      signal,
+    });
+
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ detail: 'Agent 执行失败' }));
+      onError(error.detail || `HTTP ${res.status}`);
+      return;
+    }
+
+    const reader = res.body?.getReader();
+    if (!reader) {
+      onError('无法读取响应流');
+      return;
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (!data) continue;
+
+        try {
+          const event = JSON.parse(data) as AgentExecutionEvent;
+          onEvent(event);
+        } catch {
+          // 忽略无法解析的行
+        }
+      }
+    }
+  } catch (error: unknown) {
+    const err = error as Error;
+    if (err.name === 'AbortError') return;
+    onError(err.message || '网络错误');
+  }
+}
+
+/** 设置后端端口（由 Electron preload 调用） */
+export function setBackendPort(port: number): void {
+  (window as any).__BACKEND_PORT__ = port;
+}
+

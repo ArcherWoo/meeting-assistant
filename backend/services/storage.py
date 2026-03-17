@@ -1,0 +1,412 @@
+"""
+SQLite 存储服务 - 统一数据库连接与 Schema 管理
+遵循 PRD §13.1 数据库设计，所有表均在 ~/.meeting-assistant/data/main.db 中
+"""
+import os
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Union
+
+import aiosqlite
+
+# 数据根目录
+DATA_DIR = Path.home() / ".meeting-assistant" / "data"
+DB_PATH = DATA_DIR / "main.db"
+
+# ===== Schema 定义（PRD §13.1）=====
+_SCHEMA_SQL = """
+-- 工作区表
+CREATE TABLE IF NOT EXISTS workspaces (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    icon        TEXT DEFAULT '📁',
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    is_archived INTEGER DEFAULT 0
+);
+
+-- 对话表
+CREATE TABLE IF NOT EXISTS conversations (
+    id            TEXT PRIMARY KEY,
+    workspace_id  TEXT NOT NULL,
+    title         TEXT DEFAULT '新对话',
+    mode          TEXT NOT NULL DEFAULT 'copilot',
+    is_pinned     INTEGER DEFAULT 0,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_conv_workspace ON conversations(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at DESC);
+
+-- 消息表
+CREATE TABLE IF NOT EXISTS messages (
+    id              TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    role            TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    model           TEXT,
+    token_input     INTEGER DEFAULT 0,
+    token_output    INTEGER DEFAULT 0,
+    duration_ms     INTEGER DEFAULT 0,
+    metadata        TEXT DEFAULT '{}',
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_msg_created ON messages(created_at);
+
+-- 附件表
+CREATE TABLE IF NOT EXISTS attachments (
+    id          TEXT PRIMARY KEY,
+    message_id  TEXT NOT NULL,
+    file_name   TEXT NOT NULL,
+    file_path   TEXT NOT NULL,
+    file_size   INTEGER NOT NULL,
+    file_type   TEXT NOT NULL,
+    parsed      INTEGER DEFAULT 0,
+    parse_result TEXT DEFAULT '{}',
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+);
+
+-- 采购记录表（PPT 结构化提取）
+CREATE TABLE IF NOT EXISTS procurement_records (
+    id              TEXT PRIMARY KEY,
+    source_file     TEXT NOT NULL,
+    source_file_id  TEXT,
+    category        TEXT NOT NULL,
+    item_name       TEXT NOT NULL,
+    supplier        TEXT,
+    unit_price      REAL,
+    quantity        INTEGER,
+    total_price     REAL,
+    currency        TEXT DEFAULT 'CNY',
+    procurement_date TEXT,
+    contract_terms  TEXT DEFAULT '{}',
+    raw_text        TEXT,
+    extracted_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    confidence      REAL DEFAULT 0.0
+);
+CREATE INDEX IF NOT EXISTS idx_proc_category ON procurement_records(category);
+CREATE INDEX IF NOT EXISTS idx_proc_supplier ON procurement_records(supplier);
+CREATE INDEX IF NOT EXISTS idx_proc_date ON procurement_records(procurement_date);
+CREATE INDEX IF NOT EXISTS idx_proc_item ON procurement_records(item_name);
+
+-- Skill 使用记录表
+CREATE TABLE IF NOT EXISTS skill_usage_logs (
+    id              TEXT PRIMARY KEY,
+    skill_id        TEXT NOT NULL,
+    conversation_id TEXT,
+    input_summary   TEXT,
+    output_summary  TEXT,
+    success         INTEGER DEFAULT 1,
+    duration_ms     INTEGER DEFAULT 0,
+    user_rating     INTEGER,
+    user_feedback   TEXT,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_skill_usage ON skill_usage_logs(skill_id);
+
+-- Know-how 规则表
+CREATE TABLE IF NOT EXISTS knowhow_rules (
+    id          TEXT PRIMARY KEY,
+    category    TEXT NOT NULL,
+    rule_text   TEXT NOT NULL,
+    weight      INTEGER DEFAULT 2,
+    hit_count   INTEGER DEFAULT 0,
+    confidence  REAL DEFAULT 0.5,
+    source      TEXT DEFAULT 'user',
+    is_active   INTEGER DEFAULT 1,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_knowhow_category ON knowhow_rules(category);
+
+-- 用户设置表
+CREATE TABLE IF NOT EXISTS settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- PPT 导入记录表
+CREATE TABLE IF NOT EXISTS ppt_imports (
+    id                   TEXT PRIMARY KEY,
+    file_name            TEXT NOT NULL,
+    file_hash            TEXT UNIQUE NOT NULL,
+    file_size            INTEGER,
+    slide_count          INTEGER,
+    import_status        TEXT DEFAULT 'pending',
+    extracted_items_count INTEGER DEFAULT 0,
+    imported_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
+def gen_id() -> str:
+    """生成 UUID 字符串"""
+    return str(uuid.uuid4())
+
+
+class StorageService:
+    """SQLite 数据库服务 - 提供连接管理与 CRUD 操作"""
+
+    def __init__(self, db_path: Optional[Path] = None):
+        self._db_path = db_path or DB_PATH
+        self._db: Optional[aiosqlite.Connection] = None
+
+    async def initialize(self) -> None:
+        """初始化数据库：创建目录、连接、执行 Schema"""
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db = await aiosqlite.connect(str(self._db_path))
+        self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA journal_mode=WAL")  # 提升并发性能
+        await self._db.execute("PRAGMA foreign_keys=ON")
+        await self._db.executescript(_SCHEMA_SQL)
+        await self._db.commit()
+        # 确保默认工作区存在
+        await self._ensure_default_workspace()
+
+    async def close(self) -> None:
+        """关闭数据库连接"""
+        if self._db:
+            await self._db.close()
+            self._db = None
+
+    @property
+    def db(self) -> aiosqlite.Connection:
+        """获取数据库连接（需先调用 initialize）"""
+        if not self._db:
+            raise RuntimeError("StorageService 未初始化，请先调用 initialize()")
+        return self._db
+
+    # ===== Workspace CRUD =====
+
+    async def _ensure_default_workspace(self) -> None:
+        """确保存在默认工作区"""
+        row = await self._fetchone("SELECT id FROM workspaces LIMIT 1")
+        if not row:
+            await self.create_workspace("默认工作区", "系统自动创建的默认工作区", "📋")
+
+    async def create_workspace(self, name: str, description: str = "", icon: str = "📁") -> dict:
+        wid = gen_id()
+        now = datetime.utcnow().isoformat()
+        await self.db.execute(
+            "INSERT INTO workspaces (id, name, description, icon, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            (wid, name, description, icon, now, now),
+        )
+        await self.db.commit()
+        return {"id": wid, "name": name, "description": description, "icon": icon, "created_at": now, "updated_at": now}
+
+    async def list_workspaces(self) -> list[dict]:
+        return await self._fetchall("SELECT * FROM workspaces WHERE is_archived=0 ORDER BY updated_at DESC")
+
+    async def get_workspace(self, workspace_id: str) -> Optional[dict]:
+        return await self._fetchone("SELECT * FROM workspaces WHERE id=?", (workspace_id,))
+
+    # ===== Conversation CRUD =====
+
+    async def create_conversation(self, workspace_id: str, title: str = "新对话", mode: str = "copilot") -> dict:
+        cid = gen_id()
+        now = datetime.utcnow().isoformat()
+        await self.db.execute(
+            "INSERT INTO conversations (id, workspace_id, title, mode, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            (cid, workspace_id, title, mode, now, now),
+        )
+        await self.db.commit()
+        return {"id": cid, "workspace_id": workspace_id, "title": title, "mode": mode, "created_at": now, "updated_at": now}
+
+    async def list_conversations(self, workspace_id: str) -> list[dict]:
+        return await self._fetchall(
+            "SELECT * FROM conversations WHERE workspace_id=? ORDER BY is_pinned DESC, updated_at DESC",
+            (workspace_id,),
+        )
+
+    async def get_conversation(self, conversation_id: str) -> Optional[dict]:
+        return await self._fetchone("SELECT * FROM conversations WHERE id=?", (conversation_id,))
+
+    async def update_conversation(self, conversation_id: str, **kwargs: Union[str, int]) -> None:
+        """更新对话字段（title, is_pinned 等）"""
+        allowed = {"title", "is_pinned", "mode"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if not fields:
+            return
+        fields["updated_at"] = datetime.utcnow().isoformat()
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        await self.db.execute(
+            f"UPDATE conversations SET {set_clause} WHERE id=?",
+            (*fields.values(), conversation_id),
+        )
+        await self.db.commit()
+
+    async def delete_conversation(self, conversation_id: str) -> None:
+        await self.db.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
+        await self.db.commit()
+
+    # ===== Message CRUD =====
+
+    async def add_message(
+        self, conversation_id: str, role: str, content: str,
+        model: str = "", token_input: int = 0, token_output: int = 0,
+        duration_ms: int = 0, metadata: str = "{}",
+    ) -> dict:
+        mid = gen_id()
+        now = datetime.utcnow().isoformat()
+        await self.db.execute(
+            "INSERT INTO messages (id, conversation_id, role, content, model, token_input, token_output, duration_ms, metadata, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (mid, conversation_id, role, content, model, token_input, token_output, duration_ms, metadata, now),
+        )
+        # 同步更新对话的 updated_at
+        await self.db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conversation_id))
+        await self.db.commit()
+        return {"id": mid, "conversation_id": conversation_id, "role": role, "content": content, "created_at": now}
+
+    async def list_messages(self, conversation_id: str) -> list[dict]:
+        return await self._fetchall(
+            "SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at ASC",
+            (conversation_id,),
+        )
+
+    # ===== Procurement Records =====
+
+    async def add_procurement_record(self, record: dict) -> str:
+        rid = gen_id()
+        await self.db.execute(
+            "INSERT INTO procurement_records (id, source_file, source_file_id, category, item_name, supplier, "
+            "unit_price, quantity, total_price, currency, procurement_date, contract_terms, raw_text, confidence) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rid, record["source_file"], record.get("source_file_id"), record["category"],
+             record["item_name"], record.get("supplier"), record.get("unit_price"),
+             record.get("quantity"), record.get("total_price"), record.get("currency", "CNY"),
+             record.get("procurement_date"), record.get("contract_terms", "{}"),
+             record.get("raw_text"), record.get("confidence", 0.0)),
+        )
+        await self.db.commit()
+        return rid
+
+    async def search_procurement(
+        self, category: Optional[str] = None, supplier: Optional[str] = None,
+        item_name: Optional[str] = None, min_price: Optional[float] = None,
+        max_price: Optional[float] = None, limit: int = 50,
+    ) -> list[dict]:
+        """结构化查询采购记录（SQLite 精确检索）"""
+        conditions: list[str] = []
+        params: list[str | float] = []
+        if category:
+            conditions.append("category LIKE ?")
+            params.append(f"%{category}%")
+        if supplier:
+            conditions.append("supplier LIKE ?")
+            params.append(f"%{supplier}%")
+        if item_name:
+            conditions.append("item_name LIKE ?")
+            params.append(f"%{item_name}%")
+        if min_price is not None:
+            conditions.append("unit_price >= ?")
+            params.append(min_price)
+        if max_price is not None:
+            conditions.append("unit_price <= ?")
+            params.append(max_price)
+        where = " AND ".join(conditions) if conditions else "1=1"
+        return await self._fetchall(
+            f"SELECT * FROM procurement_records WHERE {where} ORDER BY extracted_at DESC LIMIT ?",
+            (*params, limit),
+        )
+
+    # ===== Know-how Rules =====
+
+    async def add_knowhow_rule(self, category: str, rule_text: str, weight: int = 2, source: str = "user") -> str:
+        rid = gen_id()
+        now = datetime.utcnow().isoformat()
+        await self.db.execute(
+            "INSERT INTO knowhow_rules (id, category, rule_text, weight, source, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+            (rid, category, rule_text, weight, source, now, now),
+        )
+        await self.db.commit()
+        return rid
+
+    async def list_knowhow_rules(self, category: Optional[str] = None, active_only: bool = True) -> list[dict]:
+        conditions = []
+        params: list[str] = []
+        if active_only:
+            conditions.append("is_active=1")
+        if category:
+            conditions.append("category=?")
+            params.append(category)
+        where = " AND ".join(conditions) if conditions else "1=1"
+        return await self._fetchall(f"SELECT * FROM knowhow_rules WHERE {where} ORDER BY weight DESC, hit_count DESC", params)
+
+    async def increment_knowhow_hit(self, rule_id: str) -> None:
+        await self.db.execute("UPDATE knowhow_rules SET hit_count = hit_count + 1 WHERE id=?", (rule_id,))
+        await self.db.commit()
+
+    # ===== Settings =====
+
+    async def get_setting(self, key: str, default: str = "") -> str:
+        row = await self._fetchone("SELECT value FROM settings WHERE key=?", (key,))
+        return row["value"] if row else default
+
+    async def set_setting(self, key: str, value: str) -> None:
+        await self.db.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=?, updated_at=?",
+            (key, value, datetime.utcnow().isoformat(), value, datetime.utcnow().isoformat()),
+        )
+        await self.db.commit()
+
+    # ===== PPT Imports =====
+
+    async def record_ppt_import(self, file_name: str, file_hash: str, file_size: int, slide_count: int) -> str:
+        """记录 PPT 导入，返回 import_id。若 hash 已存在则返回已有记录 ID"""
+        existing = await self._fetchone("SELECT id FROM ppt_imports WHERE file_hash=?", (file_hash,))
+        if existing:
+            return existing["id"]
+        iid = gen_id()
+        await self.db.execute(
+            "INSERT INTO ppt_imports (id, file_name, file_hash, file_size, slide_count) VALUES (?,?,?,?,?)",
+            (iid, file_name, file_hash, file_size, slide_count),
+        )
+        await self.db.commit()
+        return iid
+
+    async def update_ppt_import_status(self, import_id: str, status: str, extracted_count: int = 0) -> None:
+        await self.db.execute(
+            "UPDATE ppt_imports SET import_status=?, extracted_items_count=? WHERE id=?",
+            (status, extracted_count, import_id),
+        )
+        await self.db.commit()
+
+    # ===== Skill Usage Logs =====
+
+    async def log_skill_usage(
+        self, skill_id: str, conversation_id: str = "", input_summary: str = "",
+        output_summary: str = "", success: bool = True, duration_ms: int = 0,
+    ) -> str:
+        lid = gen_id()
+        await self.db.execute(
+            "INSERT INTO skill_usage_logs (id, skill_id, conversation_id, input_summary, output_summary, success, duration_ms) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (lid, skill_id, conversation_id, input_summary, output_summary, int(success), duration_ms),
+        )
+        await self.db.commit()
+        return lid
+
+    # ===== 内部辅助方法 =====
+
+    async def _fetchone(self, sql: str, params: tuple = ()) -> Optional[dict]:
+        cursor = await self.db.execute(sql, params)
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def _fetchall(self, sql: str, params: Union[tuple, list] = ()) -> list[dict]:
+        cursor = await self.db.execute(sql, params)
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+# 全局单例
+storage = StorageService()
+

@@ -1,0 +1,23 @@
+appId: com.meeting-assistant.app
+productName: Meeting Assistant
+directories:
+  buildResources: build
+  output: release
+files:
+  - dist
+  - dist-electron
+mac:
+  target:
+    - target: dmg
+      arch:
+        - universal
+  category: public.app-category.productivity
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+

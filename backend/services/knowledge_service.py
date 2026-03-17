@@ -1,0 +1,633 @@
+"""
+知识库服务 - 文件导入 Pipeline + LanceDB 向量管理
+遵循 PRD §12 知识库与 RAG 引擎：
+  文件上传 → 解析 → LLM 结构化提取 → SQLite 写入 → 文本分块 → Embedding → LanceDB 写入
+支持: PPT/PPTX, PDF, DOC/DOCX, 图片, 纯文本
+"""
+import json
+import logging
+import os
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional, Callable, Awaitable, Any
+
+from services.storage import storage, gen_id
+
+logger = logging.getLogger(__name__)
+
+# LanceDB 数据目录
+VECTORS_DIR = Path.home() / ".meeting-assistant" / "data" / "vectors"
+
+# LLM 结构化提取 Prompt（PRD §12.4）
+EXTRACTION_PROMPT = """请从以下 PPT 内容中提取所有采购相关的结构化信息。
+对每个采购项，提取以下字段并以 JSON 数组格式返回：
+[
+  {
+    "category": "采购品类（如办公设备、IT设备等）",
+    "item_name": "具体品名",
+    "supplier": "供应商名称",
+    "unit_price": 数字或null,
+    "quantity": 数字或null,
+    "total_price": 数字或null,
+    "currency": "CNY",
+    "delivery_days": 数字或null,
+    "payment_terms": "付款方式",
+    "procurement_date": "日期或null",
+    "raw_text": "原始文本片段（用于溯源）"
+  }
+]
+
+如果没有找到采购相关信息，返回空数组 []。
+只返回 JSON，不要其他文字。
+
+PPT 内容：
+{content}"""
+
+
+class KnowledgeService:
+    """知识库服务 - 管理文件导入和向量检索"""
+
+    # PPT 扩展名
+    PPT_EXTS = {".ppt", ".pptx"}
+    # 纯文本扩展名
+    TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml"}
+    # 图片扩展名
+    IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+
+    def __init__(self) -> None:
+        self._lance_db = None
+        self._chunks_table = None
+
+    async def initialize(self) -> None:
+        """初始化 LanceDB 连接"""
+        VECTORS_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            import lancedb
+            self._lance_db = lancedb.connect(str(VECTORS_DIR))
+            logger.info(f"LanceDB 已连接: {VECTORS_DIR}")
+        except ImportError:
+            logger.warning("lancedb 未安装，向量检索功能不可用")
+        except Exception as e:
+            logger.warning(f"LanceDB 初始化失败: {e}")
+
+    async def ingest_file(
+        self, file_content: bytes, filename: str,
+        llm_fn: Optional[object] = None,
+        embedding_fn: Optional[object] = None,
+    ) -> dict:
+        """
+        通用文件导入入口 - 根据文件类型分发到对应的处理器
+        """
+        ext = os.path.splitext(filename)[1].lower()
+
+        if ext in self.PPT_EXTS:
+            return await self.ingest_ppt(file_content, filename, llm_fn, embedding_fn)
+        elif ext in (".pdf",):
+            return await self._ingest_pdf(file_content, filename)
+        elif ext in (".doc", ".docx"):
+            return await self._ingest_docx(file_content, filename)
+        elif ext in self.IMAGE_EXTS:
+            return await self._ingest_image(file_content, filename)
+        elif ext in self.TEXT_EXTS:
+            return await self._ingest_text(file_content, filename)
+        elif ext in (".xls", ".xlsx"):
+            return await self._ingest_excel(file_content, filename)
+        else:
+            # 兜底：尝试当纯文本处理
+            return await self._ingest_text(file_content, filename)
+
+    async def ingest_ppt(
+        self, file_content: bytes, filename: str,
+        llm_fn: Optional[object] = None,
+        embedding_fn: Optional[object] = None,
+    ) -> dict:
+        """
+        PPT 导入知识库完整 Pipeline
+        返回: {"import_id": str, "status": str, "extracted_count": int, "chunks_count": int}
+        """
+        from services.ppt_parser import PPTParser
+        import hashlib
+
+        # 1. 文件去重检查
+        file_hash = hashlib.md5(file_content).hexdigest()
+        import_id = await storage.record_ppt_import(
+            file_name=filename, file_hash=file_hash,
+            file_size=len(file_content), slide_count=0,
+        )
+        # 检查是否已导入（record_ppt_import 返回已有 ID）
+        existing = await storage._fetchone(
+            "SELECT import_status, slide_count FROM ppt_imports WHERE id=?", (import_id,)
+        )
+        if existing and existing["import_status"] == "completed":
+            # 即使是重复导入，也重新解析以获取统计信息
+            try:
+                parser = PPTParser()
+                ppt_data = await parser.parse(file_content, filename)
+                dup_slide_count = len(ppt_data.get("slides", []))
+                dup_text_length = len(ppt_data.get("full_markdown", ""))
+                dup_table_count = ppt_data.get("extraction_stats", {}).get("total_tables", 0)
+                dup_image_count = ppt_data.get("extraction_stats", {}).get("total_images", 0)
+                dup_chunks = len(self._split_into_chunks(ppt_data, filename))
+            except Exception:
+                dup_slide_count = existing.get("slide_count", 0) or 0
+                dup_text_length = 0
+                dup_table_count = 0
+                dup_image_count = 0
+                dup_chunks = 0
+            return {
+                "import_id": import_id, "status": "duplicate",
+                "file_type": "ppt",
+                "slide_count": dup_slide_count, "text_length": dup_text_length,
+                "table_count": dup_table_count, "image_count": dup_image_count,
+                "extracted_count": 0, "chunks_count": dup_chunks,
+            }
+
+        await storage.update_ppt_import_status(import_id, "processing")
+
+        # 2. 解析 PPT
+        parser = PPTParser()
+        ppt_data = await parser.parse(file_content, filename)
+        slide_count = len(ppt_data.get("slides", []))
+        full_markdown = ppt_data.get("full_markdown", "")
+        text_length = len(full_markdown)
+        table_count = ppt_data.get("extraction_stats", {}).get("total_tables", 0)
+        image_count = ppt_data.get("extraction_stats", {}).get("total_images", 0)
+
+        # 更新 slide_count
+        await storage.db.execute(
+            "UPDATE ppt_imports SET slide_count=? WHERE id=?", (slide_count, import_id)
+        )
+        await storage.db.commit()
+
+        # 3. LLM 结构化提取（如果提供了 LLM 函数）
+        extracted_count = 0
+        if llm_fn and full_markdown:
+            extracted_count = await self._extract_procurement_fields(
+                full_markdown, filename, import_id, llm_fn
+            )
+
+        # 4. 文本分块 + Embedding + 写入 LanceDB
+        chunks_count = 0
+        if embedding_fn and self._lance_db:
+            chunks_count = await self._vectorize_chunks(
+                ppt_data, filename, import_id, embedding_fn
+            )
+
+        # 5. 即使没有 embedding，也统计文本分块数
+        text_chunks = self._split_into_chunks(ppt_data, filename)
+        chunks_parsed = len(text_chunks)
+
+        # 6. 更新导入状态
+        await storage.update_ppt_import_status(import_id, "completed", extracted_count)
+
+        logger.info(f"PPT 导入完成: {filename}, {slide_count} 页, {text_length} 字符, {chunks_parsed} 个文本块")
+
+        return {
+            "import_id": import_id,
+            "status": "completed",
+            "file_type": "ppt",
+            "slide_count": slide_count,
+            "text_length": text_length,
+            "table_count": table_count,
+            "image_count": image_count,
+            "extracted_count": extracted_count,
+            "chunks_count": chunks_count if chunks_count else chunks_parsed,
+        }
+
+    async def _extract_procurement_fields(
+        self, markdown: str, filename: str, import_id: str, llm_fn: object,
+    ) -> int:
+        """使用 LLM 从 PPT 内容中提取结构化采购字段"""
+        prompt = EXTRACTION_PROMPT.format(content=markdown[:8000])  # 限制长度
+        try:
+            # llm_fn 应返回 LLM 的文本响应
+            response_text = await llm_fn(prompt)  # type: ignore
+            # 解析 JSON
+            items = json.loads(response_text)
+            if not isinstance(items, list):
+                items = [items]
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"LLM 提取采购字段失败: {e}")
+            return 0
+
+        # 写入 SQLite
+        count = 0
+        for item in items:
+            try:
+                await storage.add_procurement_record({
+                    "source_file": filename,
+                    "source_file_id": import_id,
+                    "category": item.get("category", "未分类"),
+                    "item_name": item.get("item_name", "未知"),
+                    "supplier": item.get("supplier"),
+                    "unit_price": item.get("unit_price"),
+                    "quantity": item.get("quantity"),
+                    "total_price": item.get("total_price"),
+                    "currency": item.get("currency", "CNY"),
+                    "procurement_date": item.get("procurement_date"),
+                    "contract_terms": json.dumps(
+                        {"delivery_days": item.get("delivery_days"),
+                         "payment_terms": item.get("payment_terms")},
+                        ensure_ascii=False,
+                    ),
+                    "raw_text": item.get("raw_text", ""),
+                    "confidence": 0.8,
+                })
+                count += 1
+            except Exception as e:
+                logger.warning(f"写入采购记录失败: {e}")
+        return count
+
+    async def _vectorize_chunks(
+        self, ppt_data: dict, filename: str, import_id: str, embedding_fn: Any,
+    ) -> int:
+        """将 PPT 内容分块并向量化写入 LanceDB"""
+        chunks = self._split_into_chunks(ppt_data, filename)
+        if not chunks:
+            return 0
+
+        # 批量 Embedding（每批 32 条）
+        batch_size = 32
+        all_records: List[dict] = []
+        texts = [c["content"] for c in chunks]
+
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            try:
+                vectors = await embedding_fn(batch)
+                for j, vec in enumerate(vectors):
+                    chunk = chunks[i + j]
+                    all_records.append({
+                        "id": chunk["id"],
+                        "source_file": chunk["source_file"],
+                        "slide_index": chunk["slide_index"],
+                        "chunk_type": chunk["chunk_type"],
+                        "content": chunk["content"],
+                        "vector": vec,
+                        "metadata": json.dumps(
+                            {"import_id": import_id}, ensure_ascii=False
+                        ),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    })
+            except Exception as e:
+                logger.warning(f"Embedding 批次失败 (batch {i}): {e}")
+
+        if not all_records:
+            return 0
+
+        # 写入 LanceDB
+        try:
+            table_name = "doc_chunks"
+            if table_name in self._lance_db.table_names():
+                table = self._lance_db.open_table(table_name)
+                table.add(all_records)
+            else:
+                table = self._lance_db.create_table(table_name, data=all_records)
+            self._chunks_table = table
+            logger.info(f"写入 {len(all_records)} 条向量到 LanceDB")
+        except Exception as e:
+            logger.error(f"LanceDB 写入失败: {e}")
+            return 0
+
+        return len(all_records)
+
+    def _split_into_chunks(self, ppt_data: dict, filename: str) -> List[dict]:
+        """将 PPT 数据按页分块（每页文本/表格/备注各为一个 chunk）"""
+        chunks: List[dict] = []
+        for slide in ppt_data.get("slides", []):
+            slide_idx = slide.get("index", 0)
+
+            # 文本 chunk
+            text_parts = slide.get("texts", [])
+            if text_parts:
+                combined = "\n".join(text_parts)
+                if combined.strip():
+                    chunks.append({
+                        "id": gen_id(),
+                        "source_file": filename,
+                        "slide_index": slide_idx,
+                        "chunk_type": "text",
+                        "content": combined[:2000],  # 限制长度
+                    })
+
+            # 表格 chunk
+            for table in slide.get("tables", []):
+                md = table.get("markdown", "")
+                if md.strip():
+                    chunks.append({
+                        "id": gen_id(),
+                        "source_file": filename,
+                        "slide_index": slide_idx,
+                        "chunk_type": "table",
+                        "content": md[:2000],
+                    })
+
+            # 备注 chunk
+            notes = slide.get("notes", "")
+            if notes.strip():
+                chunks.append({
+                    "id": gen_id(),
+                    "source_file": filename,
+                    "slide_index": slide_idx,
+                    "chunk_type": "note",
+                    "content": notes[:2000],
+                })
+        return chunks
+
+    async def vector_search(
+        self, query_vector: List[float], limit: int = 5,
+    ) -> List[dict]:
+        """在 LanceDB 中进行向量语义检索"""
+        if not self._lance_db:
+            return []
+        try:
+            table_name = "doc_chunks"
+            if table_name not in self._lance_db.table_names():
+                return []
+            table = self._lance_db.open_table(table_name)
+            results = table.search(query_vector).limit(limit).to_list()
+            # 转换为标准 dict 列表
+            return [
+                {
+                    "id": r.get("id", ""),
+                    "content": r.get("content", ""),
+                    "source_file": r.get("source_file", ""),
+                    "slide_index": r.get("slide_index", 0),
+                    "chunk_type": r.get("chunk_type", ""),
+                    "score": r.get("_distance", 0.0),
+                }
+                for r in results
+            ]
+        except Exception as e:
+            logger.warning(f"向量检索失败: {e}")
+            return []
+
+    async def _ingest_generic(self, file_content: bytes, filename: str, text: str, file_type: str) -> dict:
+        """通用文件导入：记录到 ppt_imports 表 + 返回结果"""
+        import hashlib
+        file_hash = hashlib.md5(file_content).hexdigest()
+        import_id = await storage.record_ppt_import(
+            file_name=filename, file_hash=file_hash,
+            file_size=len(file_content), slide_count=0,
+        )
+        existing = await storage._fetchone(
+            "SELECT import_status FROM ppt_imports WHERE id=?", (import_id,)
+        )
+        if existing and existing["import_status"] == "completed":
+            return {
+                "import_id": import_id, "status": "duplicate",
+                "file_type": file_type, "extracted_count": 0, "chunks_count": 0,
+                "char_count": len(text),
+            }
+
+        await storage.update_ppt_import_status(import_id, "processing")
+        await storage.update_ppt_import_status(import_id, "completed", 0)
+
+        char_count = len(text)
+        logger.info(f"{file_type} 文件已导入: {filename} ({char_count} 字符)")
+        return {
+            "import_id": import_id,
+            "status": "completed",
+            "file_type": file_type,
+            "extracted_count": 0,
+            "chunks_count": 0,
+            "char_count": char_count,
+        }
+
+    async def _ingest_pdf(self, file_content: bytes, filename: str) -> dict:
+        """导入 PDF 文件"""
+        text = ""
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(stream=file_content, filetype="pdf")
+            text = "\n\n".join(page.get_text() for page in doc)
+            doc.close()
+        except ImportError:
+            # 没有 PyMuPDF，记录文件但无法提取文本
+            logger.warning("PyMuPDF (fitz) 未安装，PDF 文本提取不可用。仅记录文件。")
+            text = f"[PDF 文件: {filename}，需安装 PyMuPDF 以提取文本]"
+        except Exception as e:
+            logger.warning(f"PDF 解析失败: {e}")
+            text = f"[PDF 文件: {filename}，解析失败: {e}]"
+        return await self._ingest_generic(file_content, filename, text, "pdf")
+
+    async def _ingest_docx(self, file_content: bytes, filename: str) -> dict:
+        """导入 DOCX 文件"""
+        text = ""
+        try:
+            import docx
+            import io
+            doc = docx.Document(io.BytesIO(file_content))
+            text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        except ImportError:
+            logger.warning("python-docx 未安装，DOCX 文本提取不可用。仅记录文件。")
+            text = f"[DOCX 文件: {filename}，需安装 python-docx 以提取文本]"
+        except Exception as e:
+            logger.warning(f"DOCX 解析失败: {e}")
+            text = f"[DOCX 文件: {filename}，解析失败: {e}]"
+        return await self._ingest_generic(file_content, filename, text, "docx")
+
+    async def _ingest_image(self, file_content: bytes, filename: str) -> dict:
+        """导入图片文件（记录文件信息，OCR 待后续集成）"""
+        text = f"[图片文件: {filename}，大小: {len(file_content) / 1024:.1f}KB]"
+        return await self._ingest_generic(file_content, filename, text, "image")
+
+    async def _ingest_text(self, file_content: bytes, filename: str) -> dict:
+        """导入纯文本文件"""
+        # 尝试多种编码
+        text = ""
+        for encoding in ("utf-8", "gbk", "gb2312", "latin-1"):
+            try:
+                text = file_content.decode(encoding)
+                break
+            except (UnicodeDecodeError, LookupError):
+                continue
+        if not text:
+            text = file_content.decode("utf-8", errors="replace")
+        return await self._ingest_generic(file_content, filename, text, "text")
+
+    async def _ingest_excel(self, file_content: bytes, filename: str) -> dict:
+        """导入 Excel 文件"""
+        text = ""
+        try:
+            import openpyxl
+            import io
+            wb = openpyxl.load_workbook(io.BytesIO(file_content), read_only=True)
+            parts = []
+            for sheet in wb.sheetnames:
+                ws = wb[sheet]
+                parts.append(f"## Sheet: {sheet}")
+                for row in ws.iter_rows(values_only=True):
+                    cells = [str(c) if c is not None else "" for c in row]
+                    parts.append(" | ".join(cells))
+            wb.close()
+            text = "\n".join(parts)
+        except ImportError:
+            logger.warning("openpyxl 未安装，Excel 文本提取不可用。仅记录文件。")
+            text = f"[Excel 文件: {filename}，需安装 openpyxl 以提取文本]"
+        except Exception as e:
+            logger.warning(f"Excel 解析失败: {e}")
+            text = f"[Excel 文件: {filename}，解析失败: {e}]"
+        return await self._ingest_generic(file_content, filename, text, "excel")
+
+    async def extract_text(self, file_content: bytes, filename: str) -> dict:
+        """
+        只提取文件文本内容，不写入知识库。
+        用于 📎 附件模式：将文件内容作为上下文发送给 LLM。
+        """
+        ext = os.path.splitext(filename)[1].lower()
+
+        if ext in self.PPT_EXTS:
+            from services.ppt_parser import PPTParser
+            parser = PPTParser()
+            ppt_data = await parser.parse(file_content, filename)
+            text = ppt_data.get("full_markdown", "")
+        elif ext in (".pdf",):
+            text = ""
+            try:
+                import fitz
+                doc = fitz.open(stream=file_content, filetype="pdf")
+                text = "\n\n".join(page.get_text() for page in doc)
+                doc.close()
+            except Exception as e:
+                text = f"[PDF 解析失败: {e}]"
+        elif ext in (".doc", ".docx"):
+            text = ""
+            try:
+                import docx as docx_module
+                import io
+                doc = docx_module.Document(io.BytesIO(file_content))
+                text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            except Exception as e:
+                text = f"[DOCX 解析失败: {e}]"
+        elif ext in (".xls", ".xlsx"):
+            text = ""
+            try:
+                import openpyxl
+                import io
+                wb = openpyxl.load_workbook(io.BytesIO(file_content), read_only=True)
+                parts = []
+                for sheet in wb.sheetnames:
+                    ws = wb[sheet]
+                    parts.append(f"## Sheet: {sheet}")
+                    for row in ws.iter_rows(values_only=True):
+                        cells = [str(c) if c is not None else "" for c in row]
+                        parts.append(" | ".join(cells))
+                wb.close()
+                text = "\n".join(parts)
+            except Exception as e:
+                text = f"[Excel 解析失败: {e}]"
+        elif ext in self.IMAGE_EXTS:
+            text = f"[图片文件: {filename}，大小: {len(file_content) / 1024:.1f}KB，暂不支持文本提取]"
+        else:
+            # 纯文本
+            text = ""
+            for encoding in ("utf-8", "gbk", "gb2312", "latin-1"):
+                try:
+                    text = file_content.decode(encoding)
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    continue
+            if not text:
+                text = file_content.decode("utf-8", errors="replace")
+
+        return {
+            "filename": filename,
+            "file_type": ext.lstrip("."),
+            "text": text,
+            "char_count": len(text),
+        }
+
+    async def list_imports(self) -> list:
+        """列出所有已导入的文件"""
+        rows = await storage._fetchall(
+            "SELECT id, file_name, file_size, slide_count, import_status, imported_at "
+            "FROM ppt_imports ORDER BY imported_at DESC"
+        )
+        return rows
+
+    async def delete_import(self, import_id: str) -> dict:
+        """删除指定 import_id 的知识库记录"""
+        # 先查询文件名
+        row = await storage._fetchone(
+            "SELECT file_name FROM ppt_imports WHERE id=?", (import_id,)
+        )
+        if not row:
+            return {"deleted": False, "message": "记录不存在"}
+
+        filename = row["file_name"]
+
+        # 删除采购记录
+        await storage.db.execute(
+            "DELETE FROM procurement_records WHERE source_file_id=?", (import_id,)
+        )
+        # 删除导入记录
+        await storage.db.execute(
+            "DELETE FROM ppt_imports WHERE id=?", (import_id,)
+        )
+        await storage.db.commit()
+
+        # 删除 LanceDB 向量
+        deleted_vectors = 0
+        if self._lance_db and "doc_chunks" in (self._lance_db.table_names() or []):
+            try:
+                table = self._lance_db.open_table("doc_chunks")
+                table.delete(f"source_file = '{filename}'")
+                deleted_vectors = 1
+            except Exception as e:
+                logger.warning(f"删除向量失败: {e}")
+
+        logger.info(f"已删除知识库记录: {filename} (id={import_id})")
+        return {"deleted": True, "filename": filename, "deleted_vectors": deleted_vectors > 0}
+
+    async def get_stats(self) -> dict:
+        """获取知识库统计信息"""
+        # SQLite 统计
+        ppt_count = await storage._fetchone("SELECT COUNT(*) as cnt FROM ppt_imports")
+        record_count = await storage._fetchone("SELECT COUNT(*) as cnt FROM procurement_records")
+
+        # LanceDB 统计
+        vector_count = 0
+        if self._lance_db and "doc_chunks" in (self._lance_db.table_names() or []):
+            try:
+                table = self._lance_db.open_table("doc_chunks")
+                vector_count = table.count_rows()
+            except Exception:
+                pass
+
+        # 字段名与前端 KnowledgeStats 类型对齐
+        return {
+            "total_ppt_imports": ppt_count["cnt"] if ppt_count else 0,
+            "completed_imports": ppt_count["cnt"] if ppt_count else 0,
+            "total_procurement_records": record_count["cnt"] if record_count else 0,
+            "total_vector_chunks": vector_count,
+        }
+
+    async def delete_by_file(self, filename: str) -> dict:
+        """删除指定文件的所有知识库数据"""
+        # 删除 SQLite 记录
+        await storage.db.execute(
+            "DELETE FROM procurement_records WHERE source_file=?", (filename,)
+        )
+        await storage.db.execute(
+            "DELETE FROM ppt_imports WHERE file_name=?", (filename,)
+        )
+        await storage.db.commit()
+
+        # 删除 LanceDB 向量
+        deleted_vectors = 0
+        if self._lance_db and "doc_chunks" in (self._lance_db.table_names() or []):
+            try:
+                table = self._lance_db.open_table("doc_chunks")
+                table.delete(f"source_file = '{filename}'")
+                deleted_vectors = 1  # LanceDB 不返回删除数量
+            except Exception as e:
+                logger.warning(f"删除向量失败: {e}")
+
+        return {"deleted_records": True, "deleted_vectors": deleted_vectors > 0}
+
+
+# 全局单例
+knowledge_service = KnowledgeService()
+
