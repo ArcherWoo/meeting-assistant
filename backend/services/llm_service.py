@@ -2,12 +2,81 @@
 LLM 服务 - OpenAI 兼容协议
 支持流式 SSE 和非流式响应，兼容 OpenAI / DeepSeek / 通义千问 / Ollama 等
 """
+import json
 from typing import Any, AsyncGenerator
 import httpx
 
 
 class LLMService:
     """LLM 对话服务，通过 OpenAI 兼容协议与各类模型通信"""
+
+    @staticmethod
+    def extract_text_content(payload: Any) -> str:
+        """尽量从 OpenAI 兼容响应中提取首条文本内容。"""
+        if isinstance(payload, str):
+            return payload.strip()
+
+        if not isinstance(payload, dict):
+            return ""
+
+        def _flatten_content(content: Any) -> str:
+            if isinstance(content, str):
+                return content.strip()
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if isinstance(item, str):
+                        text = item.strip()
+                        if text:
+                            parts.append(text)
+                    elif isinstance(item, dict):
+                        text = item.get("text") or item.get("content") or item.get("value")
+                        if isinstance(text, str) and text.strip():
+                            parts.append(text.strip())
+                return "".join(parts).strip()
+            return ""
+
+        choices = payload.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0] if isinstance(choices[0], dict) else {}
+            if isinstance(first, dict):
+                message = first.get("message")
+                if isinstance(message, dict):
+                    text = _flatten_content(message.get("content"))
+                    if text:
+                        return text
+
+                delta = first.get("delta")
+                if isinstance(delta, dict):
+                    text = _flatten_content(delta.get("content"))
+                    if text:
+                        return text
+
+                text = _flatten_content(first.get("text"))
+                if text:
+                    return text
+
+        text = _flatten_content(payload.get("output_text"))
+        if text:
+            return text
+
+        output = payload.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get("content")
+                text = _flatten_content(content)
+                if text:
+                    return text
+
+        message = payload.get("message")
+        if isinstance(message, dict):
+            text = _flatten_content(message.get("content"))
+            if text:
+                return text
+
+        return ""
 
     @staticmethod
     def _build_headers(api_key: str, *, include_content_type: bool = True) -> dict[str, str]:
@@ -137,16 +206,22 @@ class LLMService:
             "stream": True,
         }
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream("POST", url, json=payload, headers=headers) as response:
-                self._raise_for_status_with_detail(response)
-                async for line in response.aiter_lines():
-                    if line.startswith("data: "):
-                        data = line[6:]
-                        if data.strip() == "[DONE]":
-                            yield "data: [DONE]\n\n"
-                            break
-                        yield f"data: {data}\n\n"
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                async with client.stream("POST", url, json=payload, headers=headers) as response:
+                    self._raise_for_status_with_detail(response)
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: "):
+                            data = line[6:]
+                            if data.strip() == "[DONE]":
+                                yield "data: [DONE]\n\n"
+                                return
+                            yield f"data: {data}\n\n"
+        except Exception as exc:
+            # 流中途出现异常时，通过 SSE 内嵌错误事件通知前端，
+            # 避免前端把连接断开误判为正常结束（onDone）
+            error_payload = json.dumps({"stream_error": str(exc)}, ensure_ascii=False)
+            yield f"data: {error_payload}\n\n"
 
     async def chat(
         self,

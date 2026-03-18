@@ -86,3 +86,46 @@ async def get_stats() -> dict:
     """获取 Know-how 统计信息"""
     return await knowhow_service.get_stats()
 
+
+# ===== 分类管理接口 =====
+
+class CategoryRenameRequest(BaseModel):
+    """重命名分类请求"""
+    new_name: str
+
+
+class CategoryDeleteRequest(BaseModel):
+    """删除分类请求"""
+    delete_rules: bool = True  # True=同时删除该分类下的所有规则；False=仅清空规则的分类名
+
+
+@router.get("/knowhow/categories")
+async def list_categories() -> dict:
+    """获取所有分类及其规则数量"""
+    categories = await knowhow_service.list_categories()
+    return {"categories": categories, "total": len(categories)}
+
+
+@router.put("/knowhow/categories/{name}")
+async def rename_category(name: str, body: CategoryRenameRequest) -> dict:
+    """重命名分类（批量更新该分类下所有规则的 category 字段）"""
+    new_name = body.new_name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="新分类名不能为空")
+    if new_name == name:
+        raise HTTPException(status_code=400, detail="新旧分类名相同，无需更改")
+    affected = await knowhow_service.rename_category(name, new_name)
+    return {"message": f"分类已重命名：{name} → {new_name}", "affected_rules": affected}
+
+
+@router.delete("/knowhow/categories/{name}")
+async def delete_category(name: str, delete_rules: bool = True) -> dict:
+    """
+    删除分类。
+    delete_rules=true（默认）：连同该分类下所有规则一起删除。
+    delete_rules=false：仅将规则的分类名清空，保留规则本身。
+    """
+    affected = await knowhow_service.delete_category(name, delete_rules=delete_rules)
+    action = "已删除" if delete_rules else "已清空分类名"
+    return {"message": f"分类「{name}」{action}，影响 {affected} 条规则", "affected_rules": affected}
+

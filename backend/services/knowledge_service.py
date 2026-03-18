@@ -396,36 +396,44 @@ class KnowledgeService:
         }
 
     async def _ingest_pdf(self, file_content: bytes, filename: str) -> dict:
-        """导入 PDF 文件"""
-        text = ""
-        try:
-            import fitz  # PyMuPDF
-            doc = fitz.open(stream=file_content, filetype="pdf")
-            text = "\n\n".join(page.get_text() for page in doc)
-            doc.close()
-        except ImportError:
-            # 没有 PyMuPDF，记录文件但无法提取文本
-            logger.warning("PyMuPDF (fitz) 未安装，PDF 文本提取不可用。仅记录文件。")
-            text = f"[PDF 文件: {filename}，需安装 PyMuPDF 以提取文本]"
-        except Exception as e:
-            logger.warning(f"PDF 解析失败: {e}")
-            text = f"[PDF 文件: {filename}，解析失败: {e}]"
+        """导入 PDF 文件（同步解析放入线程池）"""
+        import asyncio
+
+        def _parse() -> str:
+            try:
+                import fitz  # PyMuPDF
+                doc = fitz.open(stream=file_content, filetype="pdf")
+                result = "\n\n".join(page.get_text() for page in doc)
+                doc.close()
+                return result
+            except ImportError:
+                logger.warning("PyMuPDF (fitz) 未安装，PDF 文本提取不可用。仅记录文件。")
+                return f"[PDF 文件: {filename}，需安装 PyMuPDF 以提取文本]"
+            except Exception as e:
+                logger.warning(f"PDF 解析失败: {e}")
+                return f"[PDF 文件: {filename}，解析失败: {e}]"
+
+        text = await asyncio.to_thread(_parse)
         return await self._ingest_generic(file_content, filename, text, "pdf")
 
     async def _ingest_docx(self, file_content: bytes, filename: str) -> dict:
-        """导入 DOCX 文件"""
-        text = ""
-        try:
-            import docx
-            import io
-            doc = docx.Document(io.BytesIO(file_content))
-            text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
-        except ImportError:
-            logger.warning("python-docx 未安装，DOCX 文本提取不可用。仅记录文件。")
-            text = f"[DOCX 文件: {filename}，需安装 python-docx 以提取文本]"
-        except Exception as e:
-            logger.warning(f"DOCX 解析失败: {e}")
-            text = f"[DOCX 文件: {filename}，解析失败: {e}]"
+        """导入 DOCX 文件（同步解析放入线程池）"""
+        import asyncio
+
+        def _parse() -> str:
+            try:
+                import docx
+                import io
+                doc = docx.Document(io.BytesIO(file_content))
+                return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            except ImportError:
+                logger.warning("python-docx 未安装，DOCX 文本提取不可用。仅记录文件。")
+                return f"[DOCX 文件: {filename}，需安装 python-docx 以提取文本]"
+            except Exception as e:
+                logger.warning(f"DOCX 解析失败: {e}")
+                return f"[DOCX 文件: {filename}，解析失败: {e}]"
+
+        text = await asyncio.to_thread(_parse)
         return await self._ingest_generic(file_content, filename, text, "docx")
 
     async def _ingest_image(self, file_content: bytes, filename: str) -> dict:
@@ -448,61 +456,10 @@ class KnowledgeService:
         return await self._ingest_generic(file_content, filename, text, "text")
 
     async def _ingest_excel(self, file_content: bytes, filename: str) -> dict:
-        """导入 Excel 文件"""
-        text = ""
-        try:
-            import openpyxl
-            import io
-            wb = openpyxl.load_workbook(io.BytesIO(file_content), read_only=True)
-            parts = []
-            for sheet in wb.sheetnames:
-                ws = wb[sheet]
-                parts.append(f"## Sheet: {sheet}")
-                for row in ws.iter_rows(values_only=True):
-                    cells = [str(c) if c is not None else "" for c in row]
-                    parts.append(" | ".join(cells))
-            wb.close()
-            text = "\n".join(parts)
-        except ImportError:
-            logger.warning("openpyxl 未安装，Excel 文本提取不可用。仅记录文件。")
-            text = f"[Excel 文件: {filename}，需安装 openpyxl 以提取文本]"
-        except Exception as e:
-            logger.warning(f"Excel 解析失败: {e}")
-            text = f"[Excel 文件: {filename}，解析失败: {e}]"
-        return await self._ingest_generic(file_content, filename, text, "excel")
+        """导入 Excel 文件（同步解析放入线程池）"""
+        import asyncio
 
-    async def extract_text(self, file_content: bytes, filename: str) -> dict:
-        """
-        只提取文件文本内容，不写入知识库。
-        用于 📎 附件模式：将文件内容作为上下文发送给 LLM。
-        """
-        ext = os.path.splitext(filename)[1].lower()
-
-        if ext in self.PPT_EXTS:
-            from services.ppt_parser import PPTParser
-            parser = PPTParser()
-            ppt_data = await parser.parse(file_content, filename)
-            text = ppt_data.get("full_markdown", "")
-        elif ext in (".pdf",):
-            text = ""
-            try:
-                import fitz
-                doc = fitz.open(stream=file_content, filetype="pdf")
-                text = "\n\n".join(page.get_text() for page in doc)
-                doc.close()
-            except Exception as e:
-                text = f"[PDF 解析失败: {e}]"
-        elif ext in (".doc", ".docx"):
-            text = ""
-            try:
-                import docx as docx_module
-                import io
-                doc = docx_module.Document(io.BytesIO(file_content))
-                text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
-            except Exception as e:
-                text = f"[DOCX 解析失败: {e}]"
-        elif ext in (".xls", ".xlsx"):
-            text = ""
+        def _parse() -> str:
             try:
                 import openpyxl
                 import io
@@ -515,13 +472,74 @@ class KnowledgeService:
                         cells = [str(c) if c is not None else "" for c in row]
                         parts.append(" | ".join(cells))
                 wb.close()
-                text = "\n".join(parts)
+                return "\n".join(parts)
+            except ImportError:
+                logger.warning("openpyxl 未安装，Excel 文本提取不可用。仅记录文件。")
+                return f"[Excel 文件: {filename}，需安装 openpyxl 以提取文本]"
             except Exception as e:
-                text = f"[Excel 解析失败: {e}]"
+                logger.warning(f"Excel 解析失败: {e}")
+                return f"[Excel 文件: {filename}，解析失败: {e}]"
+
+        text = await asyncio.to_thread(_parse)
+        return await self._ingest_generic(file_content, filename, text, "excel")
+
+    async def extract_text(self, file_content: bytes, filename: str) -> dict:
+        """
+        只提取文件文本内容，不写入知识库。
+        用于 📎 附件模式：将文件内容作为上下文发送给 LLM。
+        同步文件解析操作通过 asyncio.to_thread 放入线程池，避免阻塞事件循环。
+        """
+        import asyncio
+        ext = os.path.splitext(filename)[1].lower()
+
+        if ext in self.PPT_EXTS:
+            from services.ppt_parser import PPTParser
+            parser = PPTParser()
+            ppt_data = await parser.parse(file_content, filename)
+            text = ppt_data.get("full_markdown", "")
+        elif ext in (".pdf",):
+            def _parse_pdf() -> str:
+                try:
+                    import fitz
+                    doc = fitz.open(stream=file_content, filetype="pdf")
+                    result = "\n\n".join(page.get_text() for page in doc)
+                    doc.close()
+                    return result
+                except Exception as e:
+                    return f"[PDF 解析失败: {e}]"
+            text = await asyncio.to_thread(_parse_pdf)
+        elif ext in (".doc", ".docx"):
+            def _parse_docx() -> str:
+                try:
+                    import docx as docx_module
+                    import io
+                    doc = docx_module.Document(io.BytesIO(file_content))
+                    return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+                except Exception as e:
+                    return f"[DOCX 解析失败: {e}]"
+            text = await asyncio.to_thread(_parse_docx)
+        elif ext in (".xls", ".xlsx"):
+            def _parse_excel() -> str:
+                try:
+                    import openpyxl
+                    import io
+                    wb = openpyxl.load_workbook(io.BytesIO(file_content), read_only=True)
+                    parts = []
+                    for sheet in wb.sheetnames:
+                        ws = wb[sheet]
+                        parts.append(f"## Sheet: {sheet}")
+                        for row in ws.iter_rows(values_only=True):
+                            cells = [str(c) if c is not None else "" for c in row]
+                            parts.append(" | ".join(cells))
+                    wb.close()
+                    return "\n".join(parts)
+                except Exception as e:
+                    return f"[Excel 解析失败: {e}]"
+            text = await asyncio.to_thread(_parse_excel)
         elif ext in self.IMAGE_EXTS:
             text = f"[图片文件: {filename}，大小: {len(file_content) / 1024:.1f}KB，暂不支持文本提取]"
         else:
-            # 纯文本
+            # 纯文本（轻量操作，无需线程池）
             text = ""
             for encoding in ("utf-8", "gbk", "gb2312", "latin-1"):
                 try:

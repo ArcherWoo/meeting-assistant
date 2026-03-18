@@ -1,13 +1,28 @@
 /**
  * 设置面板 Modal
  * 配置多组 LLM 连接参数，并选择当前使用的模型
+ * 支持 System Prompt 自定义（Copilot / Agent / Knowledge 模式）
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import clsx from 'clsx';
 import { useAppStore } from '@/stores/appStore';
-import { testLLMConnection } from '@/services/api';
+import {
+  testLLMConnection, getSystemPrompt, updateSystemPrompt, resetSystemPrompt,
+  getEmbeddingConfig, updateEmbeddingConfig, resetEmbeddingConfig, testEmbeddingConnection,
+} from '@/services/api';
 import type { LLMConnectionTestResult, LLMProfile } from '@/types';
+
+type SettingsTab = 'llm' | 'prompts' | 'embedding';
+
+/** 三种对话模式的 System Prompt 状态 */
+interface PromptState {
+  value: string;
+  isCustom: boolean;
+  saving: boolean;
+  saved: boolean;
+  error: string;
+}
 
 function createDraftProfile(index: number): LLMProfile {
   return {
@@ -21,6 +36,39 @@ function createDraftProfile(index: number): LLMProfile {
     stream: true,
   };
 }
+
+// 模式列表与前端 AppMode 保持一致：copilot / builder / agent
+// placeholder 为各模式内置默认 System Prompt（后端无自定义时使用的值）
+const PROMPT_MODES = [
+  {
+    key: 'copilot',
+    label: 'Copilot 模式',
+    icon: '💬',
+    placeholder:
+      '你是一个专业的会议助手。请根据用户的问题，提供清晰、准确、有帮助的回答。' +
+      '回答时请保持简洁，优先给出结论，再补充细节。',
+  },
+  {
+    key: 'builder',
+    label: 'Skill Builder 模式',
+    icon: '🔧',
+    placeholder:
+      '你是一个 Skill Builder 助手，专门帮助用户创建和优化工作流技能（Skill）。' +
+      '请引导用户描述他们的工作场景和重复性任务，帮助他们将这些任务抽象为可执行的 Skill 模板。' +
+      '生成的 Skill 应使用标准 Markdown 格式，包含描述、触发条件、执行步骤和输出格式。',
+  },
+  {
+    key: 'agent',
+    label: 'Agent 模式',
+    icon: '🤖',
+    placeholder:
+      '你是一个智能 Agent，能够调用各种工具和技能完成复杂任务。' +
+      '请分析用户的需求，选择合适的工具，并逐步执行任务。' +
+      '执行过程中保持透明，让用户了解每一步的进展。',
+  },
+] as const;
+
+const defaultPromptState = (): PromptState => ({ value: '', isCustom: false, saving: false, saved: false, error: '' });
 
 export default function SettingsModal() {
   const {
@@ -36,6 +84,7 @@ export default function SettingsModal() {
     () => llmConfigs.find((config) => config.id === activeLLMConfigId) ?? llmConfigs[0],
     [activeLLMConfigId, llmConfigs]
   );
+  const [activeTab, setActiveTab] = useState<SettingsTab>('llm');
   const [selectedId, setSelectedId] = useState(activeProfile?.id ?? '');
   const [draft, setDraft] = useState<LLMProfile>(activeProfile ?? createDraftProfile(1));
   const [isNewDraft, setIsNewDraft] = useState(false);
@@ -48,6 +97,21 @@ export default function SettingsModal() {
     [connectionResult?.available_models, draft.availableModels]
   );
 
+  // System Prompt 状态（键与前端 AppMode 保持一致：copilot / builder / agent）
+  const [prompts, setPrompts] = useState<Record<string, PromptState>>({
+    copilot: defaultPromptState(),
+    builder: defaultPromptState(),
+    agent: defaultPromptState(),
+  });
+
+  // Embedding 配置状态
+  const [embCfg, setEmbCfg] = useState({ api_url: '', api_key: '', model: 'text-embedding-3-small' });
+  const [embSaving, setEmbSaving] = useState(false);
+  const [embSaved, setEmbSaved] = useState(false);
+  const [embTesting, setEmbTesting] = useState(false);
+  const [embTestResult, setEmbTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [embError, setEmbError] = useState('');
+
   const updateDraft = (updates: Partial<LLMProfile>, options?: { preserveTestFeedback?: boolean }) => {
     setDraft((current) => ({ ...current, ...updates }));
     setSaved(false);
@@ -56,6 +120,23 @@ export default function SettingsModal() {
       setConnectionError('');
     }
   };
+
+  /** 加载所有 System Prompt */
+  const loadPrompts = useCallback(async () => {
+    const results = await Promise.allSettled(
+      PROMPT_MODES.map((m) => getSystemPrompt(m.key))
+    );
+    const next: Record<string, PromptState> = {};
+    PROMPT_MODES.forEach((m, i) => {
+      const r = results[i];
+      if (r.status === 'fulfilled') {
+        next[m.key] = { value: r.value.prompt, isCustom: r.value.is_custom, saving: false, saved: false, error: '' };
+      } else {
+        next[m.key] = defaultPromptState();
+      }
+    });
+    setPrompts(next);
+  }, []);
 
   useEffect(() => {
     if (!settingsOpen || !activeProfile) return;
@@ -67,6 +148,22 @@ export default function SettingsModal() {
     setConnectionResult(null);
     setConnectionError('');
   }, [activeProfile, settingsOpen]);
+
+  const loadEmbeddingConfig = useCallback(async () => {
+    try {
+      const cfg = await getEmbeddingConfig();
+      setEmbCfg({ api_url: cfg.api_url, api_key: cfg.api_key, model: cfg.model || 'text-embedding-3-small' });
+    } catch {
+      // 静默失败，保留表单默认值
+    }
+  }, []);
+
+  useEffect(() => {
+    if (settingsOpen) {
+      loadPrompts();
+      loadEmbeddingConfig();
+    }
+  }, [settingsOpen, loadPrompts, loadEmbeddingConfig]);
 
   if (!settingsOpen) return null;
 
@@ -159,6 +256,31 @@ export default function SettingsModal() {
     }
   };
 
+  /** 保存指定模式的 System Prompt */
+  const handleSavePrompt = async (mode: string) => {
+    setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saving: true, error: '', saved: false } }));
+    try {
+      const result = await updateSystemPrompt(mode, prompts[mode].value);
+      setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saving: false, saved: true, isCustom: true, value: result.prompt } }));
+      setTimeout(() => setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saved: false } })), 2000);
+    } catch (err: any) {
+      setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saving: false, error: err.message || '保存失败' } }));
+    }
+  };
+
+  /** 重置指定模式的 System Prompt 为默认值 */
+  const handleResetPrompt = async (mode: string) => {
+    if (!confirm('确定要重置为默认 System Prompt 吗？')) return;
+    setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saving: true, error: '', saved: false } }));
+    try {
+      const result = await resetSystemPrompt(mode);
+      setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saving: false, saved: true, isCustom: false, value: result.prompt } }));
+      setTimeout(() => setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saved: false } })), 2000);
+    } catch (err: any) {
+      setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saving: false, error: err.message || '重置失败' } }));
+    }
+  };
+
   const handleClose = () => {
     if (activeProfile) {
       setSelectedId(activeProfile.id);
@@ -181,9 +303,47 @@ export default function SettingsModal() {
       <div className="w-[860px] max-w-[96vw] max-h-[90vh] overflow-hidden bg-white dark:bg-dark-card rounded-xl shadow-2xl flex flex-col">
         {/* 标题栏 */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-surface-divider dark:border-dark-divider">
-          <h2 className="text-base font-semibold flex items-center gap-2">
-            <span>⚙️</span> 模型设置
-          </h2>
+          <div className="flex items-center gap-4">
+            <h2 className="text-base font-semibold flex items-center gap-2">
+              <span>⚙️</span> 设置
+            </h2>
+            {/* Tab 切换 */}
+            <div className="flex items-center gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-0.5">
+              <button
+                onClick={() => setActiveTab('llm')}
+                className={clsx(
+                  'px-3 py-1 text-xs rounded-md transition-colors',
+                  activeTab === 'llm'
+                    ? 'bg-white dark:bg-dark-card text-text-primary dark:text-text-dark-primary shadow-sm font-medium'
+                    : 'text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary'
+                )}
+              >
+                🧠 模型配置
+              </button>
+              <button
+                onClick={() => setActiveTab('prompts')}
+                className={clsx(
+                  'px-3 py-1 text-xs rounded-md transition-colors',
+                  activeTab === 'prompts'
+                    ? 'bg-white dark:bg-dark-card text-text-primary dark:text-text-dark-primary shadow-sm font-medium'
+                    : 'text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary'
+                )}
+              >
+                📝 System Prompts
+              </button>
+              <button
+                onClick={() => setActiveTab('embedding')}
+                className={clsx(
+                  'px-3 py-1 text-xs rounded-md transition-colors',
+                  activeTab === 'embedding'
+                    ? 'bg-white dark:bg-dark-card text-text-primary dark:text-text-dark-primary shadow-sm font-medium'
+                    : 'text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary'
+                )}
+              >
+                🔍 Embedding
+              </button>
+            </div>
+          </div>
           <button
             onClick={handleClose}
             className="text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary text-xl leading-none"
@@ -192,8 +352,165 @@ export default function SettingsModal() {
           </button>
         </div>
 
-        {/* 内容区 */}
-        <div className="flex flex-1 min-h-0">
+        {/* System Prompts Tab */}
+        {activeTab === 'prompts' && (
+          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+            <p className="text-xs text-text-secondary">
+              为每种对话模式配置专属的 System Prompt。留空则使用内置默认提示词。
+            </p>
+            {PROMPT_MODES.map(({ key, label, icon, placeholder }) => {
+              const ps = prompts[key];
+              return (
+                <div key={key} className="space-y-2 rounded-xl border border-surface-divider dark:border-dark-divider p-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span>{icon}</span>
+                      <span className="text-sm font-medium">{label}</span>
+                      {ps.isCustom && (
+                        <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-primary/10 text-primary">已自定义</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {ps.isCustom && (
+                        <button
+                          onClick={() => handleResetPrompt(key)}
+                          disabled={ps.saving}
+                          className="text-xs text-text-secondary hover:text-red-500 transition-colors disabled:opacity-50"
+                        >
+                          重置默认
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleSavePrompt(key)}
+                        disabled={ps.saving}
+                        className="px-3 py-1 text-xs bg-primary text-white rounded-md hover:bg-primary/90 disabled:opacity-50 transition-colors min-w-[60px]"
+                      >
+                        {ps.saving ? '保存中...' : ps.saved ? '✅ 已保存' : '保存'}
+                      </button>
+                    </div>
+                  </div>
+                  <textarea
+                    value={ps.value}
+                    onChange={(e) => setPrompts((p) => ({ ...p, [key]: { ...p[key], value: e.target.value } }))}
+                    rows={5}
+                    placeholder={placeholder}
+                    className="w-full text-sm px-3 py-2 rounded-lg border border-surface-divider dark:border-dark-divider bg-surface-card dark:bg-dark-sidebar resize-y focus:outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                  {ps.error && <p className="text-xs text-red-500">{ps.error}</p>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Embedding 配置 Tab */}
+        {activeTab === 'embedding' && (
+          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+            <p className="text-xs text-text-secondary">
+              配置独立的 Embedding API，用于知识库语义检索。留空则自动使用当前 LLM 的 API 凭证（部分 LLM 提供商可能不支持 /embeddings 接口）。
+            </p>
+
+            <div className="space-y-4 rounded-xl border border-surface-divider dark:border-dark-divider p-4">
+              <SectionTitle>Embedding API 配置</SectionTitle>
+
+              <Field label="API Base URL">
+                <input
+                  className={inputCls}
+                  placeholder="https://api.openai.com/v1"
+                  value={embCfg.api_url}
+                  onChange={(e) => { setEmbCfg((c) => ({ ...c, api_url: e.target.value })); setEmbTestResult(null); setEmbError(''); }}
+                />
+              </Field>
+
+              <Field label="API Key">
+                <input
+                  type="password"
+                  className={inputCls}
+                  placeholder="sk-..."
+                  value={embCfg.api_key}
+                  onChange={(e) => { setEmbCfg((c) => ({ ...c, api_key: e.target.value })); setEmbTestResult(null); setEmbError(''); }}
+                />
+              </Field>
+
+              <Field label="Embedding 模型">
+                <input
+                  className={inputCls}
+                  placeholder="text-embedding-3-small"
+                  value={embCfg.model}
+                  onChange={(e) => { setEmbCfg((c) => ({ ...c, model: e.target.value })); setEmbTestResult(null); setEmbError(''); }}
+                />
+              </Field>
+
+              {embTestResult && (
+                <p className={clsx('text-xs', embTestResult.success ? 'text-green-500' : 'text-red-500')}>
+                  {embTestResult.success ? '✅' : '❌'} {embTestResult.message}
+                </p>
+              )}
+              {embError && <p className="text-xs text-red-500">{embError}</p>}
+
+              <div className="flex items-center justify-between gap-3 pt-1">
+                <button
+                  onClick={async () => {
+                    if (!confirm('确定要清除独立 Embedding 配置吗？清除后将回退到使用 LLM API 凭证。')) return;
+                    try {
+                      await resetEmbeddingConfig();
+                      setEmbCfg({ api_url: '', api_key: '', model: 'text-embedding-3-small' });
+                      setEmbTestResult(null);
+                      setEmbError('');
+                    } catch (e: any) {
+                      setEmbError(e.message || '清除失败');
+                    }
+                  }}
+                  className="text-xs text-text-secondary hover:text-red-500 transition-colors"
+                >
+                  清除配置
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    disabled={embTesting || !embCfg.api_url || !embCfg.api_key}
+                    onClick={async () => {
+                      setEmbTesting(true); setEmbTestResult(null); setEmbError('');
+                      try {
+                        const result = await testEmbeddingConnection(embCfg);
+                        setEmbTestResult(result);
+                      } catch (e: any) {
+                        setEmbError(e.message || '测试失败');
+                      } finally {
+                        setEmbTesting(false);
+                      }
+                    }}
+                    className="px-3 py-1 text-xs border border-surface-divider dark:border-dark-divider rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {embTesting ? '测试中...' : '测试连接'}
+                  </button>
+
+                  <button
+                    disabled={embSaving}
+                    onClick={async () => {
+                      setEmbSaving(true); setEmbError('');
+                      try {
+                        await updateEmbeddingConfig(embCfg);
+                        setEmbSaved(true);
+                        setTimeout(() => setEmbSaved(false), 2000);
+                      } catch (e: any) {
+                        setEmbError(e.message || '保存失败');
+                      } finally {
+                        setEmbSaving(false);
+                      }
+                    }}
+                    className="px-4 py-1 text-xs bg-primary text-white rounded-md hover:bg-primary/90 disabled:opacity-50 transition-colors min-w-[60px]"
+                  >
+                    {embSaving ? '保存中...' : embSaved ? '✅ 已保存' : '保存'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* LLM 配置 Tab */}
+        {activeTab === 'llm' && <div className="flex flex-1 min-h-0">
           <div className="w-[250px] border-r border-surface-divider dark:border-dark-divider p-4 space-y-3 overflow-y-auto">
             <div className="flex items-center justify-between gap-2">
               <SectionTitle>模型列表</SectionTitle>
@@ -436,9 +753,10 @@ export default function SettingsModal() {
               </label>
             </Field>
           </div>
-        </div>
+        </div>}
 
-        {/* 底部操作区 */}
+        {/* 底部操作区 — LLM Tab 专属 */}
+        {activeTab === 'llm' && (
         <div className="flex items-center justify-between gap-3 px-5 py-4 border-t border-surface-divider dark:border-dark-divider">
           <button
             onClick={handleDelete}
@@ -463,6 +781,7 @@ export default function SettingsModal() {
           </button>
           </div>
         </div>
+        )}
       </div>
     </div>
   );

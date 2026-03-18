@@ -270,7 +270,7 @@ export default function Sidebar() {
             ))}
           </div>
 
-          {/* Know-how 规则管理入口 */}
+          {/* Know-how 规则库管理入口 */}
           <button
             onClick={handleToggleKnowhow}
             className={clsx(
@@ -281,7 +281,7 @@ export default function Sidebar() {
             )}
           >
             <span>📚</span>
-            <span>Know-how 规则</span>
+            <span>Know-how 规则库</span>
           </button>
 
           {/* 设置按钮 */}

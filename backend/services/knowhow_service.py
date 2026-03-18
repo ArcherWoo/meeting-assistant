@@ -163,6 +163,43 @@ class KnowhowService:
             "total_hits": total_hits,
         }
 
+    async def list_categories(self) -> list[dict]:
+        """获取所有分类及其规则数量"""
+        all_rules = await storage.list_knowhow_rules(active_only=False)
+        counts: dict[str, int] = {}
+        for rule in all_rules:
+            cat = rule["category"]
+            counts[cat] = counts.get(cat, 0) + 1
+        return [{"name": name, "rule_count": count} for name, count in sorted(counts.items())]
+
+    async def rename_category(self, old_name: str, new_name: str) -> int:
+        """批量将所有属于 old_name 分类的规则改为 new_name，返回受影响行数"""
+        cursor = await storage.db.execute(
+            "UPDATE knowhow_rules SET category=?, updated_at=? WHERE category=?",
+            (new_name, datetime.now(timezone.utc).isoformat(), old_name),
+        )
+        await storage.db.commit()
+        return cursor.rowcount
+
+    async def delete_category(self, name: str, delete_rules: bool = True) -> int:
+        """
+        删除分类。
+        delete_rules=True：连同该分类下所有规则一起删除（默认）。
+        delete_rules=False：仅将规则的 category 清空（置为空字符串），保留规则本身。
+        返回受影响行数。
+        """
+        if delete_rules:
+            cursor = await storage.db.execute(
+                "DELETE FROM knowhow_rules WHERE category=?", (name,)
+            )
+        else:
+            cursor = await storage.db.execute(
+                "UPDATE knowhow_rules SET category='', updated_at=? WHERE category=?",
+                (datetime.now(timezone.utc).isoformat(), name),
+            )
+        await storage.db.commit()
+        return cursor.rowcount
+
 
 # 全局单例
 knowhow_service = KnowhowService()

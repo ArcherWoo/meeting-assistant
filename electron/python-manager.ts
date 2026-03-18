@@ -41,7 +41,7 @@ export class PythonManager {
     const pythonCmd = process.env.VITE_DEV_SERVER_URL ? devPythonCmd : path.join(backendDir, 'meeting-assistant-backend');
 
     const args = process.env.VITE_DEV_SERVER_URL
-      ? ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(this.port)]
+      ? ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(this.port), '--reload']
       : ['--port', String(this.port)];
 
     this.process = spawn(pythonCmd, args, {

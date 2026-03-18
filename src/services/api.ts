@@ -50,7 +50,8 @@ export async function streamChat(
   onChunk: (content: string) => void,
   onDone: () => void,
   onError: (error: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  mode?: string
 ): Promise<void> {
   try {
     const res = await fetch(`${getBaseUrl()}/chat/completions`, {
@@ -64,6 +65,7 @@ export async function streamChat(
         stream: true,
         api_url: config.apiUrl,
         api_key: config.apiKey,
+        mode: mode ?? '',
       }),
       signal,
     });
@@ -102,6 +104,11 @@ export async function streamChat(
 
         try {
           const parsed = JSON.parse(data);
+          // 检查后端内嵌的流中断错误事件
+          if (parsed.stream_error) {
+            onError(parsed.stream_error);
+            return;
+          }
           const content = parsed.choices?.[0]?.delta?.content;
           if (content) {
             onChunk(content);
@@ -209,6 +216,60 @@ export async function updateSkill(skillId: string, content: string): Promise<{ i
   return res.json();
 }
 
+/** 删除用户自建或覆盖的 Skill */
+export async function deleteSkill(skillId: string): Promise<{ id: string; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/skills/${encodeURIComponent(skillId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '删除 Skill 失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+// ===== 系统提示词接口 =====
+
+/** 获取指定模式的 System Prompt */
+export async function getSystemPrompt(
+  mode: string
+): Promise<{ mode: string; prompt: string; is_custom: boolean }> {
+  const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(mode)}`);
+  if (!res.ok) throw new Error('获取 System Prompt 失败');
+  return res.json();
+}
+
+/** 保存指定模式的 System Prompt */
+export async function updateSystemPrompt(
+  mode: string,
+  prompt: string
+): Promise<{ mode: string; prompt: string; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(mode)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '保存 System Prompt 失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+/** 重置指定模式的 System Prompt 为默认值 */
+export async function resetSystemPrompt(
+  mode: string
+): Promise<{ mode: string; prompt: string; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(mode)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '重置 System Prompt 失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
 /** 匹配用户输入到最佳 Skill，返回命中列表（后端返回 {matches: [...], total: N}） */
 export async function matchSkill(query: string): Promise<SkillMatch[]> {
   const res = await fetch(`${getBaseUrl()}/skills/match`, {
@@ -269,6 +330,45 @@ export async function deleteKnowhowRule(ruleId: string): Promise<void> {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error('删除规则失败');
+}
+
+/** 获取 Know-how 分类列表（含每个分类的规则数） */
+export async function listKnowhowCategories(): Promise<{ name: string; rule_count: number }[]> {
+  const res = await fetch(`${getBaseUrl()}/knowhow/categories`);
+  if (!res.ok) throw new Error('获取分类列表失败');
+  const data = await res.json();
+  return data.categories ?? [];
+}
+
+/** 重命名分类（批量更新该分类下所有规则的 category） */
+export async function renameKnowhowCategory(
+  oldName: string,
+  newName: string
+): Promise<{ message: string; affected_rules: number }> {
+  const res = await fetch(`${getBaseUrl()}/knowhow/categories/${encodeURIComponent(oldName)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ new_name: newName }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '重命名分类失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+/** 删除分类（deleteRules=true 则同时删除该分类下的所有规则） */
+export async function deleteKnowhowCategory(
+  name: string,
+  deleteRules = true
+): Promise<{ message: string; affected_rules: number }> {
+  const url = `${getBaseUrl()}/knowhow/categories/${encodeURIComponent(name)}?delete_rules=${deleteRules}`;
+  const res = await fetch(url, { method: 'DELETE' });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '删除分类失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
 }
 
 /** 获取 Know-how 统计信息（后端返回 {total_rules, active_rules, categories, total_hits}） */
@@ -429,8 +529,89 @@ export async function agentExecute(
   }
 }
 
+// ===== 对话自动命名 =====
+
+/**
+ * 根据前 3 轮对话消息，调用 LLM 生成语义化中文标题（10 字以内）
+ * @param messages 前 6 条消息（3 user + 3 assistant）
+ * @param config LLM 配置
+ * @returns 生成的标题字符串
+ */
+export async function generateAutoTitle(
+  messages: ChatMessage[],
+  config: LLMConfig
+): Promise<string> {
+  const res = await fetch(`${getBaseUrl()}/chat/auto-title`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      messages: messages.slice(0, 6),
+      api_url: config.apiUrl,
+      api_key: config.apiKey,
+      model: config.model,
+    }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '标题生成失败' }));
+    throw new Error(error.detail);
+  }
+  const data = await res.json();
+  return data.title as string;
+}
+
 /** 设置后端端口（由 Electron preload 调用） */
 export function setBackendPort(port: number): void {
   (window as any).__BACKEND_PORT__ = port;
+}
+
+// ===== Embedding 配置 =====
+
+export interface EmbeddingConfig {
+  api_url: string;
+  api_key: string;
+  model: string;
+  is_configured: boolean;
+}
+
+/** 获取 Embedding API 配置 */
+export async function getEmbeddingConfig(): Promise<EmbeddingConfig> {
+  const res = await fetch(`${getBaseUrl()}/settings/embedding`);
+  if (!res.ok) throw new Error('获取 Embedding 配置失败');
+  return res.json();
+}
+
+/** 保存 Embedding API 配置 */
+export async function updateEmbeddingConfig(
+  config: Pick<EmbeddingConfig, 'api_url' | 'api_key' | 'model'>
+): Promise<{ message: string; is_configured: boolean }> {
+  const res = await fetch(`${getBaseUrl()}/settings/embedding`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) throw new Error('保存 Embedding 配置失败');
+  return res.json();
+}
+
+/** 清除 Embedding API 配置（回退到使用 LLM API 凭证） */
+export async function resetEmbeddingConfig(): Promise<{ message: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/embedding`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('清除 Embedding 配置失败');
+  return res.json();
+}
+
+/** 测试 Embedding API 连通性 */
+export async function testEmbeddingConnection(
+  config: Pick<EmbeddingConfig, 'api_url' | 'api_key' | 'model'>
+): Promise<{ success: boolean; message: string; dimension?: number }> {
+  const res = await fetch(`${getBaseUrl()}/settings/embedding/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) throw new Error('测试请求失败');
+  return res.json();
 }
 

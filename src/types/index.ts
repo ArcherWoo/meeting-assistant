@@ -48,6 +48,7 @@ export interface Conversation {
   title: string;
   mode: AppMode;
   isPinned: boolean;
+  isTitleCustomized: boolean; // true = 用户已手动命名，自动命名不覆盖
   createdAt: string;
   updatedAt: string;
   lastMessage?: string; // 最后一条消息预览

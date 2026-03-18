@@ -2,7 +2,11 @@
 PPT 解析服务
 Phase 1: python-pptx 基础解析（文本、表格、备注、元数据）
 Phase 2: TODO - 集成 Docling 双引擎方案（AI 布局分析 + 高精度表格提取）
+
+注意：python-pptx 是同步库，所有解析操作通过 asyncio.to_thread() 放入线程池，
+避免阻塞 FastAPI 事件循环导致其他请求（如 LLM SSE 流）被冻结。
 """
+import asyncio
 import io
 import hashlib
 from datetime import datetime
@@ -17,7 +21,12 @@ class PPTParser:
         """
         解析 PPT 文件，返回结构化 JSON
         包含：元数据、每页幻灯片内容（文本/表格/备注）、全文 Markdown
+        同步解析操作通过 asyncio.to_thread 放入线程池执行。
         """
+        return await asyncio.to_thread(self._parse_sync, file_content, filename)
+
+    def _parse_sync(self, file_content: bytes, filename: str) -> dict:
+        """同步解析逻辑（在线程池中执行）"""
         file_hash = hashlib.md5(file_content).hexdigest()
         prs = Presentation(io.BytesIO(file_content))
 

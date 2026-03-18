@@ -8,6 +8,16 @@ import { persist } from 'zustand/middleware';
 import { v4 as uuidv4 } from 'uuid';
 import type { Conversation, Message, Attachment, AppMode } from '@/types';
 
+export const DEFAULT_CONVERSATION_TITLE = '新对话';
+
+const normalizeConversations = (conversations: Conversation[] = []) => (
+  conversations.map((conversation) => (
+    conversation.title === DEFAULT_CONVERSATION_TITLE && conversation.isTitleCustomized
+      ? { ...conversation, isTitleCustomized: false }
+      : conversation
+  ))
+);
+
 interface ChatState {
   // 对话列表
   conversations: Conversation[];
@@ -19,7 +29,11 @@ interface ChatState {
   // 当前对话的消息（派生，便于组件使用）
   messages: Message[];
 
-  // 流式响应状态（不持久化）
+  // 流式响应状态 — 按 conversationId 隔离（不持久化）
+  streamingByConversation: Record<string, boolean>;
+  streamingContentByConversation: Record<string, string>;
+
+  // 当前活跃对话的派生便捷属性
   isStreaming: boolean;
   streamingContent: string;
 
@@ -29,15 +43,15 @@ interface ChatState {
   // Actions
   createConversation: (mode: AppMode) => string;
   setActiveConversation: (id: string) => void;
-  renameConversation: (id: string, title: string) => void;
+  renameConversation: (id: string, title: string, isManual?: boolean) => void;
   deleteConversation: (id: string) => void;
 
   addMessage: (message: Omit<Message, 'id' | 'createdAt'>) => string;
-  updateMessage: (id: string, content: string) => void;
+  updateMessage: (id: string, content: string, conversationId?: string) => void;
 
-  setStreaming: (streaming: boolean) => void;
-  appendStreamContent: (chunk: string) => void;
-  resetStreamContent: () => void;
+  setStreaming: (streaming: boolean, conversationId?: string) => void;
+  appendStreamContent: (chunk: string, conversationId?: string) => void;
+  resetStreamContent: (conversationId?: string) => void;
 
   addAttachment: (attachment: Attachment) => void;
   removeAttachment: (id: string) => void;
@@ -51,6 +65,8 @@ export const useChatStore = create<ChatState>()(
       activeConversationId: null,
       messagesByConversation: {},
       messages: [],
+      streamingByConversation: {},
+      streamingContentByConversation: {},
       isStreaming: false,
       streamingContent: '',
       pendingAttachments: [],
@@ -60,9 +76,10 @@ export const useChatStore = create<ChatState>()(
         const conversation: Conversation = {
           id,
           workspaceId: 'default',
-          title: '新对话',
+          title: DEFAULT_CONVERSATION_TITLE,
           mode,
           isPinned: false,
+          isTitleCustomized: false,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
@@ -76,19 +93,29 @@ export const useChatStore = create<ChatState>()(
       },
 
       setActiveConversation: (id) => {
-        const { messagesByConversation } = get();
+        const { messagesByConversation, streamingByConversation, streamingContentByConversation } = get();
         set({
           activeConversationId: id,
           messages: messagesByConversation[id] ?? [],
+          // 切换对话时同步该对话的流式状态
+          isStreaming: streamingByConversation[id] ?? false,
+          streamingContent: streamingContentByConversation[id] ?? '',
         });
       },
 
-      renameConversation: (id, title) => {
-        const nextTitle = title.trim() || '新对话';
+      renameConversation: (id, title, isManual = true) => {
+        const nextTitle = title.trim() || DEFAULT_CONVERSATION_TITLE;
         set((state) => ({
           conversations: state.conversations.map((conversation) =>
             conversation.id === id
-              ? { ...conversation, title: nextTitle, updatedAt: new Date().toISOString() }
+              ? (conversation.title === nextTitle
+                  ? conversation
+                  : {
+                      ...conversation,
+                      title: nextTitle,
+                      updatedAt: new Date().toISOString(),
+                      ...(isManual ? { isTitleCustomized: true } : {}),
+                    })
               : conversation
           ),
         }));
@@ -141,24 +168,58 @@ export const useChatStore = create<ChatState>()(
         return id;
       },
 
-      updateMessage: (id, content) => {
+      updateMessage: (id, content, conversationId) => {
         const { activeConversationId } = get();
+        // 优先使用调用方明确传入的 conversationId，避免多对话并发时更新错对话
+        const convId = conversationId ?? activeConversationId;
         set((state) => {
-          const updatedMessages = state.messages.map((m) => (m.id === id ? { ...m, content } : m));
-          const updatedMap = activeConversationId
-            ? { ...state.messagesByConversation, [activeConversationId]: updatedMessages }
+          const targetMessages = state.messagesByConversation[convId ?? ''] ?? state.messages;
+          const updatedMessages = targetMessages.map((m) => (m.id === id ? { ...m, content } : m));
+          const updatedMap = convId
+            ? { ...state.messagesByConversation, [convId]: updatedMessages }
             : state.messagesByConversation;
           return {
-            messages: updatedMessages,
+            // 只有当目标对话是当前活跃对话时才更新 messages 派生字段
+            messages: convId === state.activeConversationId ? updatedMessages : state.messages,
             messagesByConversation: updatedMap,
           };
         });
       },
 
-      setStreaming: (streaming) => set({ isStreaming: streaming }),
-      appendStreamContent: (chunk) =>
-        set((state) => ({ streamingContent: state.streamingContent + chunk })),
-      resetStreamContent: () => set({ streamingContent: '' }),
+      setStreaming: (streaming, conversationId) => {
+        const { activeConversationId } = get();
+        const convId = conversationId ?? activeConversationId ?? '';
+        set((state) => {
+          const updated = { ...state.streamingByConversation, [convId]: streaming };
+          return {
+            streamingByConversation: updated,
+            isStreaming: updated[state.activeConversationId ?? ''] ?? false,
+          };
+        });
+      },
+      appendStreamContent: (chunk, conversationId) => {
+        const { activeConversationId } = get();
+        const convId = conversationId ?? activeConversationId ?? '';
+        set((state) => {
+          const prev = state.streamingContentByConversation[convId] ?? '';
+          const updated = { ...state.streamingContentByConversation, [convId]: prev + chunk };
+          return {
+            streamingContentByConversation: updated,
+            streamingContent: convId === state.activeConversationId ? updated[convId] ?? '' : state.streamingContent,
+          };
+        });
+      },
+      resetStreamContent: (conversationId) => {
+        const { activeConversationId } = get();
+        const convId = conversationId ?? activeConversationId ?? '';
+        set((state) => {
+          const updated = { ...state.streamingContentByConversation, [convId]: '' };
+          return {
+            streamingContentByConversation: updated,
+            streamingContent: convId === state.activeConversationId ? '' : state.streamingContent,
+          };
+        });
+      },
 
       addAttachment: (attachment) =>
         set((state) => ({ pendingAttachments: [...state.pendingAttachments, attachment] })),
@@ -180,9 +241,11 @@ export const useChatStore = create<ChatState>()(
         const persisted = (persistedState ?? {}) as Partial<ChatState>;
         const activeId = persisted.activeConversationId ?? null;
         const msgMap = persisted.messagesByConversation ?? {};
+        const conversations = normalizeConversations(persisted.conversations ?? []);
         return {
           ...currentState,
           ...persisted,
+          conversations,
           messages: activeId ? (msgMap[activeId] ?? []) : [],
         };
       },

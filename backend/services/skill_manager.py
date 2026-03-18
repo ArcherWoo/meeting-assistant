@@ -28,7 +28,7 @@ class SkillManager:
         self._skills.clear()
         # 1. 加载内置 Skill
         self._scan_directory(_BACKEND_SKILLS_DIR / "builtin", is_builtin=True)
-        # 2. 加载用户自建 Skill
+        # 2. 加载用户自建 Skill（可覆盖内置版本）
         _USER_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
         self._scan_directory(_USER_SKILLS_DIR, is_builtin=False)
         self._loaded = True

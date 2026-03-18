@@ -1,13 +1,12 @@
 /**
  * 右侧上下文面板
- * 显示：Skill 列表、知识库统计、Know-how 规则概览
- * 支持 Skill 自动刷新 + 点击编辑
+ * 显示：Skill 列表（含增删改）、知识库统计、Know-how 规则库概览
  */
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react';
 import { useAppStore } from '@/stores/appStore';
 import {
   listSkills, getKnowledgeStats, getKnowhowStats,
-  getSkillContent, updateSkill,
+  getSkillContent, saveSkill, updateSkill, deleteSkill,
   uploadFile, listKnowledgeImports, deleteKnowledgeImport,
 } from '@/services/api';
 import { MODE_CONFIG } from '@/types';
@@ -36,10 +35,14 @@ export default function ContextPanel() {
   const kbFileInputRef = useRef<HTMLInputElement>(null);
 
   // Skill 编辑器状态
-  const [editingSkill, setEditingSkill] = useState<{ id: string; name: string; content: string; is_builtin: boolean } | null>(null);
+  // isNew=true 表示新建 Skill；originalIsBuiltin 记录原始的 is_builtin（便于提示）
+  const [editingSkill, setEditingSkill] = useState<{
+    id: string; name: string; content: string; is_builtin: boolean; isNew: boolean; originalIsBuiltin: boolean;
+  } | null>(null);
   const [editContent, setEditContent] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState('');
+  const [deletingSkillId, setDeletingSkillId] = useState<string | null>(null);
 
   /** 刷新所有数据 */
   const refresh = useCallback(async () => {
@@ -93,11 +96,37 @@ export default function ContextPanel() {
     return () => clearInterval(timer);
   }, [refresh]);
 
+  /** 新建 Skill 模板 */
+  const NEW_SKILL_TEMPLATE = `# Skill: 新技能名称
+
+## 描述
+在此描述该 Skill 的功能和适用场景。
+
+## 触发条件
+- 关键词: "关键词1", "关键词2"
+- 输入类型: .pptx 文件
+
+## 执行步骤
+1. 第一步描述
+2. 第二步描述
+3. 第三步描述
+
+## 输出格式
+在此描述输出格式。
+`;
+
+  /** 打开新建 Skill 编辑器 */
+  const handleNewSkill = () => {
+    setEditingSkill({ id: '', name: '新 Skill', content: NEW_SKILL_TEMPLATE, is_builtin: false, isNew: true, originalIsBuiltin: false });
+    setEditContent(NEW_SKILL_TEMPLATE);
+    setSaveMsg('');
+  };
+
   /** 点击 Skill 卡片 → 加载内容并打开编辑器 */
   const handleSkillClick = async (skill: SkillMeta) => {
     try {
       const data = await getSkillContent(skill.id);
-      setEditingSkill({ id: skill.id, name: skill.name, content: data.content, is_builtin: data.is_builtin });
+      setEditingSkill({ id: skill.id, name: skill.name, content: data.content, is_builtin: data.is_builtin, isNew: false, originalIsBuiltin: data.is_builtin });
       setEditContent(data.content);
       setSaveMsg('');
     } catch (err: any) {
@@ -105,20 +134,46 @@ export default function ContextPanel() {
     }
   };
 
-  /** 保存编辑后的 Skill */
+  /** 保存编辑后的 Skill（新建或更新） */
   const handleSaveSkill = async () => {
     if (!editingSkill) return;
     setSaving(true);
     setSaveMsg('');
     try {
-      const result = await updateSkill(editingSkill.id, editContent);
+      let result;
+      if (editingSkill.isNew) {
+        result = await saveSkill(editContent);
+      } else {
+        result = await updateSkill(editingSkill.id, editContent);
+      }
       setSaveMsg(`✅ ${result.message}`);
-      // 刷新列表
       await refresh();
+      // 新建成功后更新编辑器状态为已保存的 skill
+      if (editingSkill.isNew) {
+        setEditingSkill((prev) => prev ? { ...prev, id: result.id, name: result.name, isNew: false } : null);
+      }
     } catch (err: any) {
       setSaveMsg(`❌ ${err.message}`);
     } finally {
       setSaving(false);
+    }
+  };
+
+  /** 删除 Skill（内置 Skill 写入墓碑标记实现逻辑删除，用户 Skill 直接删除文件） */
+  const handleDeleteSkill = async (skill: SkillMeta, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const builtinNote = skill.is_builtin
+      ? '\n（这是内置 Skill，删除后将不再出现，重启后依然生效）'
+      : '';
+    if (!confirm(`确定要删除 Skill「${skill.name}」吗？${builtinNote}`)) return;
+    setDeletingSkillId(skill.id);
+    try {
+      await deleteSkill(skill.id);
+      await refresh();
+    } catch (err: any) {
+      alert(`删除失败：${err.message}`);
+    } finally {
+      setDeletingSkillId(null);
     }
   };
 
@@ -129,31 +184,39 @@ export default function ContextPanel() {
         <div className="flex items-center justify-between px-4 py-3 border-b border-surface-divider dark:border-dark-divider">
           <button onClick={() => setEditingSkill(null)}
             className="text-xs text-primary hover:underline">← 返回</button>
-          <h3 className="text-sm font-medium truncate flex-1 mx-2">{editingSkill.name}</h3>
+          <h3 className="text-sm font-medium truncate flex-1 mx-2">
+            {editingSkill.isNew ? '✨ 新建 Skill' : editingSkill.name}
+          </h3>
           <button onClick={toggleContextPanel}
             className="text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary transition-colors">✕</button>
         </div>
         <div className="flex-1 flex flex-col p-3 gap-2 overflow-hidden">
-          {editingSkill.is_builtin && (
-            <p className="text-[10px] text-amber-600 dark:text-amber-400">🔒 内置 Skill，仅可查看</p>
+          {editingSkill.originalIsBuiltin && !editingSkill.isNew && (
+            <p className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded px-2 py-1">
+              📋 内置 Skill — 保存后将在用户目录创建自定义版本，不修改内置文件
+            </p>
           )}
           <textarea
             value={editContent}
             onChange={(e) => setEditContent(e.target.value)}
-            readOnly={editingSkill.is_builtin}
             className="flex-1 w-full text-xs font-mono p-2 rounded-lg border border-surface-divider dark:border-dark-divider bg-surface-card dark:bg-dark-card resize-none focus:outline-none focus:ring-1 focus:ring-primary"
             spellCheck={false}
+            placeholder="按 Skill Markdown 格式编写..."
           />
           {saveMsg && <p className="text-xs">{saveMsg}</p>}
-          {!editingSkill.is_builtin && (
-            <button
-              onClick={handleSaveSkill}
-              disabled={saving}
-              className="w-full py-1.5 text-xs font-medium rounded-lg bg-primary text-white hover:bg-primary/90 disabled:opacity-50 transition-colors"
-            >
-              {saving ? '保存中...' : '💾 保存修改'}
-            </button>
-          )}
+          <button
+            onClick={handleSaveSkill}
+            disabled={saving}
+            className="w-full py-1.5 text-xs font-medium rounded-lg bg-primary text-white hover:bg-primary/90 disabled:opacity-50 transition-colors"
+          >
+            {saving
+              ? '保存中...'
+              : editingSkill.isNew
+                ? '💾 创建 Skill'
+                : editingSkill.originalIsBuiltin
+                  ? '💾 保存为自定义版本'
+                  : '💾 保存修改'}
+          </button>
         </div>
       </aside>
     );
@@ -186,7 +249,15 @@ export default function ContextPanel() {
               <h4 className="text-xs font-medium text-text-secondary uppercase tracking-wider">
                 可用 Skill ({skills.length})
               </h4>
-              <button onClick={refresh} className="text-[10px] text-primary hover:underline">🔄 刷新</button>
+              <div className="flex items-center gap-1.5">
+                <button onClick={refresh} className="text-[10px] text-primary hover:underline">🔄</button>
+                <button
+                  onClick={handleNewSkill}
+                  className="text-[10px] px-2 py-0.5 rounded bg-primary text-white hover:bg-primary/90 transition-colors"
+                >
+                  + 新建
+                </button>
+              </div>
             </div>
             {skills.length === 0 ? (
               <p className="text-xs text-text-secondary text-center py-3">暂无 Skill</p>
@@ -195,15 +266,37 @@ export default function ContextPanel() {
                 {skills.map((skill) => (
                   <div
                     key={skill.id}
-                    onClick={() => handleSkillClick(skill)}
-                    className="px-3 py-2 rounded-lg bg-surface-card dark:bg-dark-card text-xs cursor-pointer hover:ring-1 hover:ring-primary/50 transition-all"
+                    className="px-3 py-2 rounded-lg bg-surface-card dark:bg-dark-card text-xs hover:ring-1 hover:ring-primary/50 transition-all group"
                   >
-                    <p className="font-medium">{skill.name}</p>
-                    <p className="text-text-secondary mt-0.5 line-clamp-2">{skill.description}</p>
+                    <div className="flex items-start justify-between gap-1">
+                      <p className="font-medium flex-1 min-w-0 truncate">{skill.name}</p>
+                      {/* 操作按钮 - hover 时显示 */}
+                      <div className="flex items-center gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={() => handleSkillClick(skill)}
+                          className="text-[11px] text-text-secondary hover:text-primary transition-colors"
+                          title="编辑"
+                        >
+                          ✏️
+                        </button>
+                        <button
+                          onClick={(e) => handleDeleteSkill(skill, e)}
+                          disabled={deletingSkillId === skill.id}
+                          className="text-[11px] text-text-secondary hover:text-red-500 transition-colors disabled:opacity-50"
+                          title={skill.is_builtin ? '删除（逻辑删除，重启后生效）' : '删除'}
+                        >
+                          {deletingSkillId === skill.id ? '⏳' : '🗑'}
+                        </button>
+                      </div>
+                    </div>
+                    <p className="text-text-secondary mt-0.5 line-clamp-2 cursor-pointer" onClick={() => handleSkillClick(skill)}>{skill.description}</p>
                     <div className="flex flex-wrap gap-1 mt-1">
                       {skill.keywords.slice(0, 3).map((kw) => (
                         <span key={kw} className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-[10px]">{kw}</span>
                       ))}
+                      {skill.is_builtin && (
+                        <span className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 text-[10px]">内置</span>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -271,9 +364,9 @@ export default function ContextPanel() {
 
           <div className="border-t border-surface-divider dark:border-dark-divider" />
 
-          {/* Know-how 概览 */}
+          {/* Know-how 规则库概览 */}
           <section>
-            <h4 className="text-xs font-medium text-text-secondary uppercase tracking-wider mb-2">Know-how 规则</h4>
+            <h4 className="text-xs font-medium text-text-secondary uppercase tracking-wider mb-2">Know-how 规则库</h4>
             {khStats ? (
               <p className="text-xs text-text-secondary">
                 共 {khStats.total_rules} 条规则，{khStats.active_rules} 条启用

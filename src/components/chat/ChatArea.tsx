@@ -3,10 +3,10 @@
  * 包含：顶部工具栏、消息列表（自动滚动）、底部输入区
  * Agent 模式下触发 Skill 匹配 → 执行工作流
  */
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, type ChangeEvent } from 'react';
 import { useAppStore } from '@/stores/appStore';
-import { useChatStore } from '@/stores/chatStore';
-import { streamChat } from '@/services/api';
+import { useChatStore, DEFAULT_CONVERSATION_TITLE } from '@/stores/chatStore';
+import { streamChat, extractFileText, generateAutoTitle } from '@/services/api';
 import { MODE_CONFIG } from '@/types';
 import MessageBubble from './MessageBubble';
 import ChatInput from './ChatInput';
@@ -22,10 +22,13 @@ export default function ChatArea() {
   } = useChatStore();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  // 每个对话独立持有自己的 AbortController，避免多对话并发时互相覆盖
+  const abortMapRef = useRef<Record<string, AbortController>>({});
+  const welcomeFileRef = useRef<HTMLInputElement>(null);
   const activeLLMConfig = llmConfigs.find((config) => config.id === activeLLMConfigId) ?? llmConfigs[0];
   /** Agent 模式：当前正在执行的查询 */
   const [agentQuery, setAgentQuery] = useState<string | null>(null);
+  const [welcomeUploading, setWelcomeUploading] = useState(false);
 
   // 消息列表自动滚动到底部
   useEffect(() => {
@@ -62,13 +65,17 @@ export default function ChatArea() {
       { role: 'user', content: llmContent },
     ];
 
-    setStreaming(true);
-    resetStreamContent();
+    // 使用当前 convId 隔离流式状态，避免阻塞其他对话
+    const targetConvId = convId;
+    setStreaming(true, targetConvId);
+    resetStreamContent(targetConvId);
+
+    // 每个对话独立创建 AbortController，存入 Map，互不干扰
     const controller = new AbortController();
-    abortRef.current = controller;
+    abortMapRef.current[targetConvId] = controller;
 
     const assistantMsgId = addMessage({
-      conversationId: convId,
+      conversationId: targetConvId,
       role: 'assistant',
       content: '',
     });
@@ -80,29 +87,104 @@ export default function ChatArea() {
       activeLLMConfig,
       (chunk) => {
         fullContent += chunk;
-        appendStreamContent(chunk);
-        updateMessage(assistantMsgId, fullContent);
+        appendStreamContent(chunk, targetConvId);
+        // 传入 targetConvId，确保更新写入正确对话的消息列表
+        updateMessage(assistantMsgId, fullContent, targetConvId);
       },
       () => {
-        setStreaming(false);
-        resetStreamContent();
-        abortRef.current = null;
+        setStreaming(false, targetConvId);
+        resetStreamContent(targetConvId);
+        delete abortMapRef.current[targetConvId];
+
+        // 自动命名：第 3 条 assistant 消息完成后（或之后），且用户未手动命名
+        // 使用 setTimeout 确保 store 状态已完全同步
+        console.log('[AutoTitle] onDone fired, activeLLMConfig:', !!activeLLMConfig);
+        if (activeLLMConfig) {
+          setTimeout(() => {
+            const state = useChatStore.getState();
+            const conv = state.conversations.find((c) => c.id === targetConvId);
+            const convMessages = state.messagesByConversation[targetConvId] ?? [];
+            const assistantCount = convMessages.filter((m) => m.role === 'assistant').length;
+
+            console.log('[AutoTitle] check:', {
+              convId: targetConvId,
+              convFound: !!conv,
+              title: conv?.title,
+              isTitleCustomized: conv?.isTitleCustomized,
+              assistantCount,
+              defaultTitle: DEFAULT_CONVERSATION_TITLE,
+              titleMatchesDefault: conv?.title === DEFAULT_CONVERSATION_TITLE,
+            });
+
+            // 条件：未手动命名 + 标题仍为默认 + 至少完成 3 轮
+            if (
+              conv &&
+              !conv.isTitleCustomized &&
+              conv.title === DEFAULT_CONVERSATION_TITLE &&
+              assistantCount >= 3
+            ) {
+              console.log('[AutoTitle] triggering generateAutoTitle...');
+              generateAutoTitle(
+                convMessages.map((m) => ({ role: m.role, content: m.content })),
+                activeLLMConfig
+              )
+                .then((title) => {
+                  console.log('[AutoTitle] received title:', JSON.stringify(title));
+                  if (title && title !== DEFAULT_CONVERSATION_TITLE) {
+                    useChatStore.getState().renameConversation(targetConvId, title, false);
+                    console.log('[AutoTitle] renameConversation called, new title:', title);
+                    // 验证更新是否生效
+                    const updated = useChatStore.getState().conversations.find((c) => c.id === targetConvId);
+                    console.log('[AutoTitle] after rename, conv title:', updated?.title);
+                  } else {
+                    console.log('[AutoTitle] title rejected (empty or default)');
+                  }
+                })
+                .catch((err) => {
+                  console.error('[AutoTitle] failed:', err);
+                });
+            } else {
+              console.log('[AutoTitle] conditions not met, skipping');
+            }
+          }, 100);
+        }
       },
       (error) => {
-        setStreaming(false);
-        resetStreamContent();
-        updateMessage(assistantMsgId, `⚠️ 错误: ${error}`);
-        abortRef.current = null;
+        setStreaming(false, targetConvId);
+        resetStreamContent(targetConvId);
+        updateMessage(assistantMsgId, `⚠️ 错误: ${error}`, targetConvId);
+        delete abortMapRef.current[targetConvId];
       },
-      controller.signal
+      controller.signal,
+      currentMode
     );
   };
 
-  /** 停止生成 */
+  /** 欢迎屏文件上传：提取文本后直接发送 */
+  const handleWelcomeFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    setWelcomeUploading(true);
+    try {
+      const result = await extractFileText(file);
+      const attachmentContext = `\n\n---\n📎 附件「${result.filename}」内容（${result.char_count} 字符）：\n\n${result.text}`;
+      await handleSend('请分析这份文件的内容', attachmentContext);
+    } catch (err: any) {
+      alert(`文件文本提取失败：${err.message || '未知错误'}`);
+    } finally {
+      setWelcomeUploading(false);
+    }
+  };
+
+  /** 停止生成（仅中止当前活跃对话的流，不影响其他对话） */
   const handleStop = () => {
-    abortRef.current?.abort();
-    setStreaming(false);
-    resetStreamContent();
+    if (activeConversationId) {
+      abortMapRef.current[activeConversationId]?.abort();
+      delete abortMapRef.current[activeConversationId];
+      setStreaming(false, activeConversationId);
+      resetStreamContent(activeConversationId);
+    }
   };
 
   return (
@@ -125,7 +207,22 @@ export default function ChatArea() {
       {/* 消息列表 */}
       <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-4">
         {messages.length === 0 && !agentQuery ? (
-          <WelcomeScreen mode={currentMode} onQuickMessage={handleSend} />
+          <>
+            {/* 隐藏的文件输入（欢迎屏使用） */}
+            <input
+              ref={welcomeFileRef}
+              type="file"
+              accept=".ppt,.pptx,.pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.xls,.xlsx,.png,.jpg,.jpeg,.gif,.bmp,.webp,image/*"
+              className="hidden"
+              onChange={handleWelcomeFileChange}
+            />
+            <WelcomeScreen
+              mode={currentMode}
+              onQuickMessage={handleSend}
+              onUploadFile={() => welcomeFileRef.current?.click()}
+              uploading={welcomeUploading}
+            />
+          </>
         ) : (
           <>
             {messages.map((msg) => (
@@ -160,9 +257,11 @@ export default function ChatArea() {
 }
 
 /** 欢迎屏幕 - 无对话时显示 */
-function WelcomeScreen({ mode, onQuickMessage }: {
+function WelcomeScreen({ mode, onQuickMessage, onUploadFile, uploading }: {
   mode: string;
   onQuickMessage: (msg: string) => void;
+  onUploadFile: () => void;
+  uploading: boolean;
 }) {
   return (
     <div className="flex flex-col items-center justify-center h-full text-center animate-fade-in">
@@ -181,10 +280,11 @@ function WelcomeScreen({ mode, onQuickMessage }: {
           👋 &quot;你好&quot;
         </button>
         <button
-          onClick={() => onQuickMessage('帮我总结这份材料')}
-          className="px-3 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+          onClick={onUploadFile}
+          disabled={uploading}
+          className="px-3 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-wait"
         >
-          💡 &quot;帮我总结这份材料&quot;
+          {uploading ? '⏳ 提取中...' : '📎 上传文件'}
         </button>
       </div>
     </div>

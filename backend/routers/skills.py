@@ -1,11 +1,12 @@
 """
 Skill 管理路由 - PRD §10.1
-GET  /api/skills          - 加载所有可用 Skill
-GET  /api/skills/{id}     - 获取单个 Skill 详情
-GET  /api/skills/{id}/content - 获取 Skill 原始 Markdown 内容
-POST /api/skills          - 保存新 Skill
-PUT  /api/skills/{id}     - 更新已有 Skill 内容
-POST /api/skills/match    - 匹配用户意图到 Skill
+GET    /api/skills              - 加载所有可用 Skill
+GET    /api/skills/{id}         - 获取单个 Skill 详情
+GET    /api/skills/{id}/content - 获取 Skill 原始 Markdown 内容
+POST   /api/skills              - 保存新 Skill
+PUT    /api/skills/{id}         - 更新已有 Skill 内容（内置 Skill 保存为用户版本）
+DELETE /api/skills/{id}         - 物理删除 Skill（内置或用户自建均支持）
+POST   /api/skills/match        - 匹配用户意图到 Skill
 """
 import re
 from typing import Optional
@@ -13,7 +14,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from services.skill_manager import skill_manager, _USER_SKILLS_DIR
+from services.skill_manager import skill_manager, _USER_SKILLS_DIR, _BACKEND_SKILLS_DIR
 from services.skill_matcher import skill_matcher
 
 router = APIRouter()
@@ -135,7 +136,7 @@ async def save_skill(request: SaveSkillRequest) -> dict:
 
 @router.put("/skills/{skill_id}")
 async def update_skill(skill_id: str, request: SaveSkillRequest) -> dict:
-    """更新已有的 Skill 文件"""
+    """更新已有的 Skill 文件；内置 Skill 将在用户目录创建覆盖版本（Copy-on-Write）"""
     content = request.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="Skill 内容不能为空")
@@ -143,8 +144,21 @@ async def update_skill(skill_id: str, request: SaveSkillRequest) -> dict:
     skill = skill_manager.get_skill(skill_id)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' 未找到")
+
     if skill.is_builtin:
-        raise HTTPException(status_code=403, detail="内置 Skill 不可修改")
+        # 内置 Skill：将修改后的版本保存到用户目录，不修改内置文件
+        _USER_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+        original_name = Path(skill.source_path).name if skill.source_path else f"{skill_id}.skill.md"
+        target = _USER_SKILLS_DIR / original_name
+        target.write_text(content, encoding="utf-8")
+        await skill_manager.reload()
+        updated = skill_manager.get_skill(skill_id)
+        return {
+            "id": skill_id,
+            "name": updated.name if updated else skill_id,
+            "message": f"Skill '{skill_id}' 已保存为用户版本（覆盖内置）",
+        }
+
     if not skill.source_path:
         raise HTTPException(status_code=404, detail="Skill 源文件路径未知")
 
@@ -160,6 +174,49 @@ async def update_skill(skill_id: str, request: SaveSkillRequest) -> dict:
         "name": updated.name if updated else skill_id,
         "message": f"Skill '{skill_id}' 已更新",
     }
+
+
+@router.delete("/skills/{skill_id}")
+async def delete_skill(skill_id: str) -> dict:
+    """
+    删除 Skill（物理删除，支持内置 Skill 和用户自建/覆盖 Skill）。
+
+    逻辑：
+    - 用户自建 Skill：删除用户目录下的文件。
+    - 用户覆盖的内置 Skill：删除用户目录下的覆盖文件。
+    - 纯内置 Skill：直接物理删除 backend/skills/builtin/ 下的原始文件。
+    """
+    skill = skill_manager.get_skill(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' 未找到")
+    if not skill.source_path:
+        raise HTTPException(status_code=404, detail="Skill 源文件路径未知")
+
+    source = Path(skill.source_path)
+
+    # 安全校验：文件必须在用户目录或内置目录下，防止路径穿越
+    source_resolved = source.resolve()
+    in_user_dir = False
+    in_builtin_dir = False
+    try:
+        source_resolved.relative_to(_USER_SKILLS_DIR.resolve())
+        in_user_dir = True
+    except ValueError:
+        pass
+    try:
+        source_resolved.relative_to((_BACKEND_SKILLS_DIR / "builtin").resolve())
+        in_builtin_dir = True
+    except ValueError:
+        pass
+
+    if not in_user_dir and not in_builtin_dir:
+        raise HTTPException(status_code=403, detail="Skill 文件不在允许的目录范围内，拒绝删除")
+
+    if source.exists():
+        source.unlink()
+
+    await skill_manager.reload()
+    return {"id": skill_id, "message": f"Skill '{skill_id}' 已删除"}
 
 
 @router.post("/skills/match")

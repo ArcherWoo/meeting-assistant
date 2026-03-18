@@ -11,7 +11,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import health, chat, ppt, skills, knowledge, knowhow, agent
+from routers import health, chat, ppt, skills, knowledge, knowhow, agent, settings
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,7 @@ app.include_router(skills.router, prefix="/api", tags=["Skills"])
 app.include_router(knowledge.router, prefix="/api", tags=["Knowledge"])
 app.include_router(knowhow.router, prefix="/api", tags=["Know-how"])
 app.include_router(agent.router, prefix="/api", tags=["Agent"])
+app.include_router(settings.router, prefix="/api", tags=["Settings"])
 
 
 
