@@ -2,19 +2,84 @@
 聊天路由 - 处理 LLM 对话请求
 支持流式 SSE 响应，兼容 OpenAI 协议
 """
+import json
+import logging
 import re
-from typing import Optional
+from typing import AsyncGenerator, Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from services.llm_service import LLMService
 from services.storage import storage
-from services.context_assembler import context_assembler
+from services.context_assembler import context_assembler, AssembledContext
 from services.embedding_service import embedding_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 llm_service = LLMService()
+
+_ATTACHMENT_SEPARATOR = "\n\n---\n📎 附件"
+
+
+def _strip_attachment_context(content: str) -> str:
+    """从兼容旧前端的 user 内容中剥离附件全文，避免污染检索 query。"""
+    if not content:
+        return ""
+    return content.split(_ATTACHMENT_SEPARATOR, 1)[0].strip()
+
+
+def _estimate_context_window(model: str) -> int:
+    """按常见模型家族保守估算上下文窗口。"""
+    model_name = (model or "").strip().lower()
+    rules = [
+        (("claude-3.7", "claude-3.5", "claude-3", "claude-sonnet-4"), 200_000),
+        (("gpt-4o", "gpt-4.1", "gpt-4-turbo", "gpt-4-1106", "gpt-4-0125", "o1", "o3", "gemini-1.5", "gemini-2"), 128_000),
+        (("deepseek-chat", "deepseek-reasoner", "deepseek-r1"), 64_000),
+        (("gpt-4-32k", "qwen-max", "qwen-plus"), 32_000),
+        (("gpt-3.5-turbo", "qwen-turbo"), 16_000),
+        (("gpt-4",), 8_192),
+    ]
+    for keywords, window in rules:
+        if any(keyword in model_name for keyword in keywords):
+            return window
+    return 8_192
+
+
+def _estimate_message_tokens(messages: list[dict]) -> int:
+    """粗略估算当前消息已占用的输入 token。"""
+    total = 0
+    for message in messages:
+        content = str(message.get("content", ""))
+        total += max(1, int(len(content) * 0.6)) + 16
+    return total
+
+
+def _max_context_injection_tokens(context_window: int) -> int:
+    """限制 RAG 注入上限，避免大窗口模型被无关上下文淹没。"""
+    if context_window <= 8_192:
+        return 1_000
+    if context_window <= 32_000:
+        return 2_500
+    if context_window <= 128_000:
+        return 4_000
+    return 6_000
+
+
+def _calculate_context_budget_chars(messages: list[dict], request: "ChatRequest") -> int:
+    """根据模型窗口、已有消息长度和输出预留，计算上下文可用字符预算。"""
+    context_window = _estimate_context_window(request.model)
+    reserved_output_tokens = max(request.max_tokens, 512)
+    message_tokens = _estimate_message_tokens(messages)
+    safety_margin_tokens = 1_000
+
+    available_input_tokens = context_window - reserved_output_tokens - message_tokens - safety_margin_tokens
+    if available_input_tokens <= 0:
+        return 0
+
+    budget_tokens = min(available_input_tokens, _max_context_injection_tokens(context_window))
+    return max(0, int(budget_tokens / 0.6))
 
 
 def _fallback_auto_title(dialogue_lines: list[str]) -> str:
@@ -76,6 +141,8 @@ class ChatRequest(BaseModel):
     api_key: str = ""
     # 当前交互模式（用于注入 System Prompt）
     mode: str = ""
+    # 单独给 RAG 检索使用的纯净查询，避免附件全文污染召回
+    rag_query: str = ""
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -94,7 +161,7 @@ class AutoTitleRequest(BaseModel):
 
 
 async def _build_messages(request: ChatRequest) -> list[dict]:
-    """构建发送给 LLM 的消息列表，必要时在头部注入 System Prompt + RAG 上下文"""
+    """构建发送给 LLM 的消息列表（纯消息构建，不含 RAG 逻辑）"""
     messages = [m.model_dump() for m in request.messages]
 
     # 若消息列表中已有 system 消息则不再注入
@@ -106,46 +173,84 @@ async def _build_messages(request: ChatRequest) -> list[dict]:
     custom_prompt = await storage.get_setting(f"system_prompt_{request.mode}", default="")
     system_content = custom_prompt.strip() if custom_prompt.strip() else _DEFAULT_PROMPTS.get(request.mode, "")
 
-    # ── P1: Copilot 模式下注入知识库 + Know-how 上下文 ──
-    if request.mode == "copilot" and system_content:
-        # 配置 embedding 服务：优先 DB 中独立 embedding 配置，回退到 LLM API 凭证
-        emb_url = await storage.get_setting("embedding_api_url")
-        emb_key = await storage.get_setting("embedding_api_key")
-        emb_model = await storage.get_setting("embedding_model") or "text-embedding-3-small"
-        if emb_url and emb_key:
-            # 独立 embedding 配置存在：始终用最新配置（覆盖旧值，以便设置更改后立即生效）
-            embedding_service.configure(api_url=emb_url, api_key=emb_key, model=emb_model)
-        elif not embedding_service.is_configured and request.api_url and request.api_key:
-            # 无独立配置时，懒初始化为 LLM API 凭证（首次请求时一次性设置）
-            embedding_service.configure(
-                api_url=request.api_url,
-                api_key=request.api_key,
-                model="text-embedding-3-small",
-            )
-
-        # 取最后一条 user 消息作为检索 query
-        user_query = ""
-        for m in reversed(messages):
-            if m["role"] == "user":
-                user_query = m["content"]
-                break
-
-        if user_query:
-            try:
-                ctx = await context_assembler.assemble(
-                    user_query=user_query, mode=request.mode,
-                )
-                if ctx.has_context:
-                    system_content += ctx.to_prompt_suffix()
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(
-                    f"[RAG] 上下文组装失败，降级为无增强回答: {e}"
-                )
-
     if system_content:
         messages = [{"role": "system", "content": system_content}] + messages
     return messages
+
+
+async def _assemble_context(request: ChatRequest, messages: list[dict]) -> AssembledContext:
+    """独立的上下文组装步骤，仅 copilot 模式下执行 RAG 检索。"""
+    if request.mode != "copilot":
+        return AssembledContext()
+
+    # 配置 embedding 服务：优先 DB 中独立 embedding 配置，回退到 LLM API 凭证
+    emb_url = await storage.get_setting("embedding_api_url")
+    emb_key = await storage.get_setting("embedding_api_key")
+    emb_model = await storage.get_setting("embedding_model") or "text-embedding-3-small"
+    if emb_url and emb_key:
+        embedding_service.configure(api_url=emb_url, api_key=emb_key, model=emb_model)
+    elif not embedding_service.is_configured and request.api_url and request.api_key:
+        embedding_service.configure(
+            api_url=request.api_url,
+            api_key=request.api_key,
+            model="text-embedding-3-small",
+        )
+
+    # 取最后一条 user 消息作为回退 query；优先使用前端显式传入的 rag_query
+    user_query = ""
+    for m in reversed(messages):
+        if m["role"] == "user":
+            user_query = m["content"]
+            break
+
+    rag_query = _strip_attachment_context(request.rag_query) or _strip_attachment_context(user_query)
+
+    if not rag_query:
+        return AssembledContext()
+
+    try:
+        return await context_assembler.assemble(user_query=rag_query, mode=request.mode)
+    except Exception as e:
+        logger.warning(f"[RAG] 上下文组装失败，降级为无增强回答: {e}")
+        return AssembledContext()
+
+
+async def _stream_with_metadata(
+    raw_stream: AsyncGenerator[str, None],
+    ctx: AssembledContext,
+) -> AsyncGenerator[str, None]:
+    """包装 LLM 流式输出，在 [DONE] 之前注入 context_metadata 和 skill_suggestion 事件。"""
+    async for chunk in raw_stream:
+        if chunk.strip() == "data: [DONE]":
+            # 在 [DONE] 之前注入元数据
+            if ctx.has_context:
+                metadata = {
+                    "type": "context_metadata",
+                    "sources": {
+                        "knowledge_count": len(ctx.knowledge_results),
+                        "knowhow_count": len(ctx.knowhow_rules),
+                        "skill_count": len(ctx.matched_skills),
+                        "summary": ctx.source_summary,
+                    },
+                }
+                yield f"data: {json.dumps(metadata, ensure_ascii=False)}\n\n"
+
+            # 如果有匹配到的 Skill，注入推荐事件
+            if ctx.matched_skills:
+                top_skill = ctx.matched_skills[0]
+                suggestion = {
+                    "type": "skill_suggestion",
+                    "skill_id": top_skill["skill_id"],
+                    "skill_name": top_skill["skill_name"],
+                    "description": top_skill["description"],
+                    "score": top_skill["score"],
+                    "confidence": top_skill["confidence"],
+                }
+                yield f"data: {json.dumps(suggestion, ensure_ascii=False)}\n\n"
+
+            yield chunk
+            return
+        yield chunk
 
 
 @router.post("/chat/completions")
@@ -159,16 +264,31 @@ async def chat_completions(request: ChatRequest):
 
     messages = await _build_messages(request)
 
+    # 独立的上下文组装步骤（仅 copilot 模式）
+    ctx = await _assemble_context(request, messages)
+    if ctx.has_context:
+        fitted_ctx = ctx.fit_to_budget(_calculate_context_budget_chars(messages, request))
+        if fitted_ctx.has_context:
+            suffix = fitted_ctx.to_prompt_suffix()
+            if messages and messages[0]["role"] == "system":
+                messages[0]["content"] += f"\n\n{suffix}"
+            else:
+                messages = [{"role": "system", "content": suffix}] + messages
+            ctx = fitted_ctx
+        else:
+            ctx = AssembledContext()
+
     if request.stream:
+        raw_stream = llm_service.stream_chat(
+            messages=messages,
+            model=request.model,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            api_url=request.api_url,
+            api_key=request.api_key,
+        )
         return StreamingResponse(
-            llm_service.stream_chat(
-                messages=messages,
-                model=request.model,
-                temperature=request.temperature,
-                max_tokens=request.max_tokens,
-                api_url=request.api_url,
-                api_key=request.api_key,
-            ),
+            _stream_with_metadata(raw_stream, ctx),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -177,7 +297,6 @@ async def chat_completions(request: ChatRequest):
             },
         )
     else:
-        # 非流式响应
         result = await llm_service.chat(
             messages=messages,
             model=request.model,

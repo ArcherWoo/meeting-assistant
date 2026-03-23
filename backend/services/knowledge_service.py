@@ -84,15 +84,15 @@ class KnowledgeService:
         if ext in self.PPT_EXTS:
             return await self.ingest_ppt(file_content, filename, llm_fn, embedding_fn)
         elif ext in (".pdf",):
-            return await self._ingest_pdf(file_content, filename)
+            return await self._ingest_pdf(file_content, filename, embedding_fn)
         elif ext in (".doc", ".docx"):
-            return await self._ingest_docx(file_content, filename)
+            return await self._ingest_docx(file_content, filename, embedding_fn)
         elif ext in self.IMAGE_EXTS:
             return await self._ingest_image(file_content, filename)
         elif ext in self.TEXT_EXTS:
-            return await self._ingest_text(file_content, filename)
+            return await self._ingest_text(file_content, filename, embedding_fn)
         elif ext in (".xls", ".xlsx"):
-            return await self._ingest_excel(file_content, filename)
+            return await self._ingest_excel(file_content, filename, embedding_fn)
         else:
             # 兜底：尝试当纯文本处理
             return await self._ingest_text(file_content, filename)
@@ -363,8 +363,70 @@ class KnowledgeService:
             logger.warning(f"向量检索失败: {e}")
             return []
 
-    async def _ingest_generic(self, file_content: bytes, filename: str, text: str, file_type: str) -> dict:
-        """通用文件导入：记录到 ppt_imports 表 + 返回结果"""
+    def _split_text_into_chunks(self, text: str, filename: str, chunk_size: int = 500) -> List[dict]:
+        """将纯文本按固定大小分块（步长 400，重叠 100）"""
+        chunks: List[dict] = []
+        step = chunk_size - 100
+        for i in range(0, len(text), step):
+            piece = text[i:i + chunk_size].strip()
+            if piece:
+                chunks.append({
+                    "id": gen_id(),
+                    "source_file": filename,
+                    "slide_index": 0,
+                    "chunk_type": "text",
+                    "content": piece,
+                })
+        return chunks
+
+    async def _vectorize_text_chunks(
+        self, chunks: List[dict], import_id: str, embedding_fn: Any,
+    ) -> int:
+        """将文本块向量化写入 LanceDB"""
+        if not chunks or not self._lance_db:
+            return 0
+        batch_size = 32
+        all_records: List[dict] = []
+        texts = [c["content"] for c in chunks]
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            try:
+                vectors = await embedding_fn(batch)
+                for j, vec in enumerate(vectors):
+                    chunk = chunks[i + j]
+                    all_records.append({
+                        "id": chunk["id"],
+                        "source_file": chunk["source_file"],
+                        "slide_index": chunk["slide_index"],
+                        "chunk_type": chunk["chunk_type"],
+                        "content": chunk["content"],
+                        "vector": vec,
+                        "metadata": json.dumps({"import_id": import_id}, ensure_ascii=False),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    })
+            except Exception as e:
+                logger.warning(f"Embedding 批次失败 (batch {i}): {e}")
+        if not all_records:
+            return 0
+        try:
+            table_name = "doc_chunks"
+            if table_name in self._lance_db.table_names():
+                table = self._lance_db.open_table(table_name)
+                table.add(all_records)
+            else:
+                table = self._lance_db.create_table(table_name, data=all_records)
+            self._chunks_table = table
+            logger.info(f"写入 {len(all_records)} 条向量到 LanceDB")
+        except Exception as e:
+            logger.error(f"LanceDB 写入失败: {e}")
+            return 0
+        return len(all_records)
+
+    async def _ingest_generic(
+        self, file_content: bytes, filename: str, text: str, file_type: str,
+        embedding_fn: Optional[Any] = None,
+    ) -> dict:
+        """通用文件导入：记录到 ppt_imports 表 + 分块向量化写入 LanceDB"""
         import hashlib
         file_hash = hashlib.md5(file_content).hexdigest()
         import_id = await storage.record_ppt_import(
@@ -382,20 +444,26 @@ class KnowledgeService:
             }
 
         await storage.update_ppt_import_status(import_id, "processing")
+
+        chunks_count = 0
+        if embedding_fn and text and self._lance_db:
+            chunks = self._split_text_into_chunks(text, filename)
+            chunks_count = await self._vectorize_text_chunks(chunks, import_id, embedding_fn)
+
         await storage.update_ppt_import_status(import_id, "completed", 0)
 
         char_count = len(text)
-        logger.info(f"{file_type} 文件已导入: {filename} ({char_count} 字符)")
+        logger.info(f"{file_type} 文件已导入: {filename} ({char_count} 字符, {chunks_count} 向量块)")
         return {
             "import_id": import_id,
             "status": "completed",
             "file_type": file_type,
             "extracted_count": 0,
-            "chunks_count": 0,
+            "chunks_count": chunks_count,
             "char_count": char_count,
         }
 
-    async def _ingest_pdf(self, file_content: bytes, filename: str) -> dict:
+    async def _ingest_pdf(self, file_content: bytes, filename: str, embedding_fn: Optional[Any] = None) -> dict:
         """导入 PDF 文件（同步解析放入线程池）"""
         import asyncio
 
@@ -414,9 +482,9 @@ class KnowledgeService:
                 return f"[PDF 文件: {filename}，解析失败: {e}]"
 
         text = await asyncio.to_thread(_parse)
-        return await self._ingest_generic(file_content, filename, text, "pdf")
+        return await self._ingest_generic(file_content, filename, text, "pdf", embedding_fn)
 
-    async def _ingest_docx(self, file_content: bytes, filename: str) -> dict:
+    async def _ingest_docx(self, file_content: bytes, filename: str, embedding_fn: Optional[Any] = None) -> dict:
         """导入 DOCX 文件（同步解析放入线程池）"""
         import asyncio
 
@@ -434,16 +502,15 @@ class KnowledgeService:
                 return f"[DOCX 文件: {filename}，解析失败: {e}]"
 
         text = await asyncio.to_thread(_parse)
-        return await self._ingest_generic(file_content, filename, text, "docx")
+        return await self._ingest_generic(file_content, filename, text, "docx", embedding_fn)
 
     async def _ingest_image(self, file_content: bytes, filename: str) -> dict:
         """导入图片文件（记录文件信息，OCR 待后续集成）"""
         text = f"[图片文件: {filename}，大小: {len(file_content) / 1024:.1f}KB]"
         return await self._ingest_generic(file_content, filename, text, "image")
 
-    async def _ingest_text(self, file_content: bytes, filename: str) -> dict:
+    async def _ingest_text(self, file_content: bytes, filename: str, embedding_fn: Optional[Any] = None) -> dict:
         """导入纯文本文件"""
-        # 尝试多种编码
         text = ""
         for encoding in ("utf-8", "gbk", "gb2312", "latin-1"):
             try:
@@ -453,9 +520,9 @@ class KnowledgeService:
                 continue
         if not text:
             text = file_content.decode("utf-8", errors="replace")
-        return await self._ingest_generic(file_content, filename, text, "text")
+        return await self._ingest_generic(file_content, filename, text, "text", embedding_fn)
 
-    async def _ingest_excel(self, file_content: bytes, filename: str) -> dict:
+    async def _ingest_excel(self, file_content: bytes, filename: str, embedding_fn: Optional[Any] = None) -> dict:
         """导入 Excel 文件（同步解析放入线程池）"""
         import asyncio
 
@@ -481,7 +548,7 @@ class KnowledgeService:
                 return f"[Excel 文件: {filename}，解析失败: {e}]"
 
         text = await asyncio.to_thread(_parse)
-        return await self._ingest_generic(file_content, filename, text, "excel")
+        return await self._ingest_generic(file_content, filename, text, "excel", embedding_fn)
 
     async def extract_text(self, file_content: bytes, filename: str) -> dict:
         """

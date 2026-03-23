@@ -15,12 +15,16 @@ const pythonManager = new PythonManager();
 /** 创建主窗口 */
 function createWindow(): void {
   const isMac = process.platform === 'darwin';
+  const isWindows = process.platform === 'win32';
 
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 1024,
     minHeight: 680,
+    title: 'Meeting Assistant',
+    autoHideMenuBar: isWindows,
+    backgroundColor: isWindows ? '#F7F8FA' : '#FFFFFF',
     // macOS: 隐藏标题栏 + 红绿灯样式；Windows/Linux: 使用默认标题栏
     ...(isMac
       ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 16 } }
@@ -41,9 +45,16 @@ function createWindow(): void {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 
+  if (isWindows) {
+    mainWindow.setMenuBarVisibility(false);
+  }
+
   // 窗口准备好后再显示，提升启动体验
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
+    if (isWindows) {
+      mainWindow?.focus();
+    }
   });
 
   mainWindow.on('closed', () => {

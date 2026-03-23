@@ -14,6 +14,8 @@ from pydantic import BaseModel
 
 from services.knowledge_service import knowledge_service
 from services.hybrid_search import hybrid_search
+from services.embedding_service import embedding_service
+from services.storage import storage
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -68,12 +70,23 @@ async def ingest_file(file: UploadFile = File(...)) -> dict:
     if not content:
         raise HTTPException(status_code=400, detail="文件内容为空")
 
+    # 从数据库读取 Embedding 配置
+    emb_url = await storage.get_setting("embedding_api_url", "")
+    emb_key = await storage.get_setting("embedding_api_key", "")
+    emb_model = await storage.get_setting("embedding_model", "text-embedding-3-small")
+
+    embedding_fn = None
+    if emb_url and emb_key:
+        embedding_service.configure(api_url=emb_url, api_key=emb_key, model=emb_model)
+        async def embedding_fn(texts: list) -> list:
+            return await embedding_service.embed_batch(texts)
+
     try:
         result = await knowledge_service.ingest_file(
             file_content=content,
             filename=file.filename,
             llm_fn=None,
-            embedding_fn=None,
+            embedding_fn=embedding_fn,
         )
         return result
     except Exception as e:

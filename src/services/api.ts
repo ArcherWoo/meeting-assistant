@@ -36,6 +36,23 @@ interface ChatMessage {
   content: string;
 }
 
+/** 后端注入的上下文来源元数据 */
+export interface ContextMetadata {
+  knowledge_count: number;
+  knowhow_count: number;
+  skill_count: number;
+  summary: string;
+}
+
+/** 后端注入的 Skill 推荐事件 */
+export interface SkillSuggestionEvent {
+  skill_id: string;
+  skill_name: string;
+  description: string;
+  score: number;
+  confidence: string;
+}
+
 /**
  * 流式聊天 - 返回 SSE 事件流
  * @param messages 消息列表
@@ -43,6 +60,10 @@ interface ChatMessage {
  * @param onChunk 每收到一个 chunk 的回调
  * @param onDone 流结束回调
  * @param onError 错误回调
+ * @param signal 中止信号
+ * @param mode 当前交互模式
+ * @param onMetadata 上下文来源元数据回调（可选）
+ * @param onSkillSuggestion Skill 推荐事件回调（可选）
  */
 export async function streamChat(
   messages: ChatMessage[],
@@ -51,9 +72,74 @@ export async function streamChat(
   onDone: () => void,
   onError: (error: string) => void,
   signal?: AbortSignal,
-  mode?: string
+  mode?: string,
+  ragQuery?: string,
+  onMetadata?: (metadata: ContextMetadata) => void,
+  onSkillSuggestion?: (suggestion: SkillSuggestionEvent) => void,
 ): Promise<void> {
   try {
+    let finished = false;
+
+    const handleDataLine = (line: string): boolean => {
+      if (!line.startsWith('data: ')) return false;
+
+      const data = line.slice(6).trim();
+
+      if (data === '[DONE]') {
+        finished = true;
+        onDone();
+        return true;
+      }
+
+      try {
+        const parsed = JSON.parse(data);
+        if (parsed.stream_error) {
+          onError(parsed.stream_error);
+          return true;
+        }
+        if (parsed.type === 'context_metadata') {
+          onMetadata?.(parsed.sources as ContextMetadata);
+          return false;
+        }
+        if (parsed.type === 'skill_suggestion') {
+          onSkillSuggestion?.(parsed as SkillSuggestionEvent);
+          return false;
+        }
+
+        const content = parsed.choices?.[0]?.delta?.content;
+        if (content) {
+          onChunk(content);
+        }
+      } catch {
+        // 忽略无法解析的行
+      }
+
+      return false;
+    };
+
+    let buffer = '';
+
+    const drainBuffer = (final = false): boolean => {
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const rawLine of lines) {
+        if (handleDataLine(rawLine.trimEnd())) {
+          return true;
+        }
+      }
+
+      if (final && buffer.trim()) {
+        const lastLine = buffer.trimEnd();
+        buffer = '';
+        if (handleDataLine(lastLine)) {
+          return true;
+        }
+      }
+
+      return false;
+    };
+
     const res = await fetch(`${getBaseUrl()}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -66,6 +152,7 @@ export async function streamChat(
         api_url: config.apiUrl,
         api_key: config.apiKey,
         mode: mode ?? '',
+        rag_query: ragQuery ?? '',
       }),
       signal,
     });
@@ -83,42 +170,29 @@ export async function streamChat(
     }
 
     const decoder = new TextDecoder();
-    let buffer = '';
 
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || ''; // 保留未完成的行
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-
-        if (data === '[DONE]') {
-          onDone();
+      if (value) {
+        buffer += decoder.decode(value, { stream: !done });
+        if (drainBuffer(done)) {
           return;
         }
+      }
 
-        try {
-          const parsed = JSON.parse(data);
-          // 检查后端内嵌的流中断错误事件
-          if (parsed.stream_error) {
-            onError(parsed.stream_error);
-            return;
-          }
-          const content = parsed.choices?.[0]?.delta?.content;
-          if (content) {
-            onChunk(content);
-          }
-        } catch {
-          // 忽略无法解析的行
-        }
+      if (done) {
+        break;
       }
     }
-    onDone();
+
+    buffer += decoder.decode();
+    if (drainBuffer(true)) {
+      return;
+    }
+
+    if (!finished) {
+      onDone();
+    }
   } catch (error: any) {
     if (error.name === 'AbortError') {
       onDone();

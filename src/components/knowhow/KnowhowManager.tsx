@@ -179,7 +179,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
   return (
     <div className={clsx('flex flex-col', standalone ? 'h-full' : 'max-h-[500px]')}>
       {/* 头部：标题 + 统计 + 新建规则 */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-surface-divider dark:border-dark-divider">
+      <div className="win-toolbar flex items-center justify-between px-4 py-3">
         <div>
           <h3 className="text-sm font-medium">Know-how 规则库</h3>
           {stats && (
@@ -190,7 +190,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
         </div>
         <button
           onClick={() => setEditingRule({ category: categoryOptions[0] ?? '采购预审', rule_text: '', weight: 1.0, source: 'manual' })}
-          className="px-3 py-1.5 bg-primary text-white text-xs rounded-button hover:bg-primary-600 transition-colors"
+          className="win-button-primary h-8 px-3 text-xs"
         >
           + 新建规则
         </button>
@@ -198,14 +198,14 @@ export default function KnowhowManager({ standalone = true }: Props) {
 
       {/* 错误提示 */}
       {error && (
-        <div className="mx-4 mt-2 p-2 bg-red-50 dark:bg-red-900/20 rounded text-xs text-red-600">
+        <div className="mx-4 mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">
           {error}
           <button onClick={() => setError('')} className="ml-2 underline">关闭</button>
         </div>
       )}
 
       {/* 分类筛选行（含内联增删改） */}
-      <div className="flex gap-1.5 px-4 py-2 overflow-x-auto scrollbar-thin border-b border-surface-divider dark:border-dark-divider flex-wrap">
+      <div className="flex flex-wrap gap-2 overflow-x-auto border-b border-surface-divider px-4 py-2.5 scrollbar-thin dark:border-dark-divider">
         <FilterChip label="全部分类" active={!filterCategory} count={rules.length} onClick={() => setFilterCategory('')} />
         {categoryOptions.map((cat) => (
           <CategoryChip
@@ -220,22 +220,22 @@ export default function KnowhowManager({ standalone = true }: Props) {
         ))}
         {/* 新建分类 */}
         {addingCategory ? (
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5">
             <input
               autoFocus
               value={newCategoryName}
               onChange={(e) => setNewCategoryName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleAddCategory(); if (e.key === 'Escape') { setAddingCategory(false); setNewCategoryName(''); } }}
-              className="px-2 py-0.5 text-xs rounded border border-primary bg-transparent focus:outline-none focus:ring-1 focus:ring-primary/40 w-24"
+              className="win-input w-28 !py-1 text-xs"
               placeholder="分类名称"
             />
-            <button onClick={handleAddCategory} disabled={!newCategoryName.trim()} className="text-xs text-primary hover:text-primary-600 disabled:opacity-40 transition-colors">✓</button>
-            <button onClick={() => { setAddingCategory(false); setNewCategoryName(''); }} className="text-xs text-text-secondary hover:text-text-primary transition-colors">✕</button>
+            <button onClick={handleAddCategory} disabled={!newCategoryName.trim()} className="win-icon-button h-7 w-7 text-xs disabled:opacity-40">✓</button>
+            <button onClick={() => { setAddingCategory(false); setNewCategoryName(''); }} className="win-icon-button h-7 w-7 text-xs">✕</button>
           </div>
         ) : (
           <button
             onClick={() => setAddingCategory(true)}
-            className="px-2.5 py-1 text-xs rounded-full whitespace-nowrap bg-gray-100 dark:bg-gray-800 text-text-secondary hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+            className="win-chip text-xs"
           >
             + 新建分类
           </button>
@@ -243,7 +243,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
       </div>
 
       {/* 启用状态筛选 */}
-      <div className="flex gap-1.5 px-4 py-2 overflow-x-auto scrollbar-thin border-b border-surface-divider dark:border-dark-divider">
+      <div className="flex gap-2 overflow-x-auto border-b border-surface-divider px-4 py-2.5 scrollbar-thin dark:border-dark-divider">
         <FilterChip label="全部" active={statusFilter === 'all'} count={statusCounts.all} onClick={() => setStatusFilter('all')} />
         <FilterChip label="已启用" active={statusFilter === 'active'} count={statusCounts.active} onClick={() => setStatusFilter('active')} />
         <FilterChip label="已停用" active={statusFilter === 'inactive'} count={statusCounts.inactive} onClick={() => setStatusFilter('inactive')} />
@@ -255,7 +255,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
           onCancel={() => setEditingRule(null)} onChange={setEditingRule} />
       )}
 
-      <div className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-2">
+      <div className="flex-1 overflow-y-auto scrollbar-thin bg-[#F7F8FA] p-4 space-y-2 dark:bg-dark">
         {loading ? (
           <div className="text-center py-8 text-sm text-text-secondary">加载中...</div>
         ) : visibleRules.length === 0 ? (
@@ -275,7 +275,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
       {/* 重命名分类对话框 */}
       {renamingCat && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setRenamingCat(null)}>
-          <div className="bg-surface-card dark:bg-dark-card rounded-card shadow-lg p-5 w-80" onClick={(e) => e.stopPropagation()}>
+          <div className="win-modal w-80 p-5" onClick={(e) => e.stopPropagation()}>
             <h4 className="text-sm font-medium mb-3">重命名分类</h4>
             <p className="text-xs text-text-secondary mb-3">将「{renamingCat}」重命名为：</p>
             <input
@@ -283,12 +283,12 @@ export default function KnowhowManager({ standalone = true }: Props) {
               value={renameValue}
               onChange={(e) => setRenameValue(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleRenameCategory()}
-              className="w-full px-3 py-2 text-sm rounded border border-surface-divider dark:border-dark-divider bg-transparent focus:outline-none focus:ring-2 focus:ring-primary/30 mb-4"
+              className="win-input mb-4"
               placeholder="新分类名称"
             />
             <div className="flex justify-end gap-2">
-              <button onClick={() => setRenamingCat(null)} className="px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors">取消</button>
-              <button onClick={handleRenameCategory} disabled={!renameValue.trim()} className="px-3 py-1.5 text-xs bg-primary text-white rounded-button hover:bg-primary-600 disabled:opacity-50 transition-colors">确认重命名</button>
+              <button onClick={() => setRenamingCat(null)} className="win-button h-8 px-3 text-xs">取消</button>
+              <button onClick={handleRenameCategory} disabled={!renameValue.trim()} className="win-button-primary h-8 px-3 text-xs">确认重命名</button>
             </div>
           </div>
         </div>
@@ -297,7 +297,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
       {/* 删除分类确认对话框 */}
       {deletingCat && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setDeletingCat(null)}>
-          <div className="bg-surface-card dark:bg-dark-card rounded-card shadow-lg p-5 w-80" onClick={(e) => e.stopPropagation()}>
+          <div className="win-modal w-80 p-5" onClick={(e) => e.stopPropagation()}>
             <h4 className="text-sm font-medium mb-3">删除分类「{deletingCat}」</h4>
             <p className="text-xs text-text-secondary mb-3">请选择如何处理该分类下的规则：</p>
             <div className="space-y-2 mb-4">
@@ -317,8 +317,8 @@ export default function KnowhowManager({ standalone = true }: Props) {
               </label>
             </div>
             <div className="flex justify-end gap-2">
-              <button onClick={() => setDeletingCat(null)} className="px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors">取消</button>
-              <button onClick={handleDeleteCategory} className="px-3 py-1.5 text-xs bg-red-500 text-white rounded-button hover:bg-red-600 transition-colors">确认删除</button>
+              <button onClick={() => setDeletingCat(null)} className="win-button h-8 px-3 text-xs">取消</button>
+              <button onClick={handleDeleteCategory} className="inline-flex h-8 items-center justify-center rounded-md bg-red-500 px-3 text-xs font-medium text-white shadow-sm transition-colors hover:bg-red-600">确认删除</button>
             </div>
           </div>
         </div>
@@ -333,10 +333,10 @@ function FilterChip({ label, active, count, onClick }: {
 }) {
   return (
     <button onClick={onClick} className={clsx(
-      'px-2.5 py-1 text-xs rounded-full whitespace-nowrap transition-colors',
+      'inline-flex items-center rounded-md border px-2.5 py-1.5 text-xs whitespace-nowrap shadow-sm transition-colors',
       active
-        ? 'bg-primary text-white'
-        : 'bg-gray-100 dark:bg-gray-800 text-text-secondary hover:bg-gray-200 dark:hover:bg-gray-700',
+        ? 'border-primary/20 bg-primary text-white'
+        : 'border-surface-divider bg-white text-text-secondary hover:border-primary/20 hover:text-text-primary dark:border-dark-divider dark:bg-dark-card dark:hover:border-primary/20 dark:hover:text-text-dark-primary',
     )}>
       {label}{count !== undefined && ` (${count})`}
     </button>
@@ -358,10 +358,10 @@ function CategoryChip({ label, active, count, onSelect, onRename, onDelete }: {
       <button
         onClick={onSelect}
         className={clsx(
-          'px-2.5 py-1 text-xs rounded-full whitespace-nowrap transition-colors pr-1',
+          'inline-flex items-center rounded-md border px-2.5 py-1.5 pr-1 text-xs whitespace-nowrap shadow-sm transition-colors',
           active
-            ? 'bg-primary text-white'
-            : 'bg-gray-100 dark:bg-gray-800 text-text-secondary hover:bg-gray-200 dark:hover:bg-gray-700',
+            ? 'border-primary/20 bg-primary text-white'
+            : 'border-surface-divider bg-white text-text-secondary hover:border-primary/20 hover:text-text-primary dark:border-dark-divider dark:bg-dark-card dark:hover:border-primary/20 dark:hover:text-text-dark-primary',
         )}
       >
         {label}{count !== undefined && ` (${count})`}
@@ -370,12 +370,12 @@ function CategoryChip({ label, active, count, onSelect, onRename, onDelete }: {
         <div className="flex items-center ml-0.5 gap-0.5">
           <button
             onClick={(e) => { e.stopPropagation(); onRename(); }}
-            className="p-0.5 text-[10px] rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-text-secondary hover:text-text-primary transition-colors"
+            className="win-icon-button h-6 w-6 text-[10px]"
             title="重命名"
           >✏️</button>
           <button
             onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="p-0.5 text-[10px] rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-text-secondary hover:text-red-500 transition-colors"
+            className="win-icon-button h-6 w-6 text-[10px]"
             title="删除分类"
           >🗑️</button>
         </div>
@@ -392,26 +392,26 @@ function RuleForm({ rule, onSave, onCancel, onChange }: {
   onChange: (r: Partial<KnowhowRule>) => void;
 }) {
   return (
-    <div className="mx-4 mt-2 p-3 bg-surface-card dark:bg-dark-card rounded-card border border-surface-divider dark:border-dark-divider space-y-2">
+    <div className="win-panel mx-4 mt-3 space-y-3 p-4">
       <div className="flex gap-2">
         <select value={rule.category || ''} onChange={(e) => onChange({ ...rule, category: e.target.value })}
-          className="flex-1 px-2 py-1.5 text-xs rounded border border-surface-divider dark:border-dark-divider bg-transparent">
+          className="win-select flex-1 !py-1.5 text-xs">
           {PRESET_CATEGORIES.map((cat) => <option key={cat} value={cat}>{cat}</option>)}
         </select>
         <input type="number" value={rule.weight ?? 1.0} min={0} max={5} step={0.1}
           onChange={(e) => onChange({ ...rule, weight: parseFloat(e.target.value) })}
-          className="w-16 px-2 py-1.5 text-xs rounded border border-surface-divider dark:border-dark-divider bg-transparent"
+          className="win-input w-20 !py-1.5 text-xs"
           placeholder="权重" />
       </div>
       <textarea value={rule.rule_text || ''} onChange={(e) => onChange({ ...rule, rule_text: e.target.value })}
-        className="w-full px-2 py-1.5 text-xs rounded border border-surface-divider dark:border-dark-divider bg-transparent resize-none"
+        className="win-input w-full resize-none text-sm leading-6"
         rows={3} placeholder="输入规则内容..." />
       <div className="flex gap-2 justify-end">
-        <button onClick={onCancel} className="px-3 py-1 text-xs text-text-secondary hover:text-text-primary transition-colors">
+        <button onClick={onCancel} className="win-button h-8 px-3 text-xs">
           取消
         </button>
         <button onClick={onSave} disabled={!rule.rule_text?.trim()}
-          className="px-3 py-1 text-xs bg-primary text-white rounded-button hover:bg-primary-600 disabled:opacity-50 transition-colors">
+          className="win-button-primary h-8 px-3 text-xs">
           {rule.id ? '更新' : '创建'}
         </button>
       </div>
@@ -425,7 +425,7 @@ function RuleCard({ rule, onEdit, onDelete, onToggle }: {
 }) {
   return (
     <div className={clsx(
-      'p-3 rounded-card border transition-colors',
+      'rounded-lg border bg-white p-3 shadow-sm transition-colors dark:bg-dark-card',
       rule.is_active
         ? 'border-surface-divider dark:border-dark-divider'
         : 'border-dashed border-gray-300 dark:border-gray-600 opacity-60',
@@ -433,7 +433,7 @@ function RuleCard({ rule, onEdit, onDelete, onToggle }: {
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 mb-1">
-            <span className="px-1.5 py-0.5 text-[10px] rounded bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">
+            <span className="win-badge border-blue-200 bg-blue-50 text-[10px] text-blue-600 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-400">
               {rule.category}
             </span>
             <span className="text-[10px] text-text-secondary">权重: {rule.weight}</span>
@@ -451,15 +451,15 @@ function RuleCard({ rule, onEdit, onDelete, onToggle }: {
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
           <button onClick={onToggle} title={rule.is_active ? '禁用' : '启用'}
-            className="p-1 text-xs hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors">
+            className="win-icon-button h-8 w-8 text-xs">
             {rule.is_active ? '🟢' : '⚪'}
           </button>
           <button onClick={onEdit} title="编辑"
-            className="p-1 text-xs hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors">
+            className="win-icon-button h-8 w-8 text-xs">
             ✏️
           </button>
           <button onClick={onDelete} title="删除"
-            className="p-1 text-xs hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors">
+            className="win-icon-button h-8 w-8 text-xs">
             🗑️
           </button>
         </div>

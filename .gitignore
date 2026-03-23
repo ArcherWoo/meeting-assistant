@@ -3,7 +3,14 @@ dist/
 dist-electron/
 build/
 release/
+# 所有 out* 构建输出目录（未压缩的二进制产物，不提交到 git）
 out/
+out-*/
+out[0-9]*/
+release-build/
+backend/build_tmp/
+win-unpacked-copy/
+release.zip
 
 # ── Node.js 依赖 ───────────────────────────────────────────────
 node_modules/

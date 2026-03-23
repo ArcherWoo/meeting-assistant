@@ -297,25 +297,25 @@ export default function SettingsModal() {
   return (
     // 遮罩层
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) handleClose(); }}
     >
-      <div className="w-[860px] max-w-[96vw] max-h-[90vh] overflow-hidden bg-white dark:bg-dark-card rounded-xl shadow-2xl flex flex-col">
+      <div className="win-modal flex max-h-[90vh] w-[920px] max-w-[96vw] flex-col overflow-hidden">
         {/* 标题栏 */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-surface-divider dark:border-dark-divider">
+        <div className="win-toolbar flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-4">
             <h2 className="text-base font-semibold flex items-center gap-2">
               <span>⚙️</span> 设置
             </h2>
             {/* Tab 切换 */}
-            <div className="flex items-center gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-0.5">
+            <div className="flex items-center gap-1 rounded-lg border border-surface-divider bg-surface p-1 dark:border-dark-divider dark:bg-dark-sidebar">
               <button
                 onClick={() => setActiveTab('llm')}
                 className={clsx(
-                  'px-3 py-1 text-xs rounded-md transition-colors',
+                  tabBtnCls,
                   activeTab === 'llm'
-                    ? 'bg-white dark:bg-dark-card text-text-primary dark:text-text-dark-primary shadow-sm font-medium'
-                    : 'text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary'
+                    ? tabBtnActiveCls
+                    : tabBtnIdleCls
                 )}
               >
                 🧠 模型配置
@@ -323,10 +323,10 @@ export default function SettingsModal() {
               <button
                 onClick={() => setActiveTab('prompts')}
                 className={clsx(
-                  'px-3 py-1 text-xs rounded-md transition-colors',
+                  tabBtnCls,
                   activeTab === 'prompts'
-                    ? 'bg-white dark:bg-dark-card text-text-primary dark:text-text-dark-primary shadow-sm font-medium'
-                    : 'text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary'
+                    ? tabBtnActiveCls
+                    : tabBtnIdleCls
                 )}
               >
                 📝 System Prompts
@@ -334,40 +334,37 @@ export default function SettingsModal() {
               <button
                 onClick={() => setActiveTab('embedding')}
                 className={clsx(
-                  'px-3 py-1 text-xs rounded-md transition-colors',
+                  tabBtnCls,
                   activeTab === 'embedding'
-                    ? 'bg-white dark:bg-dark-card text-text-primary dark:text-text-dark-primary shadow-sm font-medium'
-                    : 'text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary'
+                    ? tabBtnActiveCls
+                    : tabBtnIdleCls
                 )}
               >
                 🔍 Embedding
               </button>
             </div>
           </div>
-          <button
-            onClick={handleClose}
-            className="text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary text-xl leading-none"
-          >
+          <button onClick={handleClose} className="win-icon-button h-8 w-8 text-lg leading-none">
             ×
           </button>
         </div>
 
         {/* System Prompts Tab */}
         {activeTab === 'prompts' && (
-          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5 bg-[#F7F8FA] dark:bg-dark">
             <p className="text-xs text-text-secondary">
               为每种对话模式配置专属的 System Prompt。留空则使用内置默认提示词。
             </p>
             {PROMPT_MODES.map(({ key, label, icon, placeholder }) => {
               const ps = prompts[key];
               return (
-                <div key={key} className="space-y-2 rounded-xl border border-surface-divider dark:border-dark-divider p-4">
+                <div key={key} className="win-panel space-y-3 p-4">
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <span>{icon}</span>
                       <span className="text-sm font-medium">{label}</span>
                       {ps.isCustom && (
-                        <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-primary/10 text-primary">已自定义</span>
+                        <span className="win-badge border-primary/20 bg-primary/10 text-[10px] text-primary">已自定义</span>
                       )}
                     </div>
                     <div className="flex items-center gap-2">
@@ -375,7 +372,7 @@ export default function SettingsModal() {
                         <button
                           onClick={() => handleResetPrompt(key)}
                           disabled={ps.saving}
-                          className="text-xs text-text-secondary hover:text-red-500 transition-colors disabled:opacity-50"
+                          className="win-button-subtle h-8 px-2 text-xs disabled:opacity-50"
                         >
                           重置默认
                         </button>
@@ -383,7 +380,7 @@ export default function SettingsModal() {
                       <button
                         onClick={() => handleSavePrompt(key)}
                         disabled={ps.saving}
-                        className="px-3 py-1 text-xs bg-primary text-white rounded-md hover:bg-primary/90 disabled:opacity-50 transition-colors min-w-[60px]"
+                        className="win-button-primary h-8 min-w-[72px] px-3 text-xs"
                       >
                         {ps.saving ? '保存中...' : ps.saved ? '✅ 已保存' : '保存'}
                       </button>
@@ -394,7 +391,7 @@ export default function SettingsModal() {
                     onChange={(e) => setPrompts((p) => ({ ...p, [key]: { ...p[key], value: e.target.value } }))}
                     rows={5}
                     placeholder={placeholder}
-                    className="w-full text-sm px-3 py-2 rounded-lg border border-surface-divider dark:border-dark-divider bg-surface-card dark:bg-dark-sidebar resize-y focus:outline-none focus:ring-2 focus:ring-primary/40"
+                    className="win-input resize-y text-sm leading-6"
                   />
                   {ps.error && <p className="text-xs text-red-500">{ps.error}</p>}
                 </div>
@@ -405,12 +402,12 @@ export default function SettingsModal() {
 
         {/* Embedding 配置 Tab */}
         {activeTab === 'embedding' && (
-          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5 bg-[#F7F8FA] dark:bg-dark">
             <p className="text-xs text-text-secondary">
               配置独立的 Embedding API，用于知识库语义检索。留空则自动使用当前 LLM 的 API 凭证（部分 LLM 提供商可能不支持 /embeddings 接口）。
             </p>
 
-            <div className="space-y-4 rounded-xl border border-surface-divider dark:border-dark-divider p-4">
+            <div className="win-panel space-y-4 p-4">
               <SectionTitle>Embedding API 配置</SectionTitle>
 
               <Field label="API Base URL">
@@ -461,7 +458,7 @@ export default function SettingsModal() {
                       setEmbError(e.message || '清除失败');
                     }
                   }}
-                  className="text-xs text-text-secondary hover:text-red-500 transition-colors"
+                  className="win-button-subtle h-8 px-2 text-xs"
                 >
                   清除配置
                 </button>
@@ -480,7 +477,7 @@ export default function SettingsModal() {
                         setEmbTesting(false);
                       }
                     }}
-                    className="px-3 py-1 text-xs border border-surface-divider dark:border-dark-divider rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    className="win-button h-8 px-3 text-xs disabled:opacity-40"
                   >
                     {embTesting ? '测试中...' : '测试连接'}
                   </button>
@@ -499,7 +496,7 @@ export default function SettingsModal() {
                         setEmbSaving(false);
                       }
                     }}
-                    className="px-4 py-1 text-xs bg-primary text-white rounded-md hover:bg-primary/90 disabled:opacity-50 transition-colors min-w-[60px]"
+                    className="win-button-primary h-8 min-w-[72px] px-4 text-xs"
                   >
                     {embSaving ? '保存中...' : embSaved ? '✅ 已保存' : '保存'}
                   </button>
@@ -511,12 +508,12 @@ export default function SettingsModal() {
 
         {/* LLM 配置 Tab */}
         {activeTab === 'llm' && <div className="flex flex-1 min-h-0">
-          <div className="w-[250px] border-r border-surface-divider dark:border-dark-divider p-4 space-y-3 overflow-y-auto">
+          <div className="w-[260px] border-r border-surface-divider dark:border-dark-divider bg-[#F7F8FA] p-4 space-y-3 overflow-y-auto dark:bg-dark">
             <div className="flex items-center justify-between gap-2">
               <SectionTitle>模型列表</SectionTitle>
               <button
                 onClick={handleAddProfile}
-                className="px-2 py-1 text-xs bg-primary text-white rounded-md hover:bg-primary-600 transition-colors"
+                className="win-button-primary h-8 px-3 text-xs"
               >
                 + 新增
               </button>
@@ -533,10 +530,10 @@ export default function SettingsModal() {
                     key={profile.id}
                     onClick={() => handleSelectProfile(profile)}
                     className={clsx(
-                      'w-full text-left p-3 rounded-lg border transition-colors',
+                      'w-full text-left rounded-lg border p-3 shadow-sm transition-colors',
                       isSelected
-                        ? 'border-primary bg-primary/5'
-                        : 'border-surface-divider dark:border-dark-divider hover:bg-gray-50 dark:hover:bg-gray-800/60'
+                        ? 'border-primary/30 bg-white dark:bg-dark-card'
+                        : 'border-surface-divider bg-white hover:border-primary/20 dark:border-dark-divider dark:bg-dark-card dark:hover:border-primary/20'
                     )}
                   >
                     <div className="flex items-center justify-between gap-2">
@@ -546,12 +543,12 @@ export default function SettingsModal() {
                       </div>
                       <div className="flex flex-col items-end gap-1">
                         {isActive && (
-                          <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400">
+                          <span className="win-badge border-green-200 bg-green-50 text-[10px] text-green-600 dark:border-green-800 dark:bg-green-900/20 dark:text-green-400">
                             当前
                           </span>
                         )}
                         {isUnsaved && (
-                          <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
+                          <span className="win-badge border-amber-200 bg-amber-50 text-[10px] text-amber-600 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-400">
                             未保存
                           </span>
                         )}
@@ -563,13 +560,13 @@ export default function SettingsModal() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 bg-[#F7F8FA] dark:bg-dark">
             <div className="flex items-center justify-between gap-3">
               <SectionTitle>LLM 连接配置</SectionTitle>
               {!isNewDraft && draft.id !== activeLLMConfigId && (
                 <button
                   onClick={() => setActiveLLMConfig(draft.id)}
-                  className="px-3 py-1 text-xs rounded-md border border-primary/30 text-primary hover:bg-primary/5 transition-colors"
+                  className="win-button h-8 px-3 text-xs text-primary"
                 >
                   设为当前使用
                 </button>
@@ -606,7 +603,7 @@ export default function SettingsModal() {
               />
             </Field>
 
-            <div className="rounded-lg border border-surface-divider dark:border-dark-divider p-3 space-y-3 bg-gray-50/60 dark:bg-gray-900/20">
+            <div className="win-panel-muted space-y-3 p-3">
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div>
                   <p className="text-sm font-medium">连通性测试</p>
@@ -617,7 +614,7 @@ export default function SettingsModal() {
                 <button
                   onClick={handleTestConnection}
                   disabled={testingConnection || !draft.apiUrl.trim() || !draft.apiKey.trim()}
-                  className="px-3 py-1.5 text-xs rounded-md bg-primary text-white hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  className="win-button-primary h-8 px-3 text-xs"
                 >
                   {testingConnection ? '测试中...' : '测试连通性'}
                 </button>
@@ -641,7 +638,7 @@ export default function SettingsModal() {
                     <span className="text-text-secondary">当前填写模型：</span>
                     <span
                       className={clsx(
-                        'px-2 py-1 rounded-full border',
+                        'win-badge px-2 py-1',
                         connectionResult.selected_model_available
                           ? 'border-green-200 text-green-600 dark:border-green-800 dark:text-green-400'
                           : 'border-amber-200 text-amber-600 dark:border-amber-800 dark:text-amber-400'
@@ -662,10 +659,10 @@ export default function SettingsModal() {
                           key={modelName}
                           onClick={() => updateDraft({ model: modelName }, { preserveTestFeedback: true })}
                           className={clsx(
-                            'px-2.5 py-1 text-xs rounded-full border transition-colors',
+                            'win-chip px-2.5 py-1 text-xs',
                             draft.model === modelName
                               ? 'border-primary bg-primary/10 text-primary'
-                              : 'border-surface-divider dark:border-dark-divider hover:border-primary/40 hover:text-primary'
+                              : 'hover:border-primary/40 hover:text-primary'
                           )}
                         >
                           {modelName}
@@ -694,7 +691,7 @@ export default function SettingsModal() {
                     onChange={(e) => updateDraft({ model: e.target.value }, { preserveTestFeedback: true })}
                     disabled={cachedModels.length === 0}
                     className={clsx(
-                      inputCls,
+                      selectCls,
                       cachedModels.length === 0 && 'opacity-60 cursor-not-allowed'
                     )}
                   >
@@ -757,11 +754,11 @@ export default function SettingsModal() {
 
         {/* 底部操作区 — LLM Tab 专属 */}
         {activeTab === 'llm' && (
-        <div className="flex items-center justify-between gap-3 px-5 py-4 border-t border-surface-divider dark:border-dark-divider">
+        <div className="win-toolbar flex items-center justify-between gap-3 px-4 py-3">
           <button
             onClick={handleDelete}
             disabled={!isNewDraft && llmConfigs.length <= 1}
-            className="px-4 py-1.5 text-sm text-red-500 hover:text-red-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="win-button-subtle h-8 px-3 text-sm text-red-500 hover:text-red-600 disabled:opacity-40"
           >
             {isNewDraft ? '放弃新增' : '删除当前配置'}
           </button>
@@ -769,13 +766,13 @@ export default function SettingsModal() {
           <div className="flex items-center gap-3">
           <button
             onClick={handleClose}
-            className="px-4 py-1.5 text-sm text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary transition-colors"
+            className="win-button h-8 px-4 text-sm"
           >
             取消
           </button>
           <button
             onClick={handleSave}
-            className="px-4 py-1.5 bg-primary text-white text-sm rounded-button hover:bg-primary-600 transition-colors min-w-[72px]"
+            className="win-button-primary h-8 min-w-[84px] px-4 text-sm"
           >
             {saved ? '✅ 已保存' : '保存'}
           </button>
@@ -793,7 +790,7 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-1">
+    <div className="space-y-1.5">
       <label className="block text-sm font-medium">{label}</label>
       {children}
     </div>
@@ -801,5 +798,17 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 const inputCls =
-  'w-full px-3 py-1.5 text-sm border border-surface-divider dark:border-dark-divider rounded-lg bg-surface-card dark:bg-dark-sidebar focus:outline-none focus:ring-2 focus:ring-primary/40';
+  'win-input';
+
+const selectCls =
+  'win-select';
+
+const tabBtnCls =
+  'rounded-md px-3 py-1.5 text-xs transition-colors';
+
+const tabBtnActiveCls =
+  'bg-white text-text-primary shadow-sm dark:bg-dark-card dark:text-text-dark-primary';
+
+const tabBtnIdleCls =
+  'text-text-secondary hover:bg-white hover:text-text-primary dark:hover:bg-dark-card dark:hover:text-text-dark-primary';
 

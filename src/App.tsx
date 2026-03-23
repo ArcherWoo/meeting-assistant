@@ -9,6 +9,15 @@ import MainLayout from './components/layout/MainLayout';
 export default function App() {
   const { theme } = useAppStore();
 
+  useEffect(() => {
+    const root = document.documentElement;
+    const body = document.body;
+    const platform = window.electronAPI?.platform ?? 'web';
+
+    root.dataset.platform = platform;
+    body.dataset.platform = platform;
+  }, []);
+
   // 主题切换：监听系统偏好 + 手动设置
   useEffect(() => {
     const root = document.documentElement;

@@ -180,34 +180,32 @@ export default function ContextPanel() {
   // ===== 编辑器视图 =====
   if (editingSkill) {
     return (
-      <aside className="w-[280px] flex-shrink-0 border-l border-surface-divider dark:border-dark-divider bg-surface dark:bg-dark flex flex-col">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-surface-divider dark:border-dark-divider">
-          <button onClick={() => setEditingSkill(null)}
-            className="text-xs text-primary hover:underline">← 返回</button>
+      <aside className="w-[300px] flex-shrink-0 border-l border-surface-divider dark:border-dark-divider bg-[#F7F8FA] dark:bg-dark flex flex-col">
+        <div className="win-toolbar flex h-12 items-center justify-between px-3">
+          <button onClick={() => setEditingSkill(null)} className="win-button-subtle h-8 px-2 text-xs">← 返回</button>
           <h3 className="text-sm font-medium truncate flex-1 mx-2">
             {editingSkill.isNew ? '✨ 新建 Skill' : editingSkill.name}
           </h3>
-          <button onClick={toggleContextPanel}
-            className="text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary transition-colors">✕</button>
+          <button onClick={toggleContextPanel} className="win-icon-button h-8 w-8">✕</button>
         </div>
-        <div className="flex-1 flex flex-col p-3 gap-2 overflow-hidden">
+        <div className="flex-1 flex flex-col gap-3 overflow-hidden p-3">
           {editingSkill.originalIsBuiltin && !editingSkill.isNew && (
-            <p className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded px-2 py-1">
+            <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
               📋 内置 Skill — 保存后将在用户目录创建自定义版本，不修改内置文件
             </p>
           )}
           <textarea
             value={editContent}
             onChange={(e) => setEditContent(e.target.value)}
-            className="flex-1 w-full text-xs font-mono p-2 rounded-lg border border-surface-divider dark:border-dark-divider bg-surface-card dark:bg-dark-card resize-none focus:outline-none focus:ring-1 focus:ring-primary"
+            className="flex-1 w-full resize-none rounded-lg border border-surface-divider dark:border-dark-divider bg-white p-3 font-mono text-xs leading-6 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/20 dark:bg-dark-card"
             spellCheck={false}
             placeholder="按 Skill Markdown 格式编写..."
           />
-          {saveMsg && <p className="text-xs">{saveMsg}</p>}
+          {saveMsg && <p className="text-xs text-text-secondary">{saveMsg}</p>}
           <button
             onClick={handleSaveSkill}
             disabled={saving}
-            className="w-full py-1.5 text-xs font-medium rounded-lg bg-primary text-white hover:bg-primary/90 disabled:opacity-50 transition-colors"
+            className="win-button-primary h-9 w-full text-sm"
           >
             {saving
               ? '保存中...'
@@ -224,19 +222,18 @@ export default function ContextPanel() {
 
   // ===== 正常列表视图 =====
   return (
-    <aside className="w-[280px] flex-shrink-0 border-l border-surface-divider dark:border-dark-divider bg-surface dark:bg-dark flex flex-col">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-surface-divider dark:border-dark-divider">
+    <aside className="w-[300px] flex-shrink-0 border-l border-surface-divider dark:border-dark-divider bg-[#F7F8FA] dark:bg-dark flex flex-col">
+      <div className="win-toolbar flex h-12 items-center justify-between px-3">
         <h3 className="text-sm font-medium">上下文</h3>
-        <button onClick={toggleContextPanel}
-          className="text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary transition-colors">✕</button>
+        <button onClick={toggleContextPanel} className="win-icon-button h-8 w-8">✕</button>
       </div>
 
-      <div className="flex-1 overflow-y-auto scrollbar-thin p-4">
+      <div className="flex-1 overflow-y-auto scrollbar-thin p-3.5">
         <div className="space-y-4">
           {/* 当前模式 */}
           <section>
-            <h4 className="text-xs font-medium text-text-secondary uppercase tracking-wider mb-2">当前模式</h4>
-            <div className="px-3 py-2 rounded-lg bg-primary/10 text-sm font-medium text-primary">
+            <h4 className="win-section-title mb-2">当前模式</h4>
+            <div className="win-panel-muted px-3 py-3 text-sm font-medium text-primary">
               {MODE_CONFIG[currentMode].icon} {MODE_CONFIG[currentMode].label} 模式
             </div>
           </section>
@@ -246,14 +243,14 @@ export default function ContextPanel() {
           {/* Skill 列表 */}
           <section>
             <div className="flex items-center justify-between mb-2">
-              <h4 className="text-xs font-medium text-text-secondary uppercase tracking-wider">
+              <h4 className="win-section-title">
                 可用 Skill ({skills.length})
               </h4>
               <div className="flex items-center gap-1.5">
-                <button onClick={refresh} className="text-[10px] text-primary hover:underline">🔄</button>
+                <button onClick={refresh} className="win-icon-button h-7 w-7 text-[11px]" title="刷新">↻</button>
                 <button
                   onClick={handleNewSkill}
-                  className="text-[10px] px-2 py-0.5 rounded bg-primary text-white hover:bg-primary/90 transition-colors"
+                  className="win-button-primary h-7 px-2.5 text-[11px]"
                 >
                   + 新建
                 </button>
@@ -266,7 +263,7 @@ export default function ContextPanel() {
                 {skills.map((skill) => (
                   <div
                     key={skill.id}
-                    className="px-3 py-2 rounded-lg bg-surface-card dark:bg-dark-card text-xs hover:ring-1 hover:ring-primary/50 transition-all group"
+                    className="group rounded-lg border border-surface-divider dark:border-dark-divider bg-white px-3 py-2.5 text-xs shadow-sm transition-colors hover:border-primary/30 dark:bg-dark-card"
                   >
                     <div className="flex items-start justify-between gap-1">
                       <p className="font-medium flex-1 min-w-0 truncate">{skill.name}</p>
@@ -274,7 +271,7 @@ export default function ContextPanel() {
                       <div className="flex items-center gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button
                           onClick={() => handleSkillClick(skill)}
-                          className="text-[11px] text-text-secondary hover:text-primary transition-colors"
+                          className="win-icon-button h-7 w-7 text-[11px]"
                           title="编辑"
                         >
                           ✏️
@@ -282,20 +279,20 @@ export default function ContextPanel() {
                         <button
                           onClick={(e) => handleDeleteSkill(skill, e)}
                           disabled={deletingSkillId === skill.id}
-                          className="text-[11px] text-text-secondary hover:text-red-500 transition-colors disabled:opacity-50"
+                          className="win-icon-button h-7 w-7 text-[11px] disabled:opacity-50"
                           title={skill.is_builtin ? '删除（逻辑删除，重启后生效）' : '删除'}
                         >
                           {deletingSkillId === skill.id ? '⏳' : '🗑'}
                         </button>
                       </div>
                     </div>
-                    <p className="text-text-secondary mt-0.5 line-clamp-2 cursor-pointer" onClick={() => handleSkillClick(skill)}>{skill.description}</p>
+                    <p className="mt-1 line-clamp-2 cursor-pointer text-text-secondary" onClick={() => handleSkillClick(skill)}>{skill.description}</p>
                     <div className="flex flex-wrap gap-1 mt-1">
                       {skill.keywords.slice(0, 3).map((kw) => (
-                        <span key={kw} className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-[10px]">{kw}</span>
+                        <span key={kw} className="win-chip text-[10px]">{kw}</span>
                       ))}
                       {skill.is_builtin && (
-                        <span className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 text-[10px]">内置</span>
+                        <span className="win-badge border-blue-200 bg-blue-50 text-[10px] text-blue-600 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-400">内置</span>
                       )}
                     </div>
                   </div>
@@ -309,7 +306,7 @@ export default function ContextPanel() {
           {/* 知识库管理 */}
           <section>
             <div className="flex items-center justify-between mb-2">
-              <h4 className="text-xs font-medium text-text-secondary uppercase tracking-wider">知识库</h4>
+              <h4 className="win-section-title">知识库</h4>
               <div className="flex items-center gap-1">
                 <input
                   ref={kbFileInputRef}
@@ -321,9 +318,9 @@ export default function ContextPanel() {
                 <button
                   onClick={() => kbFileInputRef.current?.click()}
                   disabled={importing}
-                  className="text-[10px] px-2 py-0.5 rounded bg-primary text-white hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                  className="win-button-primary h-7 px-2.5 text-[11px]"
                 >
-                  {importing ? '导入中...' : '📥 导入文件'}
+                  {importing ? '导入中...' : '导入文件'}
                 </button>
               </div>
             </div>
@@ -341,15 +338,15 @@ export default function ContextPanel() {
               <div className="space-y-1 mt-2">
                 <p className="text-[10px] text-text-secondary mb-1">已导入文件 ({imports.length})</p>
                 {imports.map((imp) => (
-                  <div key={imp.id} className="flex items-center gap-1.5 px-2 py-1.5 rounded-md bg-surface-card dark:bg-dark-card text-xs group">
+                  <div key={imp.id} className="group flex items-center gap-2 rounded-md border border-surface-divider dark:border-dark-divider bg-white px-2.5 py-2 text-xs shadow-sm dark:bg-dark-card">
                     <span className="text-[10px]">📄</span>
                     <div className="flex-1 min-w-0">
-                      <p className="truncate text-[11px]">{imp.file_name}</p>
+                      <p className="truncate text-[11px] font-medium">{imp.file_name}</p>
                     </div>
                     <button
                       onClick={() => handleDeleteImport(imp.id, imp.file_name)}
                       disabled={deletingId === imp.id}
-                      className="flex-shrink-0 text-[10px] text-text-secondary hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-50"
+                      className="win-icon-button h-7 w-7 flex-shrink-0 text-[11px] opacity-0 transition-all group-hover:opacity-100 disabled:opacity-50"
                       title="删除"
                     >
                       {deletingId === imp.id ? '⏳' : '🗑'}
@@ -366,11 +363,11 @@ export default function ContextPanel() {
 
           {/* Know-how 规则库概览 */}
           <section>
-            <h4 className="text-xs font-medium text-text-secondary uppercase tracking-wider mb-2">Know-how 规则库</h4>
+            <h4 className="win-section-title mb-2">Know-how 规则库</h4>
             {khStats ? (
-              <p className="text-xs text-text-secondary">
+              <div className="win-panel-muted px-3 py-3 text-xs text-text-secondary">
                 共 {khStats.total_rules} 条规则，{khStats.active_rules} 条启用
-              </p>
+              </div>
             ) : (
               <p className="text-xs text-text-secondary text-center py-3">加载中...</p>
             )}
@@ -384,7 +381,7 @@ export default function ContextPanel() {
 /** 统计数字卡片 */
 function StatCard({ label, value }: { label: string; value: number }) {
   return (
-    <div className="px-3 py-2 rounded-lg bg-surface-card dark:bg-dark-card text-center">
+    <div className="win-panel-muted px-3 py-3 text-center">
       <p className="text-lg font-semibold">{value}</p>
       <p className="text-[10px] text-text-secondary">{label}</p>
     </div>

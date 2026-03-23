@@ -73,6 +73,9 @@ class HybridSearchService:
         """LanceDB 向量语义检索"""
         if not embedding_service.is_configured:
             return []
+        # 极短查询（< 4 字符）没有语义检索价值，跳过 embedding 调用
+        if len(query.strip()) < 4:
+            return []
         try:
             query_vec = await embedding_service.embed_text(query)
             return await knowledge_service.vector_search(query_vec, limit=limit)

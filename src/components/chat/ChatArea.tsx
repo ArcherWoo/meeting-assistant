@@ -3,22 +3,30 @@
  * 包含：顶部工具栏、消息列表（自动滚动）、底部输入区
  * Agent 模式下触发 Skill 匹配 → 执行工作流
  */
-import { useState, useRef, useEffect, type ChangeEvent } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, type ChangeEvent } from 'react';
 import { useAppStore } from '@/stores/appStore';
 import { useChatStore, DEFAULT_CONVERSATION_TITLE } from '@/stores/chatStore';
-import { streamChat, extractFileText, generateAutoTitle } from '@/services/api';
+import { streamChat, extractFileText, generateAutoTitle, type SkillSuggestionEvent } from '@/services/api';
 import { MODE_CONFIG } from '@/types';
 import MessageBubble from './MessageBubble';
 import ChatInput from './ChatInput';
 import AgentExecutionPanel from '../agent/AgentExecutionPanel';
 
 export default function ChatArea() {
-  const { currentMode, llmConfigs, activeLLMConfigId, toggleContextPanel } = useAppStore();
   const {
-    messages, activeConversationId, isStreaming,
-    streamingContent, addMessage, setStreaming,
+    currentMode,
+    llmConfigs,
+    activeLLMConfigId,
+    toggleContextPanel,
+    contextPanelVisible,
+    backend,
+  } = useAppStore();
+  const {
+    conversations, activeConversationId, messagesByConversation,
+    streamingByConversation, streamingContentByConversation,
+    addMessage, setStreaming,
     appendStreamContent, resetStreamContent, updateMessage,
-    createConversation,
+    createConversation, setActiveConversation,
   } = useChatStore();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -29,17 +37,42 @@ export default function ChatArea() {
   /** Agent 模式：当前正在执行的查询 */
   const [agentQuery, setAgentQuery] = useState<string | null>(null);
   const [welcomeUploading, setWelcomeUploading] = useState(false);
+  /** Skill 推荐（按对话隔离，避免切换会话串线） */
+  const [skillSuggestionByConversation, setSkillSuggestionByConversation] = useState<Record<string, SkillSuggestionEvent | null>>({});
+  /** 预填充到输入框的文本 */
+  const [prefillText, setPrefillText] = useState('');
+  const clearPrefill = useCallback(() => setPrefillText(''), []);
+
+  const modeConversation = useMemo(() => {
+    const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
+    if (activeConversation?.mode === currentMode) {
+      return activeConversation;
+    }
+    return conversations.find((conversation) => conversation.mode === currentMode) ?? null;
+  }, [conversations, activeConversationId, currentMode]);
+
+  const visibleConversationId = modeConversation?.id ?? null;
+  const visibleMessages = visibleConversationId ? (messagesByConversation[visibleConversationId] ?? []) : [];
+  const visibleIsStreaming = visibleConversationId ? (streamingByConversation[visibleConversationId] ?? false) : false;
+  const visibleStreamingContent = visibleConversationId ? (streamingContentByConversation[visibleConversationId] ?? '') : '';
+  const skillSuggestion = visibleConversationId ? (skillSuggestionByConversation[visibleConversationId] ?? null) : null;
+
+  useEffect(() => {
+    if (visibleConversationId && visibleConversationId !== activeConversationId) {
+      setActiveConversation(visibleConversationId);
+    }
+  }, [visibleConversationId, activeConversationId, setActiveConversation]);
 
   // 消息列表自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, streamingContent]);
+  }, [visibleMessages, visibleStreamingContent]);
 
   /** 发送消息（支持附件上下文） */
   const handleSend = async (content: string, attachmentContext?: string) => {
     // Agent 模式：触发 Skill 匹配 → 执行工作流
     if (currentMode === 'agent') {
-      let convId = activeConversationId;
+      let convId = visibleConversationId;
       if (!convId) convId = createConversation(currentMode);
       addMessage({ conversationId: convId, role: 'user', content });
       setAgentQuery(content);
@@ -47,13 +80,18 @@ export default function ChatArea() {
     }
 
     // Copilot / Builder 模式：正常 LLM 对话
-    let convId = activeConversationId;
+    let convId = visibleConversationId;
     if (!convId) {
       convId = createConversation(currentMode);
+    } else if (activeConversationId !== convId) {
+      setActiveConversation(convId);
     }
 
+    const targetConvId = convId;
+    const historyMessages = messagesByConversation[targetConvId] ?? [];
+
     // 用户消息只显示用户输入的文字（不含附件原文）
-    addMessage({ conversationId: convId, role: 'user', content });
+    addMessage({ conversationId: targetConvId, role: 'user', content });
 
     if (!activeLLMConfig) return;
 
@@ -61,12 +99,11 @@ export default function ChatArea() {
     const llmContent = attachmentContext ? content + attachmentContext : content;
 
     const history = [
-      ...messages.map((m) => ({ role: m.role, content: m.content })),
+      ...historyMessages.map((m) => ({ role: m.role, content: m.content })),
       { role: 'user', content: llmContent },
     ];
 
     // 使用当前 convId 隔离流式状态，避免阻塞其他对话
-    const targetConvId = convId;
     setStreaming(true, targetConvId);
     resetStreamContent(targetConvId);
 
@@ -81,6 +118,7 @@ export default function ChatArea() {
     });
 
     let fullContent = '';
+    setSkillSuggestionByConversation((prev) => ({ ...prev, [targetConvId]: null }));
 
     await streamChat(
       history,
@@ -88,7 +126,6 @@ export default function ChatArea() {
       (chunk) => {
         fullContent += chunk;
         appendStreamContent(chunk, targetConvId);
-        // 传入 targetConvId，确保更新写入正确对话的消息列表
         updateMessage(assistantMsgId, fullContent, targetConvId);
       },
       () => {
@@ -156,7 +193,12 @@ export default function ChatArea() {
         delete abortMapRef.current[targetConvId];
       },
       controller.signal,
-      currentMode
+      currentMode,
+      content,
+      undefined, // onMetadata — Phase 2 将在此处添加 source badge 支持
+      (suggestion) => {
+        setSkillSuggestionByConversation((prev) => ({ ...prev, [targetConvId]: suggestion }));
+      },
     );
   };
 
@@ -179,34 +221,53 @@ export default function ChatArea() {
 
   /** 停止生成（仅中止当前活跃对话的流，不影响其他对话） */
   const handleStop = () => {
-    if (activeConversationId) {
-      abortMapRef.current[activeConversationId]?.abort();
-      delete abortMapRef.current[activeConversationId];
-      setStreaming(false, activeConversationId);
-      resetStreamContent(activeConversationId);
+    if (visibleConversationId) {
+      abortMapRef.current[visibleConversationId]?.abort();
+      delete abortMapRef.current[visibleConversationId];
+      setStreaming(false, visibleConversationId);
+      resetStreamContent(visibleConversationId);
     }
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-h-0 bg-surface dark:bg-dark">
       {/* 顶部工具栏 */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-surface-divider dark:border-dark-divider bg-surface-card dark:bg-dark-card">
-        <div className="flex items-center gap-2">
-          <span>{MODE_CONFIG[currentMode].icon}</span>
-          <span className="text-sm font-medium">{MODE_CONFIG[currentMode].label}</span>
+      <div className="win-toolbar h-12 px-4 flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex h-8 w-8 items-center justify-center rounded-md border border-surface-divider dark:border-dark-divider bg-white dark:bg-dark-sidebar text-base shadow-sm">
+            <span>{MODE_CONFIG[currentMode].icon}</span>
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-sm font-semibold truncate">{MODE_CONFIG[currentMode].label}</span>
+              <span
+                className={backend.connected
+                  ? 'win-badge border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300'
+                  : 'win-badge border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300'}
+              >
+                <span className={backend.connected ? 'h-1.5 w-1.5 rounded-full bg-emerald-500' : 'h-1.5 w-1.5 rounded-full bg-amber-500'} />
+                {backend.connected ? '后端已连接' : '后端未连接'}
+              </span>
+            </div>
+            <p className="text-xs text-text-secondary truncate mt-0.5">
+              {activeLLMConfig?.model ? `当前模型：${activeLLMConfig.model}` : '请选择可用模型配置'}
+            </p>
+          </div>
         </div>
         <button
           onClick={toggleContextPanel}
-          className="text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary text-sm transition-colors"
-          title="切换上下文面板"
+          className="win-button h-8 px-3 text-xs"
+          title={contextPanelVisible ? '隐藏上下文面板' : '显示上下文面板'}
         >
-          📋
+          <span>📋</span>
+          <span>{contextPanelVisible ? '隐藏面板' : '上下文面板'}</span>
         </button>
       </div>
 
       {/* 消息列表 */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-4">
-        {messages.length === 0 && !agentQuery ? (
+      <div className="flex-1 overflow-y-auto scrollbar-thin px-5 py-4 bg-[#F7F8FA] dark:bg-[#101726]">
+        <div className="mx-auto flex h-full w-full max-w-5xl flex-col">
+        {visibleMessages.length === 0 && !agentQuery ? (
           <>
             {/* 隐藏的文件输入（欢迎屏使用） */}
             <input
@@ -225,9 +286,45 @@ export default function ChatArea() {
           </>
         ) : (
           <>
-            {messages.map((msg) => (
+            {visibleMessages.map((msg) => (
               <MessageBubble key={msg.id} message={msg} />
             ))}
+            {/* Skill 推荐条（Copilot 模式，SSE 推送） */}
+            {skillSuggestion && !visibleIsStreaming && (
+              <div className="win-panel mb-4 flex items-center gap-3 border-blue-200 bg-blue-50/90 px-4 py-3 dark:border-blue-800 dark:bg-blue-900/20 animate-fade-in">
+                <div className="flex h-10 w-10 items-center justify-center rounded-md border border-blue-200 bg-white text-lg dark:border-blue-800 dark:bg-blue-950/40">🛠️</div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold truncate">
+                    推荐技能：{skillSuggestion.skill_name}
+                  </p>
+                  <p className="text-xs text-text-secondary truncate mt-0.5">
+                    {skillSuggestion.description}
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    setPrefillText(`请使用「${skillSuggestion.skill_name}」技能帮我处理`);
+                    if (visibleConversationId) {
+                      setSkillSuggestionByConversation((prev) => ({ ...prev, [visibleConversationId]: null }));
+                    }
+                  }}
+                  className="win-button-primary h-9 px-3 text-xs flex-shrink-0"
+                >
+                  应用
+                </button>
+                <button
+                  onClick={() => {
+                    if (visibleConversationId) {
+                      setSkillSuggestionByConversation((prev) => ({ ...prev, [visibleConversationId]: null }));
+                    }
+                  }}
+                  className="win-icon-button h-9 w-9 flex-shrink-0 text-sm"
+                  title="忽略"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
             {/* Agent 模式执行面板 */}
             {agentQuery && (
               <AgentExecutionPanel
@@ -243,14 +340,17 @@ export default function ChatArea() {
           </>
         )}
         <div ref={messagesEndRef} />
+        </div>
       </div>
 
       {/* 输入区域 */}
       <ChatInput
         onSend={handleSend}
         onStop={handleStop}
-        isStreaming={isStreaming}
+        isStreaming={visibleIsStreaming}
         disabled={!activeLLMConfig?.apiKey}
+        prefillText={prefillText}
+        onPrefillConsumed={clearPrefill}
       />
     </div>
   );
@@ -264,28 +364,30 @@ function WelcomeScreen({ mode, onQuickMessage, onUploadFile, uploading }: {
   uploading: boolean;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center h-full text-center animate-fade-in">
-      <div className="text-5xl mb-4">🍒</div>
-      <h2 className="text-xl font-semibold mb-2">Meeting Assistant</h2>
-      <p className="text-text-secondary text-sm max-w-md">
-        {mode === 'copilot' && '你好！我是你的会议助手。使用下方 📎 按钮添加附件，或直接提问。'}
-        {mode === 'builder' && '在这里，你可以通过对话创建自定义 Skill，将重复工作自动化。'}
-        {mode === 'agent' && '选择一个 Skill，我将自动执行完整的工作流程。'}
-      </p>
-      <div className="mt-6 flex gap-3 text-sm text-text-secondary">
-        <button
-          onClick={() => onQuickMessage('你好，请介绍一下你能做什么')}
-          className="px-3 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer"
-        >
-          👋 &quot;你好&quot;
-        </button>
-        <button
-          onClick={onUploadFile}
-          disabled={uploading}
-          className="px-3 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-wait"
-        >
-          {uploading ? '⏳ 提取中...' : '📎 上传文件'}
-        </button>
+    <div className="flex flex-1 items-center justify-center py-8 animate-fade-in">
+      <div className="win-panel w-full max-w-2xl px-8 py-9 text-center">
+        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl border border-surface-divider dark:border-dark-divider bg-white dark:bg-dark-sidebar text-3xl shadow-sm">🍒</div>
+        <h2 className="text-[22px] font-semibold mb-2">Meeting Assistant</h2>
+        <p className="text-text-secondary text-sm max-w-xl mx-auto leading-6">
+          {mode === 'copilot' && '你好！我是你的会议助手。使用下方 📎 按钮添加附件，或直接提问。'}
+          {mode === 'builder' && '在这里，你可以通过对话创建自定义 Skill，将重复工作自动化。'}
+          {mode === 'agent' && '选择一个 Skill，我将自动执行完整的工作流程。'}
+        </p>
+        <div className="mt-6 flex flex-wrap items-center justify-center gap-3 text-sm text-text-secondary">
+          <button
+            onClick={() => onQuickMessage('你好，请介绍一下你能做什么')}
+            className="win-button h-10 px-4 text-sm"
+          >
+            👋 &quot;你好&quot;
+          </button>
+          <button
+            onClick={onUploadFile}
+            disabled={uploading}
+            className="win-button-primary h-10 px-4 text-sm disabled:opacity-50 disabled:cursor-wait"
+          >
+            {uploading ? '⏳ 提取中...' : '📎 上传文件'}
+          </button>
+        </div>
       </div>
     </div>
   );

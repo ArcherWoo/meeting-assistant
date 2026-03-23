@@ -33,47 +33,147 @@ class AssembledContext:
     def has_context(self) -> bool:
         return bool(self.knowledge_results or self.knowhow_rules or self.matched_skills)
 
-    def to_prompt_suffix(self) -> str:
-        """将检索结果格式化为 system prompt 的追加段落"""
-        parts: list[str] = []
-
-        # ── 知识库检索结果 ──
+    def _build_source_summary(self) -> str:
+        sources = []
         if self.knowledge_results:
-            parts.append("\n\n📚 以下是从知识库中检索到的相关参考信息，请在回答时优先参考：")
-            for i, r in enumerate(self.knowledge_results[:5], 1):
-                # 结构化采购记录
-                if "item_name" in r:
-                    line = f"[{i}] {r.get('category', '')} - {r['item_name']}"
-                    if r.get("supplier"):
-                        line += f"（供应商: {r['supplier']}）"
-                    if r.get("unit_price"):
-                        line += f" 单价: {r['unit_price']}"
-                    if r.get("raw_text"):
-                        line += f"\n    原文: {r['raw_text'][:200]}"
-                    parts.append(line)
-                # 语义检索的文本块
-                elif "content" in r:
-                    source = r.get("source_file", "未知来源")
-                    parts.append(f"[{i}] 来源: {source}\n    {r['content'][:300]}")
-
-        # ── Know-how 规则（✅ Issue 3: 移除 [:8] 截断，注入全部活跃规则）──
+            sources.append(f"知识库({len(self.knowledge_results)}条)")
         if self.knowhow_rules:
-            parts.append("\n\n📋 以下是相关的业务规则（Know-how），请在回答时检查是否涉及：")
-            for i, rule in enumerate(self.knowhow_rules, 1):
-                weight_icon = "⚠️" if rule.get("weight", 0) >= 3 else "ℹ️"
-                parts.append(f"{weight_icon} [{i}] {rule['rule_text']}")
-
-        # ── Skill 匹配结果（✅ Issue 2: 新增 Skill 提示段落）──
+            sources.append(f"Know-how({len(self.knowhow_rules)}条)")
         if self.matched_skills:
-            parts.append("\n\n🛠️ 检测到用户意图可能匹配以下技能（Skill），可按需引导用户使用：")
-            for s in self.matched_skills:
-                confidence_icon = "✅" if s["confidence"] == "high" else "💡"
-                parts.append(
-                    f"{confidence_icon} 【{s['skill_name']}】（匹配度: {s['score']:.0%}）"
-                    f" - {s['description']}"
-                )
+            sources.append(f"Skill({len(self.matched_skills)}个)")
+        return " + ".join(sources) if sources else ""
 
-        return "\n".join(parts)
+    @staticmethod
+    def _format_knowhow_rule(rule: dict, index: int) -> str:
+        weight_icon = "⚠️" if rule.get("weight", 0) >= 3 else "ℹ️"
+        return f"{weight_icon} [{index}] {rule['rule_text']}"
+
+    @staticmethod
+    def _format_knowledge_result(result: dict, index: int) -> str:
+        if "item_name" in result:
+            line = f"[{index}] {result.get('category', '')} - {result['item_name']}"
+            if result.get("supplier"):
+                line += f"（供应商: {result['supplier']}）"
+            if result.get("unit_price"):
+                line += f" 单价: {result['unit_price']}"
+            if result.get("raw_text"):
+                line += f"\n    原文: {result['raw_text'][:200]}"
+            return line
+
+        if "content" in result:
+            source = result.get("source_file", "未知来源")
+            return f"[{index}] 来源: {source}\n    {result['content'][:300]}"
+
+        return ""
+
+    @staticmethod
+    def _format_skill_match(skill: dict) -> str:
+        confidence_icon = "✅" if skill["confidence"] == "high" else "💡"
+        return (
+            f"{confidence_icon} 【{skill['skill_name']}】（匹配度: {skill['score']:.0%}）"
+            f" - {skill['description']}"
+        )
+
+    def fit_to_budget(self, max_chars: int) -> "AssembledContext":
+        """按条目粒度裁剪上下文，保证被保留的条目都是完整的。"""
+        if max_chars <= 0 or not self.has_context:
+            return AssembledContext()
+
+        fitted = AssembledContext()
+        used = 0
+
+        def _try_add_section(
+            header: str,
+            items: list[dict],
+            formatter,
+            target_attr: str,
+        ) -> None:
+            nonlocal used
+            if not items:
+                return
+
+            section_items: list[dict] = []
+            header_used = False
+            header_cost = len(header) + 1
+
+            for index, item in enumerate(items, 1):
+                line = formatter(item, index) if formatter.__code__.co_argcount == 2 else formatter(item)
+                if not line:
+                    continue
+
+                cost = len(line) + 1
+                if not header_used:
+                    cost += header_cost
+
+                if used + cost > max_chars:
+                    break
+
+                if not header_used:
+                    used += header_cost
+                    header_used = True
+
+                used += len(line) + 1
+                section_items.append(item)
+
+            if section_items:
+                setattr(fitted, target_attr, section_items)
+
+        _try_add_section(
+            "📋 以下是相关的业务规则（Know-how），请在回答时检查是否涉及：",
+            self.knowhow_rules,
+            self._format_knowhow_rule,
+            "knowhow_rules",
+        )
+        _try_add_section(
+            "📚 以下是从知识库中检索到的相关参考信息，请在回答时优先参考：",
+            self.knowledge_results[:5],
+            self._format_knowledge_result,
+            "knowledge_results",
+        )
+        _try_add_section(
+            "🛠️ 检测到用户意图可能匹配以下技能（Skill），可按需引导用户使用：",
+            self.matched_skills,
+            self._format_skill_match,
+            "matched_skills",
+        )
+
+        fitted.source_summary = fitted._build_source_summary()
+        return fitted
+
+    def to_prompt_suffix(self, max_chars: int | None = None) -> str:
+        """将检索结果格式化为 system prompt 的追加段落。"""
+        ctx = self.fit_to_budget(max_chars) if max_chars is not None else self
+        sections: list[str] = []
+
+        if ctx.knowhow_rules:
+            lines = [
+                "📋 以下是相关的业务规则（Know-how），请在回答时检查是否涉及：",
+                *[
+                    ctx._format_knowhow_rule(rule, index)
+                    for index, rule in enumerate(ctx.knowhow_rules, 1)
+                ],
+            ]
+            sections.append("\n".join(lines))
+
+        if ctx.knowledge_results:
+            lines = [
+                "📚 以下是从知识库中检索到的相关参考信息，请在回答时优先参考：",
+                *[
+                    text
+                    for index, result in enumerate(ctx.knowledge_results[:5], 1)
+                    if (text := ctx._format_knowledge_result(result, index))
+                ],
+            ]
+            sections.append("\n".join(lines))
+
+        if ctx.matched_skills:
+            lines = [
+                "🛠️ 检测到用户意图可能匹配以下技能（Skill），可按需引导用户使用：",
+                *[ctx._format_skill_match(skill) for skill in ctx.matched_skills],
+            ]
+            sections.append("\n".join(lines))
+
+        return "\n\n".join(sections)
 
 
 class ContextAssembler:
@@ -117,15 +217,7 @@ class ContextAssembler:
         ctx.knowhow_rules = await knowhow_task
         ctx.matched_skills = await skills_task
 
-        # 生成来源摘要（用于日志）
-        sources = []
-        if ctx.knowledge_results:
-            sources.append(f"知识库({len(ctx.knowledge_results)}条)")
-        if ctx.knowhow_rules:
-            sources.append(f"Know-how({len(ctx.knowhow_rules)}条)")
-        if ctx.matched_skills:
-            sources.append(f"Skill({len(ctx.matched_skills)}个)")
-        ctx.source_summary = " + ".join(sources) if sources else ""
+        ctx.source_summary = ctx._build_source_summary()
 
         if ctx.has_context:
             logger.info(f"[ContextAssembler] 已组装上下文: {ctx.source_summary}")

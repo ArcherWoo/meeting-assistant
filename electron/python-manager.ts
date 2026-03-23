@@ -3,6 +3,7 @@
  * 负责：启动/停止 Python 后端、端口分配、健康检查
  */
 import { spawn, ChildProcess } from 'child_process';
+import fs from 'fs';
 import path from 'path';
 import net from 'net';
 
@@ -33,19 +34,42 @@ export class PythonManager {
     if (this.running) return;
 
     this.port = await this.findFreePort();
-    const backendDir = path.join(__dirname, '..', 'backend');
 
-    // 开发环境直接用 python，生产环境用打包的可执行文件
-    // Windows 通常使用 'python'，macOS/Linux 使用 'python3'
-    const devPythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-    const pythonCmd = process.env.VITE_DEV_SERVER_URL ? devPythonCmd : path.join(backendDir, 'meeting-assistant-backend');
+    const isPackaged = !process.env.VITE_DEV_SERVER_URL;
+    const exeName = process.platform === 'win32'
+      ? 'meeting-assistant-backend.exe'
+      : 'meeting-assistant-backend';
 
-    const args = process.env.VITE_DEV_SERVER_URL
+    // 打包后，后端 exe 放在 resources/backend/dist/meeting-assistant-backend/ 下
+    const packagedExePath = path.join(
+      (process as any).resourcesPath || path.join(__dirname, '..'),
+      'backend', 'dist', 'meeting-assistant-backend', exeName
+    );
+    // 开发目录下的备选路径
+    const devExePath = path.join(__dirname, '..', 'backend', 'dist', 'meeting-assistant-backend', exeName);
+
+    const usePackagedBackend = isPackaged && (fs.existsSync(packagedExePath) || fs.existsSync(devExePath));
+    const packagedBackendPath = fs.existsSync(packagedExePath) ? packagedExePath : devExePath;
+
+    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+    const backendCmd = usePackagedBackend ? packagedBackendPath : pythonCmd;
+
+    // 打包后端运行时的工作目录（exe 所在目录）
+    const backendCwd = usePackagedBackend
+      ? path.dirname(packagedBackendPath)
+      : path.join(__dirname, '..', 'backend');
+
+    const args = usePackagedBackend
+      ? ['--host', '127.0.0.1', '--port', String(this.port)]
+      : process.env.VITE_DEV_SERVER_URL
       ? ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(this.port), '--reload']
-      : ['--port', String(this.port)];
+      : ['main.py', '--host', '127.0.0.1', '--port', String(this.port)];
 
-    this.process = spawn(pythonCmd, args, {
-      cwd: backendDir,
+    console.log(`[Python] Launching backend with: ${backendCmd} ${args.join(' ')}`);
+    console.log(`[Python] Working directory: ${backendCwd}`);
+
+    this.process = spawn(backendCmd, args, {
+      cwd: backendCwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, PYTHONUNBUFFERED: '1' },
     });
@@ -56,6 +80,9 @@ export class PythonManager {
     });
     this.process.stderr?.on('data', (data: Buffer) => {
       console.error(`[Python] ${data.toString().trim()}`);
+    });
+    this.process.on('error', (error) => {
+      console.error(`[Python] Failed to spawn backend process: ${error.message}`);
     });
     this.process.on('exit', (code) => {
       console.log(`[Python] Process exited with code ${code}`);

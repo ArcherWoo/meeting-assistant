@@ -2,22 +2,29 @@ appId: com.meeting-assistant.app
 productName: Meeting Assistant
 directories:
   buildResources: build
-  output: release
+  output: out-new
+asar: true
 files:
-  - dist
-  - dist-electron
+  - dist/**
+  - dist-electron/**
+  - "!node_modules/**"
+extraResources:
+  - from: backend/dist
+    to: backend/dist
+    filter:
+      - "**/*"
+win:
+  signingHashAlgorithms: []
+  sign: false
+  signAndEditExecutable: false
+  target:
+    - target: dir
+      arch:
+        - x64
 mac:
   target:
     - target: dmg
       arch:
         - universal
   category: public.app-category.productivity
-win:
-  target:
-    - target: nsis
-      arch:
-        - x64
-nsis:
-  oneClick: false
-  allowToChangeInstallationDirectory: true
 

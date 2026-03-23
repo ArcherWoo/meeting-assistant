@@ -49,13 +49,22 @@ export default function Sidebar() {
   const handleSetMode = (mode: AppMode) => {
     setMode(mode);
     setActiveView('chat');
+    const firstMatchingConversation = conversations.find((conversation) => conversation.mode === mode);
+    if (firstMatchingConversation) {
+      cancelRename();
+      setActiveConversation(firstMatchingConversation.id);
+    }
   };
 
   /** 点击已有对话：切换回聊天视图 */
-  const handleSelectConversation = (id: string) => {
+  const handleSelectConversation = (conversationId: string) => {
     cancelRename();
+    const conversation = conversations.find((item) => item.id === conversationId);
+    if (conversation) {
+      setMode(conversation.mode);
+    }
     setActiveView('chat');
-    setActiveConversation(id);
+    setActiveConversation(conversationId);
   };
 
   const handleRenameKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -71,19 +80,22 @@ export default function Sidebar() {
   return (
     <aside
       className={clsx(
-        'flex flex-col h-full bg-surface-sidebar dark:bg-dark-sidebar border-r border-surface-divider dark:border-dark-divider transition-all duration-200',
-        sidebarCollapsed ? 'w-16' : 'w-[220px]'
+        'flex h-full flex-col border-r border-surface-divider dark:border-dark-divider bg-[#F5F7FA] dark:bg-dark-sidebar transition-all duration-200',
+        sidebarCollapsed ? 'w-[72px]' : 'w-[236px]'
       )}
     >
       {/* Logo 区域 */}
-      <div className="flex items-center gap-2 px-4 py-3 titlebar-no-drag">
-        <span className="text-xl">🍒</span>
+      <div className="titlebar-no-drag flex items-center gap-2 border-b border-surface-divider dark:border-dark-divider px-3 py-2.5">
+        <span className="flex h-8 w-8 items-center justify-center rounded-md border border-surface-divider dark:border-dark-divider bg-white text-lg shadow-sm dark:bg-dark-card">🍒</span>
         {!sidebarCollapsed && (
-          <span className="font-semibold text-sm truncate">Meeting Asst</span>
+          <div className="min-w-0">
+            <span className="block truncate text-sm font-semibold">Meeting Asst</span>
+            <span className="block truncate text-[11px] text-text-secondary">Windows Desktop</span>
+          </div>
         )}
         <button
           onClick={toggleSidebar}
-          className="ml-auto text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary transition-colors p-1 rounded"
+          className="win-icon-button ml-auto h-8 w-8"
           title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
         >
           {sidebarCollapsed ? '→' : '←'}
@@ -95,8 +107,8 @@ export default function Sidebar() {
         <button
           onClick={handleNewChat}
           className={clsx(
-            'w-full flex items-center rounded-button bg-primary text-white text-sm font-medium hover:bg-primary-600 transition-colors',
-            sidebarCollapsed ? 'justify-center px-0 py-2.5' : 'gap-2 px-3 py-2'
+            'win-button-primary w-full',
+            sidebarCollapsed ? 'justify-center px-0 py-2.5' : 'justify-start gap-2 px-3 py-2.5'
           )}
           title="新建对话"
           aria-label="新建对话"
@@ -107,7 +119,7 @@ export default function Sidebar() {
       </div>
 
       {/* 对话列表 */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin px-2">
+      <div className="flex-1 overflow-y-auto scrollbar-thin px-2 py-1.5">
         {conversations.length === 0 && !sidebarCollapsed && (
           <p className="text-xs text-text-secondary text-center mt-8 px-2">
             点击上方按钮开始新对话
@@ -117,21 +129,21 @@ export default function Sidebar() {
           <div
             key={conv.id}
             className={clsx(
-              'w-full rounded-lg mb-0.5 text-sm transition-colors group',
+              'group mb-1 w-full text-sm transition-colors',
               conv.id === activeConversationId
-                ? 'bg-primary-50 dark:bg-primary-900/30 text-primary'
-                : 'hover:bg-gray-100 dark:hover:bg-gray-800 text-text-primary dark:text-text-dark-primary'
+                ? 'rounded-md border border-primary/20 bg-white text-primary shadow-sm dark:bg-dark-card'
+                : 'rounded-md border border-transparent text-text-primary dark:text-text-dark-primary hover:border-surface-divider hover:bg-white dark:hover:border-dark-divider dark:hover:bg-dark-card'
             )}
           >
             {sidebarCollapsed ? (
               <button
                 onClick={() => handleSelectConversation(conv.id)}
-                className="w-full text-left px-3 py-2"
+                className="flex min-h-[44px] w-full items-center justify-center text-left"
               >
                 <span>{MODE_CONFIG[conv.mode].icon}</span>
               </button>
             ) : (
-              <div className="flex items-center gap-2 min-w-0 px-3 py-2">
+              <div className="flex items-center gap-2 min-w-0 px-3 py-2.5">
                 <span className="flex-shrink-0">{MODE_CONFIG[conv.mode].icon}</span>
 
                 {editingId === conv.id ? (
@@ -143,12 +155,12 @@ export default function Sidebar() {
                       onKeyDown={handleRenameKeyDown}
                       onClick={(e) => e.stopPropagation()}
                       onBlur={submitRename}
-                      className="flex-1 min-w-0 px-2 py-1 text-sm rounded-md border border-primary/30 bg-white dark:bg-dark-card focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      className="flex-1 min-w-0 rounded-md border border-primary/30 bg-white px-2 py-1 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/20 dark:bg-dark-card"
                     />
                     <button
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={submitRename}
-                      className="text-xs text-primary hover:text-primary-600 transition-colors"
+                      className="win-icon-button h-7 w-7 text-xs"
                       title="保存名称"
                     >
                       ✔
@@ -156,7 +168,7 @@ export default function Sidebar() {
                     <button
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={cancelRename}
-                      className="text-xs text-text-secondary hover:text-text-primary transition-colors"
+                      className="win-icon-button h-7 w-7 text-xs"
                       title="取消重命名"
                     >
                       ✕
@@ -168,25 +180,25 @@ export default function Sidebar() {
                       onClick={() => handleSelectConversation(conv.id)}
                       className="min-w-0 flex-1 text-left"
                     >
-                      <div className="truncate text-sm" title={conv.title}>{conv.title}</div>
+                      <div className="truncate text-sm font-medium" title={conv.title}>{conv.title}</div>
                       {conv.lastMessage && (
-                        <div className="truncate text-xs text-text-secondary mt-0.5">
+                        <div className="mt-0.5 truncate text-[11px] text-text-secondary">
                           {conv.lastMessage}
                         </div>
                       )}
                     </button>
 
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                    <div className="flex flex-shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                       <button
                         onClick={() => startRename(conv.id, conv.title)}
-                        className="text-text-secondary hover:text-primary transition-colors"
+                        className="win-icon-button h-7 w-7 text-xs"
                         title="重命名"
                       >
                         ✏️
                       </button>
                       <button
                         onClick={() => deleteConversation(conv.id)}
-                        className="text-text-secondary hover:text-red-500 transition-colors"
+                        className="win-icon-button h-7 w-7 text-xs"
                         title="删除对话"
                       >
                         ×
@@ -213,10 +225,10 @@ export default function Sidebar() {
                   key={mode}
                   onClick={() => handleSetMode(mode)}
                   className={clsx(
-                    'w-full flex items-center justify-center py-2 rounded-lg text-sm transition-colors',
+                  'flex min-h-[40px] w-full items-center justify-center rounded-md border text-sm transition-colors',
                     currentMode === mode
-                      ? 'bg-white dark:bg-dark-card shadow-light text-primary font-medium'
-                      : 'text-text-secondary hover:bg-gray-100 dark:hover:bg-gray-800'
+                    ? 'border-primary/20 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
+                    : 'border-transparent text-text-secondary hover:border-surface-divider hover:bg-white dark:hover:border-dark-divider dark:hover:bg-dark-card'
                   )}
                   title={MODE_CONFIG[mode].label}
                   aria-label={MODE_CONFIG[mode].label}
@@ -229,10 +241,10 @@ export default function Sidebar() {
             <button
               onClick={handleToggleKnowhow}
               className={clsx(
-                'w-full flex items-center justify-center py-2 rounded-lg text-sm transition-colors',
+                'flex min-h-[40px] w-full items-center justify-center rounded-md border text-sm transition-colors',
                 activeView === 'knowhow'
-                  ? 'bg-primary/10 text-primary font-medium'
-                  : 'text-text-secondary hover:bg-gray-100 dark:hover:bg-gray-800'
+                  ? 'border-primary/20 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
+                  : 'border-transparent text-text-secondary hover:border-surface-divider hover:bg-white dark:hover:border-dark-divider dark:hover:bg-dark-card'
               )}
               title="Know-how 规则"
               aria-label="Know-how 规则"
@@ -242,7 +254,7 @@ export default function Sidebar() {
 
             <button
               onClick={toggleSettings}
-              className="w-full flex items-center justify-center py-2 rounded-lg text-sm text-text-secondary hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+              className="flex min-h-[40px] w-full items-center justify-center rounded-md border border-transparent text-sm text-text-secondary transition-colors hover:border-surface-divider hover:bg-white dark:hover:border-dark-divider dark:hover:bg-dark-card"
               title="设置"
               aria-label="设置"
             >
@@ -251,21 +263,21 @@ export default function Sidebar() {
           </>
         ) : (
           <>
-          {/* 模式切换 Segmented Control */}
-          <div className="flex bg-gray-100 dark:bg-gray-800 rounded-button p-0.5">
+          <div className="space-y-1">
             {(Object.keys(MODE_CONFIG) as AppMode[]).map((mode) => (
               <button
                 key={mode}
                 onClick={() => handleSetMode(mode)}
                 className={clsx(
-                  'flex-1 text-center py-1.5 rounded-md text-xs transition-all',
+                  'flex w-full items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors',
                   currentMode === mode
-                    ? 'bg-white dark:bg-dark-card shadow-light font-medium'
-                    : 'text-text-secondary hover:text-text-primary dark:hover:text-text-dark-primary'
+                    ? 'border-primary/20 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
+                    : 'border-transparent text-text-secondary hover:border-surface-divider hover:bg-white hover:text-text-primary dark:hover:border-dark-divider dark:hover:bg-dark-card dark:hover:text-text-dark-primary'
                 )}
                 title={MODE_CONFIG[mode].label}
               >
-                {MODE_CONFIG[mode].icon}
+                <span>{MODE_CONFIG[mode].icon}</span>
+                <span>{MODE_CONFIG[mode].label}</span>
               </button>
             ))}
           </div>
@@ -274,10 +286,10 @@ export default function Sidebar() {
           <button
             onClick={handleToggleKnowhow}
             className={clsx(
-              'w-full flex items-center gap-2 px-3 py-1.5 rounded-button text-sm transition-colors',
+              'w-full flex items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors',
               activeView === 'knowhow'
-                ? 'bg-primary/10 text-primary font-medium'
-                : 'text-text-secondary hover:bg-gray-100 dark:hover:bg-gray-800'
+                ? 'border-primary/20 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
+                : 'border-transparent text-text-secondary hover:border-surface-divider hover:bg-white dark:hover:border-dark-divider dark:hover:bg-dark-card'
             )}
           >
             <span>📚</span>
@@ -287,7 +299,7 @@ export default function Sidebar() {
           {/* 设置按钮 */}
           <button
             onClick={toggleSettings}
-            className="w-full flex items-center gap-2 px-3 py-1.5 rounded-button text-sm text-text-secondary hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            className="w-full flex items-center gap-2 rounded-md border border-transparent px-3 py-2 text-sm text-text-secondary transition-colors hover:border-surface-divider hover:bg-white dark:hover:border-dark-divider dark:hover:bg-dark-card"
           >
             <span>⚙️</span>
             <span>设置</span>
