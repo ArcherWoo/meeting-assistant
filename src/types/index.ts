@@ -3,19 +3,6 @@
  * 遵循 PRD §10.2 前端状态结构 + §4.2 请求格式
  */
 
-// ===== Electron API 类型 =====
-export interface ElectronAPI {
-  getBackendPort: () => Promise<number>;
-  getBackendStatus: () => Promise<boolean>;
-  platform: string;
-}
-
-declare global {
-  interface Window {
-    electronAPI?: ElectronAPI;
-  }
-}
-
 // ===== 三模式架构 =====
 export type AppMode = 'copilot' | 'builder' | 'agent';
 
@@ -28,6 +15,51 @@ export const MODE_CONFIG: Record<AppMode, { label: string; icon: string; color: 
 // ===== 消息类型 =====
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
+export interface ContextCitation {
+  id: string;
+  source_type: 'knowledge' | 'knowhow' | 'skill';
+  label: string;
+  title: string;
+  snippet: string;
+  location?: string;
+  file_name?: string;
+  page?: number;
+  chunk_type?: string;
+  chunk_index?: number;
+  char_start?: number;
+  char_end?: number;
+}
+
+export interface ContextMetadata {
+  knowledge_count: number;
+  knowhow_count: number;
+  skill_count: number;
+  summary: string;
+  citations: ContextCitation[];
+  schema_version?: number;
+  truncated?: boolean;
+  retrieved_summary?: string;
+  retrieved_knowledge_count?: number;
+  retrieved_knowhow_count?: number;
+  retrieved_skill_count?: number;
+  retrieved_citations?: ContextCitation[];
+}
+
+export interface SkillSuggestionEvent {
+  skill_id: string;
+  skill_name: string;
+  description: string;
+  score: number;
+  confidence: string;
+  schema_version?: number;
+  matched_keywords?: string[];
+}
+
+export interface MessageMetadata {
+  context?: ContextMetadata;
+  skillSuggestion?: SkillSuggestionEvent;
+}
+
 export interface Message {
   id: string;
   conversationId: string;
@@ -38,6 +70,7 @@ export interface Message {
   tokenOutput?: number;
   durationMs?: number;
   attachments?: Attachment[];
+  metadata?: MessageMetadata;
   createdAt: string;
 }
 
@@ -236,4 +269,3 @@ export interface BackendStatus {
   connected: boolean;
   port: number;
 }
-

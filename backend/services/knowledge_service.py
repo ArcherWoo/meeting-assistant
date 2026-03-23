@@ -59,6 +59,71 @@ class KnowledgeService:
         self._lance_db = None
         self._chunks_table = None
 
+    @staticmethod
+    def _build_chunk_metadata(import_id: str, chunk: dict) -> str:
+        """将片段定位信息编码到已有 metadata 字段，避免变更 LanceDB 主表结构。"""
+        metadata = {"import_id": import_id}
+        for key in ("chunk_index", "char_start", "char_end"):
+            value = chunk.get(key)
+            if value is not None:
+                metadata[key] = value
+        return json.dumps(metadata, ensure_ascii=False)
+
+    @staticmethod
+    def _parse_chunk_metadata(raw_metadata: Any) -> dict:
+        """兼容历史字符串 metadata 和未来可能的 dict 形态。"""
+        if isinstance(raw_metadata, dict):
+            return raw_metadata
+        if not raw_metadata:
+            return {}
+        if isinstance(raw_metadata, str):
+            try:
+                parsed = json.loads(raw_metadata)
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+        return {}
+
+    @staticmethod
+    def _escape_lancedb_literal(value: str) -> str:
+        return value.replace("'", "''")
+
+    async def _delete_vectors_for_file(self, filename: str) -> bool:
+        if not self._lance_db or "doc_chunks" not in (self._lance_db.table_names() or []):
+            return False
+        try:
+            table = self._lance_db.open_table("doc_chunks")
+            safe_filename = self._escape_lancedb_literal(filename)
+            table.delete(f"source_file = '{safe_filename}'")
+            return True
+        except Exception as e:
+            logger.warning(f"删除向量失败: {e}")
+            return False
+
+    async def _persist_chunks(
+        self, chunks: List[dict], import_id: str, filename: str, file_type: str,
+    ) -> int:
+        if not chunks:
+            return 0
+        return await storage.add_knowledge_chunks(
+            import_id=import_id,
+            source_file=filename,
+            file_type=file_type,
+            chunks=chunks,
+        )
+
+    async def _reset_import_index(
+        self, import_id: str, filename: str, clear_procurement: bool = False,
+    ) -> None:
+        await storage.delete_knowledge_chunks(import_id=import_id)
+        if clear_procurement:
+            await storage.db.execute(
+                "DELETE FROM procurement_records WHERE source_file_id=?",
+                (import_id,),
+            )
+            await storage.db.commit()
+        await self._delete_vectors_for_file(filename)
+
     async def initialize(self) -> None:
         """初始化 LanceDB 连接"""
         VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -119,7 +184,8 @@ class KnowledgeService:
         existing = await storage._fetchone(
             "SELECT import_status, slide_count FROM ppt_imports WHERE id=?", (import_id,)
         )
-        if existing and existing["import_status"] == "completed":
+        existing_chunk_count = await storage.count_knowledge_chunks(import_id=import_id)
+        if existing and existing["import_status"] == "completed" and existing_chunk_count > 0:
             # 即使是重复导入，也重新解析以获取统计信息
             try:
                 parser = PPTParser()
@@ -140,7 +206,7 @@ class KnowledgeService:
                 "file_type": "ppt",
                 "slide_count": dup_slide_count, "text_length": dup_text_length,
                 "table_count": dup_table_count, "image_count": dup_image_count,
-                "extracted_count": 0, "chunks_count": dup_chunks,
+                "extracted_count": 0, "chunks_count": existing_chunk_count or dup_chunks,
             }
 
         await storage.update_ppt_import_status(import_id, "processing")
@@ -153,8 +219,15 @@ class KnowledgeService:
         text_length = len(full_markdown)
         table_count = ppt_data.get("extraction_stats", {}).get("total_tables", 0)
         image_count = ppt_data.get("extraction_stats", {}).get("total_images", 0)
+        text_chunks = self._split_into_chunks(ppt_data, filename)
+        chunks_parsed = len(text_chunks)
+
+        # 旧版本重复导入时可能只有导入记录，没有可检索正文；这里统一重建索引。
+        await self._reset_import_index(import_id, filename, clear_procurement=True)
 
         # 更新 slide_count
+        await self._reset_import_index(import_id, filename, clear_procurement=True)
+
         await storage.db.execute(
             "UPDATE ppt_imports SET slide_count=? WHERE id=?", (slide_count, import_id)
         )
@@ -162,16 +235,20 @@ class KnowledgeService:
 
         # 3. LLM 结构化提取（如果提供了 LLM 函数）
         extracted_count = 0
+        extracted_count = 0
         if llm_fn and full_markdown:
             extracted_count = await self._extract_procurement_fields(
                 full_markdown, filename, import_id, llm_fn
             )
 
         # 4. 文本分块 + Embedding + 写入 LanceDB
-        chunks_count = 0
+        stored_chunks_count = await self._persist_chunks(
+            text_chunks, import_id, filename, "ppt",
+        )
+        vector_chunks_count = 0
         if embedding_fn and self._lance_db:
-            chunks_count = await self._vectorize_chunks(
-                ppt_data, filename, import_id, embedding_fn
+            vector_chunks_count = await self._vectorize_chunks(
+                text_chunks, import_id, embedding_fn
             )
 
         # 5. 即使没有 embedding，也统计文本分块数
@@ -183,6 +260,13 @@ class KnowledgeService:
 
         logger.info(f"PPT 导入完成: {filename}, {slide_count} 页, {text_length} 字符, {chunks_parsed} 个文本块")
 
+        await storage.update_ppt_import_status(import_id, "completed", extracted_count)
+
+        logger.info(
+            f"PPT 瀵煎叆瀹屾垚: {filename}, {slide_count} 椤? {text_length} 瀛楃, "
+            f"{stored_chunks_count} 涓鏂囧潡, {vector_chunks_count} 涓悜閲忓潡"
+        )
+
         return {
             "import_id": import_id,
             "status": "completed",
@@ -192,7 +276,7 @@ class KnowledgeService:
             "table_count": table_count,
             "image_count": image_count,
             "extracted_count": extracted_count,
-            "chunks_count": chunks_count if chunks_count else chunks_parsed,
+            "chunks_count": vector_chunks_count if vector_chunks_count else stored_chunks_count or chunks_parsed,
         }
 
     async def _extract_procurement_fields(
@@ -240,10 +324,9 @@ class KnowledgeService:
         return count
 
     async def _vectorize_chunks(
-        self, ppt_data: dict, filename: str, import_id: str, embedding_fn: Any,
+        self, chunks: List[dict], import_id: str, embedding_fn: Any,
     ) -> int:
         """将 PPT 内容分块并向量化写入 LanceDB"""
-        chunks = self._split_into_chunks(ppt_data, filename)
         if not chunks:
             return 0
 
@@ -265,9 +348,7 @@ class KnowledgeService:
                         "chunk_type": chunk["chunk_type"],
                         "content": chunk["content"],
                         "vector": vec,
-                        "metadata": json.dumps(
-                            {"import_id": import_id}, ensure_ascii=False
-                        ),
+                        "metadata": self._build_chunk_metadata(import_id, chunk),
                         "created_at": datetime.now(timezone.utc).isoformat(),
                     })
             except Exception as e:
@@ -295,6 +376,7 @@ class KnowledgeService:
     def _split_into_chunks(self, ppt_data: dict, filename: str) -> List[dict]:
         """将 PPT 数据按页分块（每页文本/表格/备注各为一个 chunk）"""
         chunks: List[dict] = []
+        chunk_index = 1
         for slide in ppt_data.get("slides", []):
             slide_idx = slide.get("index", 0)
 
@@ -308,8 +390,10 @@ class KnowledgeService:
                         "source_file": filename,
                         "slide_index": slide_idx,
                         "chunk_type": "text",
+                        "chunk_index": chunk_index,
                         "content": combined[:2000],  # 限制长度
                     })
+                    chunk_index += 1
 
             # 表格 chunk
             for table in slide.get("tables", []):
@@ -320,8 +404,10 @@ class KnowledgeService:
                         "source_file": filename,
                         "slide_index": slide_idx,
                         "chunk_type": "table",
+                        "chunk_index": chunk_index,
                         "content": md[:2000],
                     })
+                    chunk_index += 1
 
             # 备注 chunk
             notes = slide.get("notes", "")
@@ -331,8 +417,10 @@ class KnowledgeService:
                     "source_file": filename,
                     "slide_index": slide_idx,
                     "chunk_type": "note",
+                    "chunk_index": chunk_index,
                     "content": notes[:2000],
                 })
+                chunk_index += 1
         return chunks
 
     async def vector_search(
@@ -348,17 +436,21 @@ class KnowledgeService:
             table = self._lance_db.open_table(table_name)
             results = table.search(query_vector).limit(limit).to_list()
             # 转换为标准 dict 列表
-            return [
-                {
-                    "id": r.get("id", ""),
-                    "content": r.get("content", ""),
-                    "source_file": r.get("source_file", ""),
-                    "slide_index": r.get("slide_index", 0),
-                    "chunk_type": r.get("chunk_type", ""),
-                    "score": r.get("_distance", 0.0),
-                }
-                for r in results
-            ]
+            normalized_results: list[dict] = []
+            for record in results:
+                metadata = self._parse_chunk_metadata(record.get("metadata"))
+                normalized_results.append({
+                    "id": record.get("id", ""),
+                    "content": record.get("content", ""),
+                    "source_file": record.get("source_file", ""),
+                    "slide_index": record.get("slide_index", 0),
+                    "chunk_type": record.get("chunk_type", ""),
+                    "chunk_index": metadata.get("chunk_index"),
+                    "char_start": metadata.get("char_start"),
+                    "char_end": metadata.get("char_end"),
+                    "score": record.get("_distance", 0.0),
+                })
+            return normalized_results
         except Exception as e:
             logger.warning(f"向量检索失败: {e}")
             return []
@@ -367,14 +459,22 @@ class KnowledgeService:
         """将纯文本按固定大小分块（步长 400，重叠 100）"""
         chunks: List[dict] = []
         step = chunk_size - 100
-        for i in range(0, len(text), step):
-            piece = text[i:i + chunk_size].strip()
+        for index, i in enumerate(range(0, len(text), step), 1):
+            raw_piece = text[i:i + chunk_size]
+            piece = raw_piece.strip()
             if piece:
+                leading_ws = len(raw_piece) - len(raw_piece.lstrip())
+                trailing_ws = len(raw_piece) - len(raw_piece.rstrip())
+                char_start = i + leading_ws
+                char_end = i + len(raw_piece) - trailing_ws
                 chunks.append({
                     "id": gen_id(),
                     "source_file": filename,
                     "slide_index": 0,
                     "chunk_type": "text",
+                    "chunk_index": index,
+                    "char_start": char_start,
+                    "char_end": char_end,
                     "content": piece,
                 })
         return chunks
@@ -383,8 +483,7 @@ class KnowledgeService:
         self, chunks: List[dict], import_id: str, embedding_fn: Any,
     ) -> int:
         """将文本块向量化写入 LanceDB"""
-        if not chunks or not self._lance_db:
-            return 0
+        return await self._vectorize_chunks(chunks, import_id, embedding_fn)
         batch_size = 32
         all_records: List[dict] = []
         texts = [c["content"] for c in chunks]
@@ -401,7 +500,7 @@ class KnowledgeService:
                         "chunk_type": chunk["chunk_type"],
                         "content": chunk["content"],
                         "vector": vec,
-                        "metadata": json.dumps({"import_id": import_id}, ensure_ascii=False),
+                        "metadata": self._build_chunk_metadata(import_id, chunk),
                         "created_at": datetime.now(timezone.utc).isoformat(),
                     })
             except Exception as e:
@@ -436,22 +535,29 @@ class KnowledgeService:
         existing = await storage._fetchone(
             "SELECT import_status FROM ppt_imports WHERE id=?", (import_id,)
         )
-        if existing and existing["import_status"] == "completed":
+        existing_chunk_count = await storage.count_knowledge_chunks(import_id=import_id)
+        if existing and existing["import_status"] == "completed" and existing_chunk_count > 0:
             return {
                 "import_id": import_id, "status": "duplicate",
-                "file_type": file_type, "extracted_count": 0, "chunks_count": 0,
+                "file_type": file_type, "extracted_count": 0, "chunks_count": existing_chunk_count,
                 "char_count": len(text),
             }
 
         await storage.update_ppt_import_status(import_id, "processing")
 
-        chunks_count = 0
+        chunks = self._split_text_into_chunks(text, filename) if text else []
+        await self._reset_import_index(import_id, filename)
+
+        stored_chunks_count = await self._persist_chunks(
+            chunks, import_id, filename, file_type,
+        )
+        vector_chunks_count = 0
         if embedding_fn and text and self._lance_db:
-            chunks = self._split_text_into_chunks(text, filename)
-            chunks_count = await self._vectorize_text_chunks(chunks, import_id, embedding_fn)
+            vector_chunks_count = await self._vectorize_text_chunks(chunks, import_id, embedding_fn)
 
         await storage.update_ppt_import_status(import_id, "completed", 0)
 
+        chunks_count = vector_chunks_count if vector_chunks_count else stored_chunks_count
         char_count = len(text)
         logger.info(f"{file_type} 文件已导入: {filename} ({char_count} 字符, {chunks_count} 向量块)")
         return {
@@ -459,7 +565,7 @@ class KnowledgeService:
             "status": "completed",
             "file_type": file_type,
             "extracted_count": 0,
-            "chunks_count": chunks_count,
+            "chunks_count": vector_chunks_count if vector_chunks_count else stored_chunks_count,
             "char_count": char_count,
         }
 
@@ -671,6 +777,7 @@ class KnowledgeService:
         # SQLite 统计
         ppt_count = await storage._fetchone("SELECT COUNT(*) as cnt FROM ppt_imports")
         record_count = await storage._fetchone("SELECT COUNT(*) as cnt FROM procurement_records")
+        text_chunk_count = await storage.count_knowledge_chunks()
 
         # LanceDB 统计
         vector_count = 0
@@ -686,6 +793,7 @@ class KnowledgeService:
             "total_ppt_imports": ppt_count["cnt"] if ppt_count else 0,
             "completed_imports": ppt_count["cnt"] if ppt_count else 0,
             "total_procurement_records": record_count["cnt"] if record_count else 0,
+            "total_text_chunks": text_chunk_count,
             "total_vector_chunks": vector_count,
         }
 
@@ -715,4 +823,3 @@ class KnowledgeService:
 
 # 全局单例
 knowledge_service = KnowledgeService()
-

@@ -177,6 +177,7 @@ npm run dev
 - `backend/routers/chat.py`
   - 已新增 `_stream_with_metadata()`。
   - 已确认 `context_metadata` 与 `skill_suggestion` 事件在 `data: [DONE]` **之前**注入，满足既定协议顺序要求。
+  - 已补充真实流样例与字段说明，见 `docs/chat-completions-context-example.sse` 与 `docs/SSE_CONTEXT_METADATA.md`。
 
 #### 8.2.3 后端：短查询 embedding 保护
 
@@ -188,10 +189,14 @@ npm run dev
 
 - `src/services/api.ts`
   - 已能解析后端尾部注入的 `context_metadata` 与 `skill_suggestion` 事件。
+  - 前端现已消费 `schema_version`、`truncated`、`retrieved_*`、`matched_keywords` 等增强字段。
 
 - `src/components/chat/ChatArea.tsx`
   - 已在 Copilot 聊天区内实现内联 Skill 推荐条。
   - 用户可在当前对话中点击“应用”，将推荐话术预填充到输入框，不会强制跳转到 Agent 面板。
+
+- `src/components/chat/MessageBubble.tsx`
+  - citation 卡片已收敛为固定的“文件名/来源 + 位置 + 摘要”视觉层，能稳定展示文件名、页码/片段位置和摘要内容。
 
 - `src/components/chat/ChatInput.tsx`
   - 已支持外部 `prefillText` 注入并自动写入输入框，形成 Skill 推荐 → 输入框预填 → 用户确认发送的闭环。
@@ -228,7 +233,7 @@ npm run dev
   - `src/components/chat/ChatArea.tsx`
   - `src/components/chat/ChatInput.tsx`
   - 关联核对：`src/types/index.ts`、`src/stores/chatStore.ts`
-- 结论：**已确认存在 5 个仍需继续修复的问题**。这些问题并非编译级错误，而是会影响回答质量、召回率、状态语义、或前端能力溯源闭环的一致性问题。
+- 结论：**已确认存在 3 个仍需继续修复的问题**。这些问题并非编译级错误，而是会影响回答质量、召回率、状态语义、或前端能力溯源闭环的一致性问题。
 
 ### 8.5 已发现但未修复的问题（必须继续处理）
 
@@ -285,31 +290,24 @@ npm run dev
 
 - **优先级**：`P1`
 
-#### P1 — Skill 推荐与预算裁剪仍然耦合，可能导致“匹配到了却不下发推荐”
+#### 已修复 — Skill 推荐已与预算裁剪解耦，避免“匹配到了却不下发推荐”
 
 - **问题是什么**
-  - 当前 `backend/routers/chat.py` 在注入 prompt 后把 `ctx` 替换为 `fitted_ctx`。
-  - `_stream_with_metadata()` 又以这个裁剪后的 `ctx` 作为 `skill_suggestion` 发送依据。
-  - `AssembledContext.fit_to_budget()` 中 `matched_skills` 排在 Know-how / 知识库之后，预算打满时 Skill 项可能被裁掉。
+  - 旧版本中，`skill_suggestion` 事件错误地依赖裁剪后的 prompt 上下文。
+  - 当 `matched_skills` 因预算被裁掉时，即使原始检索命中了 Skill，前端也收不到推荐。
 
-- **为什么重要**
-  - Skill 推荐事件本身不占 LLM token。
-  - 但现在它被错误地绑定到 prompt 预算结果，导致本来已经匹配到 Skill，前端却收不到推荐。
+- **当前状态**
+  - `backend/routers/chat.py` 现在区分“原始检索上下文”和“实际注入 prompt 的上下文”。
+  - `context_metadata.sources` 默认表示真正注入的上下文。
+  - 新增 `truncated` / `retrieved_*` 字段，用于描述裁剪前的原始结果。
+  - `skill_suggestion` 改为基于原始匹配结果发送，不再受 prompt 预算裁剪影响。
+  - `skill_suggestion` 还新增 `matched_keywords` 字段，便于前端后续展示命中依据。
 
-- **会影响什么**
-  - 影响 Copilot 内联 Skill 闭环的一致性。
-  - 用户会看到“模型回答里像是在暗示某个能力”，但 UI 没有对应推荐条。
+- **结果**
+  - Copilot 内联 Skill 推荐不会再因 prompt 预算打满而丢失。
+  - 后端 SSE 协议同时保留了“实际注入”和“原始检索”两套信息，便于前端按需扩展。
 
-- **涉及文件 / 函数**
-  - `backend/services/context_assembler.py::AssembledContext.fit_to_budget`
-  - `backend/routers/chat.py::_stream_with_metadata`
-  - `backend/routers/chat.py::chat_completions`
-
-- **建议怎么修**
-  - 将“用于 prompt 注入的 Skill 上下文”和“用于前端推荐的 Skill 事件”解耦。
-  - 预算裁剪只影响 prompt 注入；SSE 推荐事件应基于**原始匹配结果**或至少单独保留的 top skill。
-
-- **优先级**：`P1`
+- **状态标记**：`Closed`
 
 #### P1 — Abort 被当成 Done 处理，状态语义错误
 
@@ -335,36 +333,25 @@ npm run dev
 
 - **优先级**：`P1`
 
-#### P1 — `context_metadata` 只完成“后端注入 + 前端解析”，尚未完成落库 / 消费 / 展示闭环
+#### 已修复 — `context_metadata` 已完成“注入 + 状态落库 + 消费展示”闭环
 
 - **问题是什么**
-  - 后端已经发送 `context_metadata`，前端 `src/services/api.ts` 也已解析。
-  - 但 `src/components/chat/ChatArea.tsx` 当前仍传入 `undefined` 作为 `onMetadata`。
-  - `src/types/index.ts::Message` 还没有 metadata/source 相关字段。
-  - `src/stores/chatStore.ts` 的消息写入与更新逻辑也没有 metadata 持久化能力。
+  - 早期版本中，`context_metadata` 只停留在 SSE 协议层，尚未完成前端状态落库与 UI 展示闭环。
+  - 这会让“能力溯源”停留在接口层，用户无法在 UI 上稳定看到引用来源。
 
-- **为什么重要**
-  - 这导致“能力溯源”只在协议层存在，在 UI 与状态层实际上没有闭环。
-  - 用户无法稳定看到一条 assistant 消息到底引用了多少知识库、多少 Know-how、是否触发了 Skill 匹配。
+- **当前状态**
+  - `src/services/api.ts` 已解析 `context_metadata` / `skill_suggestion`。
+  - `src/components/chat/ChatArea.tsx` 已将 `onMetadata` 绑定到当前 assistant 消息。
+  - `src/types/index.ts::Message` 已具备 `metadata` 结构。
+  - `src/stores/chatStore.ts` 已支持消息 metadata 更新与持久化。
+  - `src/components/chat/MessageBubble.tsx` 已展示 source badge、summary 与 citation。
+  - `src/components/layout/ContextPanel.tsx` 已消费当前对话最近一条 assistant 消息的 metadata，并在右侧面板展示“文件名/来源 + 位置 + 摘要”。
 
-- **会影响什么**
-  - 影响前端设计目标“能力溯源可视化”的落地。
-  - 后续刷新页面后也无法保留相关元数据。
+- **结果**
+  - “能力溯源”现在已经完成协议、状态、消息 UI、右侧面板四层闭环。
+  - 刷新页面后仍可保留相关 metadata。
 
-- **涉及文件 / 函数**
-  - `src/services/api.ts::streamChat`
-  - `src/components/chat/ChatArea.tsx`
-  - `src/types/index.ts::Message`
-  - `src/stores/chatStore.ts::{addMessage, updateMessage}`
-  - 后续展示大概率还需联动消息展示组件（如 `MessageBubble.tsx`）
-
-- **建议怎么修**
-  - 给 `Message` 增加 metadata/source 字段。
-  - 在 `ChatArea` 中把 `onMetadata` 绑定到当前 assistant 消息。
-  - 在 store 中支持对消息 metadata 的更新与持久化。
-  - 在消息 UI 上展示最少可用版本的 source badge / summary。
-
-- **优先级**：`P1`
+- **状态标记**：`Closed`
 
 ### 8.6 下一步待办（必须继续执行）
 
@@ -375,13 +362,7 @@ npm run dev
 2. **再修短查询语义召回阈值**
    - 原因：这是第二个直接影响回答质量的问题，且改动小、收益明确。
 
-3. **解耦 Skill 推荐与预算裁剪**
-   - 原因：推荐事件本不消耗 token，不应因 prompt 预算满而被吞掉。
-
-4. **完成 `context_metadata` 落库与展示闭环**
-   - 原因：这是前端对“能力溯源”设计目标的最后一段断链。
-
-5. **修复 Abort / Done 语义**
+3. **修复 Abort / Done 语义**
    - 原因：这是状态正确性问题，会影响自动命名与中止体验，但相对前两项对回答质量影响略低。
 
 ### 8.7 推荐处理顺序（含原因）
@@ -395,14 +376,7 @@ npm run dev
 
 #### 第二优先序列：补协议与交互一致性
 
-3. `backend/routers/chat.py` + `backend/services/context_assembler.py` — 解耦 Skill 推荐与预算
-4. `src/types/index.ts` + `src/stores/chatStore.ts` + `src/components/chat/ChatArea.tsx`（必要时联动消息展示组件）— 补完 `context_metadata` 闭环
-
-**原因**：这两项决定“后端已经做出的增强”能否稳定、完整、可视化地到达前端用户界面。
-
-#### 第三优先序列：修正状态语义
-
-5. `src/services/api.ts` + `src/components/chat/ChatArea.tsx` — 修复 Abort 误判为 Done
+3. `src/services/api.ts` + `src/components/chat/ChatArea.tsx` — 修复 Abort 误判为 Done
 
 **原因**：这是重要一致性问题，但优先级略低于回答质量与能力下发完整性。
 
@@ -418,13 +392,13 @@ npm run dev
 
 ### 8.9 当前残余风险（即使暂未列为最高优先级，也不能遗忘）
 
-- 当前未进行真正的前端 UI 自动化/E2E 验证；`context_metadata` 的最终展示链路仍未实装完成。
-- `ChatArea.tsx` 当前 `prefillText` 是组件级单值状态，后续在补 metadata/推荐闭环时，需要顺手复查是否存在跨对话误写或覆盖未发送草稿的风险。
+- 当前未进行真正的前端 UI 自动化/E2E 验证；`context_metadata` 的展示闭环虽已落地，但仍缺少自动化回归验证。
+- `ChatArea.tsx` 当前 `prefillText` 是组件级单值状态，后续仍需复查是否存在跨对话误写或覆盖未发送草稿的风险。
 - 当前已通过构建与后端测试，但并未因此证明所有 SSE 边界时序都已覆盖；后续修复 `Abort` 语义后应补一次针对流中止场景的验证。
 
 ### 8.10 交接结论
 
 - **已经完成**：Phase 1 主链路功能改造与基础验证。
 - **已经确认没回退的点**：构建可过、后端测试可过、SSE 元数据顺序正确、Skill 推荐保持对话内联、token 预算不再硬截断。
-- **仍必须继续修复**：Know-how 相关性过滤、短查询语义召回阈值、Skill 推荐预算耦合、Abort/Done 语义、`context_metadata` 闭环。
+- **仍必须继续修复**：Know-how 相关性过滤、短查询语义召回阈值、Abort/Done 语义。
 - **下次继续工作时，严格按 8.7 的顺序推进，不要重新做大范围排查。**

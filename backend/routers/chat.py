@@ -218,35 +218,55 @@ async def _assemble_context(request: ChatRequest, messages: list[dict]) -> Assem
 async def _stream_with_metadata(
     raw_stream: AsyncGenerator[str, None],
     ctx: AssembledContext,
+    retrieved_ctx: Optional[AssembledContext] = None,
+    suggested_skill: Optional[dict] = None,
 ) -> AsyncGenerator[str, None]:
     """包装 LLM 流式输出，在 [DONE] 之前注入 context_metadata 和 skill_suggestion 事件。"""
+    raw_ctx = retrieved_ctx or ctx
+
+    def _build_context_metadata_payload() -> dict:
+        payload = ctx.to_metadata_payload()
+        payload["schema_version"] = 2
+
+        truncated = ctx != raw_ctx
+        payload["truncated"] = truncated
+
+        if truncated:
+            retrieved_payload = raw_ctx.to_metadata_payload()
+            payload["retrieved_summary"] = retrieved_payload["summary"]
+            payload["retrieved_knowledge_count"] = retrieved_payload["knowledge_count"]
+            payload["retrieved_knowhow_count"] = retrieved_payload["knowhow_count"]
+            payload["retrieved_skill_count"] = retrieved_payload["skill_count"]
+            payload["retrieved_citations"] = retrieved_payload["citations"]
+
+        return payload
+
+    def _build_skill_suggestion_payload(skill: dict) -> dict:
+        return {
+            "type": "skill_suggestion",
+            "schema_version": 2,
+            "skill_id": skill["skill_id"],
+            "skill_name": skill["skill_name"],
+            "description": skill["description"],
+            "score": skill["score"],
+            "confidence": skill["confidence"],
+            "matched_keywords": skill.get("matched_keywords", []),
+        }
+
     async for chunk in raw_stream:
         if chunk.strip() == "data: [DONE]":
             # 在 [DONE] 之前注入元数据
-            if ctx.has_context:
+            if ctx.has_context or raw_ctx.has_context:
                 metadata = {
                     "type": "context_metadata",
-                    "sources": {
-                        "knowledge_count": len(ctx.knowledge_results),
-                        "knowhow_count": len(ctx.knowhow_rules),
-                        "skill_count": len(ctx.matched_skills),
-                        "summary": ctx.source_summary,
-                    },
+                    "sources": _build_context_metadata_payload(),
                 }
                 yield f"data: {json.dumps(metadata, ensure_ascii=False)}\n\n"
 
             # 如果有匹配到的 Skill，注入推荐事件
-            if ctx.matched_skills:
-                top_skill = ctx.matched_skills[0]
-                suggestion = {
-                    "type": "skill_suggestion",
-                    "skill_id": top_skill["skill_id"],
-                    "skill_name": top_skill["skill_name"],
-                    "description": top_skill["description"],
-                    "score": top_skill["score"],
-                    "confidence": top_skill["confidence"],
-                }
-                yield f"data: {json.dumps(suggestion, ensure_ascii=False)}\n\n"
+            top_skill = suggested_skill or (raw_ctx.matched_skills[0] if raw_ctx.matched_skills else None)
+            if top_skill:
+                yield f"data: {json.dumps(_build_skill_suggestion_payload(top_skill), ensure_ascii=False)}\n\n"
 
             yield chunk
             return
@@ -265,18 +285,18 @@ async def chat_completions(request: ChatRequest):
     messages = await _build_messages(request)
 
     # 独立的上下文组装步骤（仅 copilot 模式）
-    ctx = await _assemble_context(request, messages)
-    if ctx.has_context:
-        fitted_ctx = ctx.fit_to_budget(_calculate_context_budget_chars(messages, request))
+    assembled_ctx = await _assemble_context(request, messages)
+    prompt_ctx = AssembledContext()
+
+    if assembled_ctx.has_context:
+        fitted_ctx = assembled_ctx.fit_to_budget(_calculate_context_budget_chars(messages, request))
         if fitted_ctx.has_context:
             suffix = fitted_ctx.to_prompt_suffix()
             if messages and messages[0]["role"] == "system":
                 messages[0]["content"] += f"\n\n{suffix}"
             else:
                 messages = [{"role": "system", "content": suffix}] + messages
-            ctx = fitted_ctx
-        else:
-            ctx = AssembledContext()
+            prompt_ctx = fitted_ctx
 
     if request.stream:
         raw_stream = llm_service.stream_chat(
@@ -288,7 +308,12 @@ async def chat_completions(request: ChatRequest):
             api_key=request.api_key,
         )
         return StreamingResponse(
-            _stream_with_metadata(raw_stream, ctx),
+            _stream_with_metadata(
+                raw_stream,
+                prompt_ctx,
+                assembled_ctx,
+                assembled_ctx.matched_skills[0] if assembled_ctx.matched_skills else None,
+            ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -372,4 +397,3 @@ async def test_connection(config: ConfigUpdateRequest):
         return {"success": True, "message": message, **result}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"连接失败: {str(e)}")
-

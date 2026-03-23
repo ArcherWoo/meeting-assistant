@@ -6,8 +6,8 @@
 import { useState, useRef, useEffect, useCallback, useMemo, type ChangeEvent } from 'react';
 import { useAppStore } from '@/stores/appStore';
 import { useChatStore, DEFAULT_CONVERSATION_TITLE } from '@/stores/chatStore';
-import { streamChat, extractFileText, generateAutoTitle, type SkillSuggestionEvent } from '@/services/api';
-import { MODE_CONFIG } from '@/types';
+import { streamChat, extractFileText, generateAutoTitle } from '@/services/api';
+import { MODE_CONFIG, type Message, type SkillSuggestionEvent } from '@/types';
 import MessageBubble from './MessageBubble';
 import ChatInput from './ChatInput';
 import AgentExecutionPanel from '../agent/AgentExecutionPanel';
@@ -25,7 +25,7 @@ export default function ChatArea() {
     conversations, activeConversationId, messagesByConversation,
     streamingByConversation, streamingContentByConversation,
     addMessage, setStreaming,
-    appendStreamContent, resetStreamContent, updateMessage,
+    appendStreamContent, resetStreamContent, updateMessage, updateMessageMetadata,
     createConversation, setActiveConversation,
   } = useChatStore();
 
@@ -37,8 +37,6 @@ export default function ChatArea() {
   /** Agent 模式：当前正在执行的查询 */
   const [agentQuery, setAgentQuery] = useState<string | null>(null);
   const [welcomeUploading, setWelcomeUploading] = useState(false);
-  /** Skill 推荐（按对话隔离，避免切换会话串线） */
-  const [skillSuggestionByConversation, setSkillSuggestionByConversation] = useState<Record<string, SkillSuggestionEvent | null>>({});
   /** 预填充到输入框的文本 */
   const [prefillText, setPrefillText] = useState('');
   const clearPrefill = useCallback(() => setPrefillText(''), []);
@@ -55,7 +53,6 @@ export default function ChatArea() {
   const visibleMessages = visibleConversationId ? (messagesByConversation[visibleConversationId] ?? []) : [];
   const visibleIsStreaming = visibleConversationId ? (streamingByConversation[visibleConversationId] ?? false) : false;
   const visibleStreamingContent = visibleConversationId ? (streamingContentByConversation[visibleConversationId] ?? '') : '';
-  const skillSuggestion = visibleConversationId ? (skillSuggestionByConversation[visibleConversationId] ?? null) : null;
 
   useEffect(() => {
     if (visibleConversationId && visibleConversationId !== activeConversationId) {
@@ -67,6 +64,18 @@ export default function ChatArea() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [visibleMessages, visibleStreamingContent]);
+
+  const handleApplySkillSuggestion = useCallback((
+    message: Message,
+    suggestion: SkillSuggestionEvent,
+  ) => {
+    setPrefillText(`请使用「${suggestion.skill_name}」技能帮我处理`);
+    updateMessageMetadata(message.id, { skillSuggestion: undefined }, message.conversationId);
+  }, [updateMessageMetadata]);
+
+  const handleDismissSkillSuggestion = useCallback((message: Message) => {
+    updateMessageMetadata(message.id, { skillSuggestion: undefined }, message.conversationId);
+  }, [updateMessageMetadata]);
 
   /** 发送消息（支持附件上下文） */
   const handleSend = async (content: string, attachmentContext?: string) => {
@@ -118,7 +127,6 @@ export default function ChatArea() {
     });
 
     let fullContent = '';
-    setSkillSuggestionByConversation((prev) => ({ ...prev, [targetConvId]: null }));
 
     await streamChat(
       history,
@@ -195,9 +203,11 @@ export default function ChatArea() {
       controller.signal,
       currentMode,
       content,
-      undefined, // onMetadata — Phase 2 将在此处添加 source badge 支持
+      (metadata) => {
+        updateMessageMetadata(assistantMsgId, { context: metadata }, targetConvId);
+      },
       (suggestion) => {
-        setSkillSuggestionByConversation((prev) => ({ ...prev, [targetConvId]: suggestion }));
+        updateMessageMetadata(assistantMsgId, { skillSuggestion: suggestion }, targetConvId);
       },
     );
   };
@@ -287,44 +297,13 @@ export default function ChatArea() {
         ) : (
           <>
             {visibleMessages.map((msg) => (
-              <MessageBubble key={msg.id} message={msg} />
+              <MessageBubble
+                key={msg.id}
+                message={msg}
+                onApplySkillSuggestion={handleApplySkillSuggestion}
+                onDismissSkillSuggestion={handleDismissSkillSuggestion}
+              />
             ))}
-            {/* Skill 推荐条（Copilot 模式，SSE 推送） */}
-            {skillSuggestion && !visibleIsStreaming && (
-              <div className="win-panel mb-4 flex items-center gap-3 border-blue-200 bg-blue-50/90 px-4 py-3 dark:border-blue-800 dark:bg-blue-900/20 animate-fade-in">
-                <div className="flex h-10 w-10 items-center justify-center rounded-md border border-blue-200 bg-white text-lg dark:border-blue-800 dark:bg-blue-950/40">🛠️</div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold truncate">
-                    推荐技能：{skillSuggestion.skill_name}
-                  </p>
-                  <p className="text-xs text-text-secondary truncate mt-0.5">
-                    {skillSuggestion.description}
-                  </p>
-                </div>
-                <button
-                  onClick={() => {
-                    setPrefillText(`请使用「${skillSuggestion.skill_name}」技能帮我处理`);
-                    if (visibleConversationId) {
-                      setSkillSuggestionByConversation((prev) => ({ ...prev, [visibleConversationId]: null }));
-                    }
-                  }}
-                  className="win-button-primary h-9 px-3 text-xs flex-shrink-0"
-                >
-                  应用
-                </button>
-                <button
-                  onClick={() => {
-                    if (visibleConversationId) {
-                      setSkillSuggestionByConversation((prev) => ({ ...prev, [visibleConversationId]: null }));
-                    }
-                  }}
-                  className="win-icon-button h-9 w-9 flex-shrink-0 text-sm"
-                  title="忽略"
-                >
-                  ✕
-                </button>
-              </div>
-            )}
             {/* Agent 模式执行面板 */}
             {agentQuery && (
               <AgentExecutionPanel
@@ -392,4 +371,3 @@ function WelcomeScreen({ mode, onQuickMessage, onUploadFile, uploading }: {
     </div>
   );
 }
-

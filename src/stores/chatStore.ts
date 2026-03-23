@@ -6,7 +6,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { v4 as uuidv4 } from 'uuid';
-import type { Conversation, Message, Attachment, AppMode } from '@/types';
+import type { Conversation, Message, Attachment, AppMode, MessageMetadata } from '@/types';
 
 export const DEFAULT_CONVERSATION_TITLE = '新对话';
 
@@ -48,6 +48,7 @@ interface ChatState {
 
   addMessage: (message: Omit<Message, 'id' | 'createdAt'>) => string;
   updateMessage: (id: string, content: string, conversationId?: string) => void;
+  updateMessageMetadata: (id: string, metadata: Partial<MessageMetadata>, conversationId?: string) => void;
 
   setStreaming: (streaming: boolean, conversationId?: string) => void;
   appendStreamContent: (chunk: string, conversationId?: string) => void;
@@ -185,6 +186,31 @@ export const useChatStore = create<ChatState>()(
           };
         });
       },
+      updateMessageMetadata: (id, metadata, conversationId) => {
+        const { activeConversationId } = get();
+        const convId = conversationId ?? activeConversationId;
+        set((state) => {
+          const targetMessages = state.messagesByConversation[convId ?? ''] ?? state.messages;
+          const updatedMessages = targetMessages.map((message) => (
+            message.id === id
+              ? {
+                  ...message,
+                  metadata: {
+                    ...message.metadata,
+                    ...metadata,
+                  },
+                }
+              : message
+          ));
+          const updatedMap = convId
+            ? { ...state.messagesByConversation, [convId]: updatedMessages }
+            : state.messagesByConversation;
+          return {
+            messages: convId === state.activeConversationId ? updatedMessages : state.messages,
+            messagesByConversation: updatedMap,
+          };
+        });
+      },
 
       setStreaming: (streaming, conversationId) => {
         const { activeConversationId } = get();
@@ -252,4 +278,3 @@ export const useChatStore = create<ChatState>()(
     }
   )
 );
-

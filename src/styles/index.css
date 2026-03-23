@@ -30,15 +30,6 @@
     overflow: hidden;
   }
 
-  html[data-platform='darwin'] body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
-      'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
-  }
-
-  html[data-platform='win32'] body {
-    text-rendering: geometricPrecision;
-  }
-
   ::selection {
     background: rgba(37, 99, 235, 0.18);
   }
@@ -48,14 +39,6 @@
   textarea,
   select {
     font: inherit;
-  }
-
-  /* macOS 标题栏拖拽区域 */
-  .titlebar-drag {
-    -webkit-app-region: drag;
-  }
-  .titlebar-no-drag {
-    -webkit-app-region: no-drag;
   }
 }
 
@@ -71,11 +54,6 @@
     height: 8px;
   }
 
-  html[data-platform='win32'] .scrollbar-thin::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-  }
-
   .scrollbar-thin::-webkit-scrollbar-track {
     background: transparent;
   }
@@ -85,11 +63,6 @@
     border-radius: 9999px;
     border: 2px solid transparent;
     background-clip: padding-box;
-  }
-
-  html[data-platform='win32'] .scrollbar-thin::-webkit-scrollbar-thumb {
-    border-radius: 4px;
-    border-width: 1px;
   }
 
   .dark .scrollbar-thin::-webkit-scrollbar-thumb {
@@ -152,6 +125,22 @@
     @apply rounded-xl border border-surface-divider dark:border-dark-divider bg-white dark:bg-dark-card shadow-2xl;
   }
 
+  .markdown-body {
+    @apply break-words;
+  }
+
+  .markdown-body > :first-child {
+    margin-top: 0;
+  }
+
+  .markdown-body > :last-child {
+    margin-bottom: 0;
+  }
+
+  .markdown-body img {
+    @apply my-3 rounded-lg border border-surface-divider dark:border-dark-divider;
+  }
+
   /* 毛玻璃效果 */
   .glass {
     @apply backdrop-blur-xl bg-white/70 dark:bg-dark-sidebar/70;
@@ -168,4 +157,3 @@
     to { opacity: 1; transform: translateY(0); }
   }
 }
-

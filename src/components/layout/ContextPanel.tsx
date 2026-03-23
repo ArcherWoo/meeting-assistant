@@ -1,16 +1,17 @@
 /**
  * 右侧上下文面板
- * 显示：Skill 列表（含增删改）、知识库统计、Know-how 规则库概览
+ * 显示：最近回答的上下文引用、Skill 列表（含增删改）、知识库统计、Know-how 规则库概览
  */
-import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, type ChangeEvent } from 'react';
 import { useAppStore } from '@/stores/appStore';
+import { useChatStore } from '@/stores/chatStore';
 import {
   listSkills, getKnowledgeStats, getKnowhowStats,
   getSkillContent, saveSkill, updateSkill, deleteSkill,
   uploadFile, listKnowledgeImports, deleteKnowledgeImport,
 } from '@/services/api';
 import { MODE_CONFIG } from '@/types';
-import type { SkillMeta, KnowledgeStats } from '@/types';
+import type { ContextCitation, ContextMetadata, Message, SkillMeta, KnowledgeStats, SkillSuggestionEvent } from '@/types';
 
 /** 已导入文件记录 */
 interface ImportRecord {
@@ -22,8 +23,107 @@ interface ImportRecord {
   imported_at: string;
 }
 
+function renderContextBadge(label: string, value: number, tone: 'blue' | 'emerald' | 'amber') {
+  const toneClassMap = {
+    blue: 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-300',
+    emerald: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300',
+    amber: 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300',
+  };
+
+  return (
+    <span key={label} className={`win-badge px-2 py-1 text-[10px] ${toneClassMap[tone]}`}>
+      {label} {value}
+    </span>
+  );
+}
+
+function renderCitationIcon(sourceType: ContextCitation['source_type']): string {
+  if (sourceType === 'knowledge') return '📄';
+  if (sourceType === 'knowhow') return '📋';
+  return '🛠️';
+}
+
+function renderCitationTypeBadge(sourceType: ContextCitation['source_type']): string {
+  if (sourceType === 'knowledge') return '知识库';
+  if (sourceType === 'knowhow') return 'Know-how';
+  return 'Skill';
+}
+
+function getCitationSourceHeading(citation: ContextCitation): string {
+  return citation.file_name ? '文件名' : '来源';
+}
+
+function getCitationSourceText(citation: ContextCitation): string {
+  return citation.file_name || citation.label || citation.title || '未命名来源';
+}
+
+function getCitationLocationText(citation: ContextCitation): string {
+  const parts = [citation.title, citation.location]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part));
+
+  const uniqueParts = Array.from(new Set(parts));
+  return uniqueParts.join(' · ') || '未提供定位信息';
+}
+
+function getCitationSummaryText(citation: ContextCitation): string {
+  return citation.snippet?.trim() || '未提供摘要';
+}
+
+function buildCitationGroups(citations: ContextCitation[]) {
+  return ([
+    { key: 'knowledge', label: '知识库引用', items: citations.filter((citation) => citation.source_type === 'knowledge') },
+    { key: 'knowhow', label: 'Know-how 引用', items: citations.filter((citation) => citation.source_type === 'knowhow') },
+    { key: 'skill', label: 'Skill 引用', items: citations.filter((citation) => citation.source_type === 'skill') },
+  ] as Array<{ key: ContextCitation['source_type']; label: string; items: ContextCitation[] }>)
+    .filter((group) => group.items.length > 0);
+}
+
+function areSameCitationSet(left: ContextCitation[], right: ContextCitation[]): boolean {
+  if (left.length != right.length) return false;
+  return left.every((citation, index) => citation.id === right[index]?.id);
+}
+
+function getContextCountSummary(context: ContextMetadata, kind: 'injected' | 'retrieved'): string {
+  const knowledgeCount = kind === 'retrieved'
+    ? (context.retrieved_knowledge_count ?? context.knowledge_count)
+    : context.knowledge_count;
+  const knowhowCount = kind === 'retrieved'
+    ? (context.retrieved_knowhow_count ?? context.knowhow_count)
+    : context.knowhow_count;
+  const skillCount = kind === 'retrieved'
+    ? (context.retrieved_skill_count ?? context.skill_count)
+    : context.skill_count;
+
+  const parts = [
+    knowledgeCount ? `知识库 ${knowledgeCount}` : '',
+    knowhowCount ? `Know-how ${knowhowCount}` : '',
+    skillCount ? `Skill ${skillCount}` : '',
+  ].filter(Boolean);
+
+  return parts.length > 0 ? parts.join(' / ') : '无引用来源';
+}
+
+function getMetadataMessage(messages: Message[]): Message | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (
+      message.role === 'assistant'
+      && (message.metadata?.context || message.metadata?.skillSuggestion)
+    ) {
+      return message;
+    }
+  }
+  return null;
+}
+
 export default function ContextPanel() {
   const { toggleContextPanel, currentMode } = useAppStore();
+  const {
+    conversations,
+    activeConversationId,
+    messagesByConversation,
+  } = useChatStore();
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [kbStats, setKbStats] = useState<KnowledgeStats | null>(null);
   const [khStats, setKhStats] = useState<{ total_rules: number; active_rules: number } | null>(null);
@@ -43,6 +143,34 @@ export default function ContextPanel() {
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState('');
   const [deletingSkillId, setDeletingSkillId] = useState<string | null>(null);
+
+  const modeConversation = useMemo(() => {
+    const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
+    if (activeConversation?.mode === currentMode) {
+      return activeConversation;
+    }
+    return conversations.find((conversation) => conversation.mode === currentMode) ?? null;
+  }, [conversations, activeConversationId, currentMode]);
+
+  const visibleConversationId = modeConversation?.id ?? null;
+  const visibleMessages = visibleConversationId ? (messagesByConversation[visibleConversationId] ?? []) : [];
+  const latestMetadataMessage = useMemo(
+    () => getMetadataMessage(visibleMessages),
+    [visibleMessages],
+  );
+  const latestContext: ContextMetadata | undefined = latestMetadataMessage?.metadata?.context;
+  const latestSkillSuggestion: SkillSuggestionEvent | undefined = latestMetadataMessage?.metadata?.skillSuggestion;
+  const latestCitations = latestContext?.citations ?? [];
+  const latestRetrievedCitations = latestContext?.retrieved_citations?.length
+    ? latestContext.retrieved_citations
+    : latestCitations;
+  const latestGroupedCitations = buildCitationGroups(latestCitations);
+  const latestGroupedRetrievedCitations = buildCitationGroups(latestRetrievedCitations);
+  const showRetrievedCitations = Boolean(
+    latestContext?.truncated
+    && latestContext?.retrieved_citations?.length
+    && !areSameCitationSet(latestCitations, latestRetrievedCitations),
+  );
 
   /** 刷新所有数据 */
   const refresh = useCallback(async () => {
@@ -236,6 +364,227 @@ export default function ContextPanel() {
             <div className="win-panel-muted px-3 py-3 text-sm font-medium text-primary">
               {MODE_CONFIG[currentMode].icon} {MODE_CONFIG[currentMode].label} 模式
             </div>
+          </section>
+
+          <div className="border-t border-surface-divider dark:border-dark-divider" />
+
+          {/* 最近一次回答的上下文引用 */}
+          <section>
+            <div className="flex items-center justify-between mb-2 gap-2">
+              <h4 className="win-section-title">最近回答引用</h4>
+              {latestCitations.length > 0 && (
+                <span className="text-[10px] text-text-secondary">
+                  {latestCitations.length} 条来源
+                </span>
+              )}
+            </div>
+
+            {latestContext || latestSkillSuggestion ? (
+              <div className="space-y-2">
+                {latestContext && (
+                  <div className="win-panel-muted px-3 py-3">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {latestContext.knowledge_count
+                        ? renderContextBadge('📚 知识库', latestContext.knowledge_count, 'blue')
+                        : null}
+                      {latestContext.knowhow_count
+                        ? renderContextBadge('📋 Know-how', latestContext.knowhow_count, 'emerald')
+                        : null}
+                      {latestContext.skill_count
+                        ? renderContextBadge('🛠️ Skill', latestContext.skill_count, 'amber')
+                        : null}
+                    </div>
+                    {latestContext.summary && (
+                      <p className="mt-2 text-[11px] leading-5 text-text-secondary">
+                        已参考：{latestContext.summary}
+                      </p>
+                    )}
+                    {latestContext.truncated && (
+                      <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50/80 px-3 py-2 text-[11px] leading-5 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
+                        <p className="font-medium">上下文已按预算裁剪</p>
+                        <p className="mt-1">实际注入：{getContextCountSummary(latestContext, 'injected')}</p>
+                        <p className="mt-1">原始召回：{latestContext.retrieved_summary || getContextCountSummary(latestContext, 'retrieved')}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {latestSkillSuggestion && (
+                  <div className="rounded-lg border border-blue-200 bg-blue-50/80 px-3 py-3 text-xs shadow-sm dark:border-blue-800 dark:bg-blue-900/20">
+                    <p className="font-medium text-slate-900 dark:text-slate-100">
+                      推荐技能：{latestSkillSuggestion.skill_name}
+                    </p>
+                    <p className="mt-1 text-[11px] leading-5 text-slate-600 dark:text-slate-300">
+                      {latestSkillSuggestion.description}
+                    </p>
+                    <p className="mt-2 text-[10px] text-text-secondary dark:text-text-dark-secondary">
+                      匹配度 {Math.round(latestSkillSuggestion.score * 100)}% · 置信度 {latestSkillSuggestion.confidence}
+                    </p>
+                    {latestSkillSuggestion.matched_keywords?.length ? (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {latestSkillSuggestion.matched_keywords.map((keyword) => (
+                          <span
+                            key={keyword}
+                            className="win-chip border-blue-200 bg-white/90 text-[10px] text-blue-700 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-300"
+                          >
+                            {keyword}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+
+                {latestCitations.length > 0 ? (
+                  <div className="space-y-3">
+                    <div className="rounded-lg border border-surface-divider bg-white/80 px-3 py-2.5 text-[11px] text-text-secondary shadow-sm dark:border-dark-divider dark:bg-dark-card/80 dark:text-text-dark-secondary">
+                      <p className="font-medium text-text-primary dark:text-text-dark-primary">已注入回答</p>
+                      <p className="mt-1">{latestContext ? getContextCountSummary(latestContext, 'injected') : '无引用来源'}</p>
+                    </div>
+                    {latestGroupedCitations.map((group) => (
+                      <div key={group.key} className="space-y-2">
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary dark:text-text-dark-secondary">
+                          {group.label}
+                        </p>
+                        <div className="space-y-2">
+                          {group.items.map((citation) => (
+                            <div
+                              key={citation.id}
+                              className="rounded-xl border border-surface-divider bg-white px-3 py-3 shadow-sm dark:border-dark-divider dark:bg-dark-card"
+                            >
+                              <div className="flex items-start gap-3">
+                                <div className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-surface-divider bg-surface text-sm shadow-sm dark:border-dark-divider dark:bg-dark-sidebar">
+                                  <span>{renderCitationIcon(citation.source_type)}</span>
+                                </div>
+                                <div className="min-w-0 flex-1 space-y-2">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className="win-badge border-surface-divider bg-surface px-2 py-1 text-[10px] text-text-secondary dark:border-dark-divider dark:bg-dark-sidebar dark:text-text-dark-secondary">
+                                      {renderCitationTypeBadge(citation.source_type)}
+                                    </span>
+                                    {citation.page ? (
+                                      <span className="win-badge border-surface-divider bg-surface px-2 py-1 text-[10px] text-text-secondary dark:border-dark-divider dark:bg-dark-sidebar dark:text-text-dark-secondary">
+                                        P{citation.page}
+                                      </span>
+                                    ) : null}
+                                  </div>
+
+                                  <div>
+                                    <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary dark:text-text-dark-secondary">
+                                      {getCitationSourceHeading(citation)}
+                                    </p>
+                                    <p className="mt-1 break-all text-[12px] font-semibold text-text-primary dark:text-text-dark-primary">
+                                      {getCitationSourceText(citation)}
+                                    </p>
+                                  </div>
+
+                                  <div>
+                                    <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary dark:text-text-dark-secondary">
+                                      位置
+                                    </p>
+                                    <p className="mt-1 text-[11px] leading-5 text-text-secondary dark:text-text-dark-secondary">
+                                      {getCitationLocationText(citation)}
+                                    </p>
+                                  </div>
+
+                                  <div>
+                                    <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary dark:text-text-dark-secondary">
+                                      摘要
+                                    </p>
+                                    <p className="mt-1 whitespace-pre-wrap text-[11px] leading-5 text-text-secondary dark:text-text-dark-secondary">
+                                      {getCitationSummaryText(citation)}
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                    {showRetrievedCitations && (
+                      <>
+                        <div className="rounded-lg border border-dashed border-surface-divider bg-white/70 px-3 py-2.5 text-[11px] text-text-secondary shadow-sm dark:border-dark-divider dark:bg-dark-card/60 dark:text-text-dark-secondary">
+                          <p className="font-medium text-text-primary dark:text-text-dark-primary">原始召回（未全部注入）</p>
+                          <p className="mt-1">
+                            {latestContext ? (latestContext.retrieved_summary || getContextCountSummary(latestContext, 'retrieved')) : '无原始召回信息'}
+                          </p>
+                        </div>
+                        {latestGroupedRetrievedCitations.map((group) => (
+                          <div key={`retrieved-${group.key}`} className="space-y-2">
+                            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary dark:text-text-dark-secondary">
+                              {group.label}
+                            </p>
+                            <div className="space-y-2">
+                              {group.items.map((citation) => (
+                                <div
+                                  key={`retrieved-${citation.id}`}
+                                  className="rounded-xl border border-dashed border-surface-divider bg-white/70 px-3 py-3 shadow-sm dark:border-dark-divider dark:bg-dark-card/60"
+                                >
+                                  <div className="flex items-start gap-3">
+                                    <div className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-surface-divider bg-surface text-sm shadow-sm dark:border-dark-divider dark:bg-dark-sidebar">
+                                      <span>{renderCitationIcon(citation.source_type)}</span>
+                                    </div>
+                                    <div className="min-w-0 flex-1 space-y-2">
+                                      <div className="flex flex-wrap items-center gap-2">
+                                        <span className="win-badge border-surface-divider bg-surface px-2 py-1 text-[10px] text-text-secondary dark:border-dark-divider dark:bg-dark-sidebar dark:text-text-dark-secondary">
+                                          {renderCitationTypeBadge(citation.source_type)}
+                                        </span>
+                                        {citation.page ? (
+                                          <span className="win-badge border-surface-divider bg-surface px-2 py-1 text-[10px] text-text-secondary dark:border-dark-divider dark:bg-dark-sidebar dark:text-text-dark-secondary">
+                                            P{citation.page}
+                                          </span>
+                                        ) : null}
+                                      </div>
+
+                                      <div>
+                                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary dark:text-text-dark-secondary">
+                                          {getCitationSourceHeading(citation)}
+                                        </p>
+                                        <p className="mt-1 break-all text-[12px] font-semibold text-text-primary dark:text-text-dark-primary">
+                                          {getCitationSourceText(citation)}
+                                        </p>
+                                      </div>
+
+                                      <div>
+                                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary dark:text-text-dark-secondary">
+                                          位置
+                                        </p>
+                                        <p className="mt-1 text-[11px] leading-5 text-text-secondary dark:text-text-dark-secondary">
+                                          {getCitationLocationText(citation)}
+                                        </p>
+                                      </div>
+
+                                      <div>
+                                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary dark:text-text-dark-secondary">
+                                          摘要
+                                        </p>
+                                        <p className="mt-1 whitespace-pre-wrap text-[11px] leading-5 text-text-secondary dark:text-text-dark-secondary">
+                                          {getCitationSummaryText(citation)}
+                                        </p>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                ) : latestContext ? (
+                  <p className="rounded-lg border border-dashed border-surface-divider px-3 py-3 text-[11px] leading-5 text-text-secondary dark:border-dark-divider">
+                    这条回答带有上下文元数据，但当前没有可展开的 citation 明细。
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+              <p className="rounded-lg border border-dashed border-surface-divider px-3 py-3 text-[11px] leading-5 text-text-secondary dark:border-dark-divider">
+                {currentMode === 'copilot'
+                  ? '发送一条 Copilot 消息后，这里会展示最近一条回答引用的文件名、位置和摘要。'
+                  : '当前模式通常不会注入引用元数据；切换到 Copilot 并发起对话后，这里会展示最近回答的上下文引用。'}
+              </p>
+            )}
           </section>
 
           <div className="border-t border-surface-divider dark:border-dark-divider" />

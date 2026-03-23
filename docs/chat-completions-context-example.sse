@@ -1,0 +1,13 @@
+data: {"id":"chatcmpl-demo-ctx-001","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-demo-ctx-001","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"根据历史采购记录，"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-demo-ctx-001","object":"chat.completion.chunk","created":1710000001,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"本次服务器报价高于近三次均值约 12%，"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-demo-ctx-001","object":"chat.completion.chunk","created":1710000001,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"建议重点核查维保范围和交付周期。"},"finish_reason":null}]}
+
+data: {"type":"context_metadata","sources":{"knowledge_count":2,"knowhow_count":1,"skill_count":0,"summary":"知识库(2条) + Know-how(1条)","citations":[{"id":"chunk-7","source_type":"knowledge","label":"采购方案.pdf","file_name":"采购方案.pdf","title":"第2页 · 表格片段","snippet":"A 供应商服务器报价 128000 元，含 3 年维保。","location":"片段 #7 · 字符 121-268","page":2,"chunk_type":"table","chunk_index":7,"char_start":121,"char_end":268},{"id":"record-3","source_type":"knowledge","label":"采购台账.xlsx","file_name":"采购台账.xlsx","title":"IT - 服务器","snippet":"2025 年 Q4 同配置服务器成交均价 114000 元，供应商 B。","location":"供应商: 供应商B · 单价: 114000"},{"id":"kh-5","source_type":"knowhow","label":"采购预审","title":"规则 1","snippet":"超过 10 万元的 IT 采购需补充至少两家供应商对比。","location":"权重 5"}],"schema_version":2,"truncated":true,"retrieved_summary":"知识库(2条) + Know-how(1条) + Skill(1个)","retrieved_knowledge_count":2,"retrieved_knowhow_count":1,"retrieved_skill_count":1,"retrieved_citations":[{"id":"chunk-7","source_type":"knowledge","label":"采购方案.pdf","file_name":"采购方案.pdf","title":"第2页 · 表格片段","snippet":"A 供应商服务器报价 128000 元，含 3 年维保。","location":"片段 #7 · 字符 121-268","page":2,"chunk_type":"table","chunk_index":7,"char_start":121,"char_end":268},{"id":"record-3","source_type":"knowledge","label":"采购台账.xlsx","file_name":"采购台账.xlsx","title":"IT - 服务器","snippet":"2025 年 Q4 同配置服务器成交均价 114000 元，供应商 B。","location":"供应商: 供应商B · 单价: 114000"},{"id":"kh-5","source_type":"knowhow","label":"采购预审","title":"规则 1","snippet":"超过 10 万元的 IT 采购需补充至少两家供应商对比。","location":"权重 5"},{"id":"procurement-review","source_type":"skill","label":"采购预审","title":"技能匹配","snippet":"辅助检查采购材料、报价完整性和风险项。","location":"匹配度 93% · high"}]}}
+
+data: {"type":"skill_suggestion","schema_version":2,"skill_id":"procurement-review","skill_name":"采购预审","description":"辅助检查采购材料、报价完整性和风险项。","score":0.93,"confidence":"high","matched_keywords":["采购","预审","报价"]}
+
+data: [DONE]

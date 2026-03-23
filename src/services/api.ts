@@ -8,14 +8,12 @@ import type {
   SkillMeta, SkillMatch,
   KnowhowRule, KnowledgeStats, IngestResult,
   AgentMatchResult, AgentExecutionEvent,
+  ContextMetadata, SkillSuggestionEvent,
 } from '@/types';
 
 /** 获取后端 API 基础 URL */
 function getBaseUrl(): string {
-  // Electron 环境：通过 preload 获取动态端口
-  // 开发环境：使用固定端口
-  const port = (window as any).__BACKEND_PORT__ || 8765;
-  return `http://127.0.0.1:${port}/api`;
+  return 'http://127.0.0.1:8765/api';
 }
 
 // ===== 健康检查 =====
@@ -34,23 +32,6 @@ export async function checkHealth(): Promise<boolean> {
 interface ChatMessage {
   role: string;
   content: string;
-}
-
-/** 后端注入的上下文来源元数据 */
-export interface ContextMetadata {
-  knowledge_count: number;
-  knowhow_count: number;
-  skill_count: number;
-  summary: string;
-}
-
-/** 后端注入的 Skill 推荐事件 */
-export interface SkillSuggestionEvent {
-  skill_id: string;
-  skill_name: string;
-  description: string;
-  score: number;
-  confidence: string;
 }
 
 /**
@@ -633,11 +614,6 @@ export async function generateAutoTitle(
   return data.title as string;
 }
 
-/** 设置后端端口（由 Electron preload 调用） */
-export function setBackendPort(port: number): void {
-  (window as any).__BACKEND_PORT__ = port;
-}
-
 // ===== Embedding 配置 =====
 
 export interface EmbeddingConfig {
@@ -688,4 +664,3 @@ export async function testEmbeddingConnection(
   if (!res.ok) throw new Error('测试请求失败');
   return res.json();
 }
-

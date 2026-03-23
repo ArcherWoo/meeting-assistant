@@ -74,6 +74,156 @@ class AssembledContext:
             f" - {skill['description']}"
         )
 
+    @staticmethod
+    def _normalize_text_snippet(value: str, max_chars: int = 180) -> str:
+        text = " ".join(str(value or "").split())
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars].rstrip() + "..."
+
+    @staticmethod
+    def _coerce_int(value: object) -> Optional[int]:
+        try:
+            if value is None or value == "":
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _build_knowledge_citation(cls, result: dict, index: int) -> dict:
+        source_name = str(result.get("source_file") or "知识库文档")
+        citation = {
+            "id": str(result.get("id") or result.get("chunk_id") or f"knowledge-{index}"),
+            "source_type": "knowledge",
+            "label": source_name,
+            "file_name": source_name,
+        }
+
+        if "item_name" in result:
+            title_parts = [str(part).strip() for part in (result.get("category"), result.get("item_name")) if part]
+            title = " - ".join(title_parts) if title_parts else f"知识记录 {index}"
+            snippet = cls._normalize_text_snippet(
+                result.get("raw_text")
+                or "；".join(
+                    part for part in [
+                        f"供应商: {result['supplier']}" if result.get("supplier") else "",
+                        f"单价: {result['unit_price']}" if result.get("unit_price") else "",
+                        f"总价: {result['total_price']}" if result.get("total_price") else "",
+                    ]
+                    if part
+                )
+                or title
+            )
+            location_parts = []
+            if result.get("supplier"):
+                location_parts.append(f"供应商: {result['supplier']}")
+            if result.get("unit_price"):
+                location_parts.append(f"单价: {result['unit_price']}")
+            location = " · ".join(location_parts)
+        else:
+            chunk_type_map = {
+                "text": "正文片段",
+                "table": "表格片段",
+                "note": "备注片段",
+            }
+            slide_index = cls._coerce_int(result.get("slide_index"))
+            if slide_index is not None and slide_index <= 0:
+                slide_index = None
+            chunk_type = str(result.get("chunk_type") or "").strip().lower()
+            chunk_type_label = chunk_type_map.get(chunk_type, chunk_type or "正文片段")
+            chunk_index = cls._coerce_int(result.get("chunk_index"))
+            if chunk_index is not None and chunk_index <= 0:
+                chunk_index = None
+            raw_char_start = cls._coerce_int(result.get("char_start"))
+            raw_char_end = cls._coerce_int(result.get("char_end"))
+            char_start = raw_char_start + 1 if raw_char_start is not None and raw_char_start >= 0 else None
+            char_end = raw_char_end if raw_char_end is not None and raw_char_end > 0 else None
+
+            title_parts = []
+            if slide_index is not None:
+                title_parts.append(f"第{slide_index}页")
+            if chunk_type_label:
+                title_parts.append(chunk_type_label)
+            title = " · ".join(title_parts) if title_parts else f"知识片段 {index}"
+            snippet = cls._normalize_text_snippet(result.get("content") or "")
+            location_parts = []
+            if chunk_index is not None:
+                location_parts.append(f"片段 #{chunk_index}")
+            if (
+                char_start is not None
+                and char_end is not None
+                and char_end >= char_start
+            ):
+                location_parts.append(f"字符 {char_start}-{char_end}")
+            if not location_parts and title_parts:
+                location_parts = title_parts.copy()
+            location = " · ".join(location_parts)
+
+            if slide_index is not None:
+                citation["page"] = slide_index
+            if chunk_type:
+                citation["chunk_type"] = chunk_type
+            if chunk_index is not None:
+                citation["chunk_index"] = chunk_index
+            if char_start is not None:
+                citation["char_start"] = char_start
+            if char_end is not None:
+                citation["char_end"] = char_end
+
+        citation.update({
+            "title": title,
+            "snippet": snippet,
+            "location": location,
+        })
+        return citation
+
+    @classmethod
+    def _build_knowhow_citation(cls, rule: dict, index: int) -> dict:
+        return {
+            "id": str(rule.get("id") or f"knowhow-{index}"),
+            "source_type": "knowhow",
+            "label": str(rule.get("category") or "Know-how"),
+            "title": f"规则 {index}",
+            "snippet": cls._normalize_text_snippet(rule.get("rule_text") or ""),
+            "location": f"权重 {rule.get('weight', 0)}",
+        }
+
+    @classmethod
+    def _build_skill_citation(cls, skill: dict, index: int) -> dict:
+        return {
+            "id": str(skill.get("skill_id") or f"skill-{index}"),
+            "source_type": "skill",
+            "label": str(skill.get("skill_name") or f"Skill {index}"),
+            "title": "技能匹配",
+            "snippet": cls._normalize_text_snippet(skill.get("description") or ""),
+            "location": f"匹配度 {skill.get('score', 0):.0%} · {skill.get('confidence', 'low')}",
+        }
+
+    def to_metadata_payload(self) -> dict:
+        citations = [
+            *[
+                self._build_knowledge_citation(result, index)
+                for index, result in enumerate(self.knowledge_results[:5], 1)
+            ],
+            *[
+                self._build_knowhow_citation(rule, index)
+                for index, rule in enumerate(self.knowhow_rules[:4], 1)
+            ],
+            *[
+                self._build_skill_citation(skill, index)
+                for index, skill in enumerate(self.matched_skills[:3], 1)
+            ],
+        ]
+
+        return {
+            "knowledge_count": len(self.knowledge_results),
+            "knowhow_count": len(self.knowhow_rules),
+            "skill_count": len(self.matched_skills),
+            "summary": self.source_summary,
+            "citations": citations,
+        }
+
     def fit_to_budget(self, max_chars: int) -> "AssembledContext":
         """按条目粒度裁剪上下文，保证被保留的条目都是完整的。"""
         if max_chars <= 0 or not self.has_context:
@@ -318,4 +468,3 @@ class ContextAssembler:
 
 # 全局单例
 context_assembler = ContextAssembler()
-

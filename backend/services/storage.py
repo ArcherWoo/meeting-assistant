@@ -143,6 +143,25 @@ CREATE TABLE IF NOT EXISTS ppt_imports (
     extracted_items_count INTEGER DEFAULT 0,
     imported_at          DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 通用知识片段表（无 embedding 时也可检索）
+CREATE TABLE IF NOT EXISTS knowledge_chunks (
+    id          TEXT PRIMARY KEY,
+    import_id   TEXT NOT NULL,
+    source_file TEXT NOT NULL,
+    file_type   TEXT NOT NULL,
+    slide_index INTEGER DEFAULT 0,
+    chunk_type  TEXT DEFAULT 'text',
+    chunk_index INTEGER DEFAULT 0,
+    char_start  INTEGER,
+    char_end    INTEGER,
+    content     TEXT NOT NULL,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (import_id) REFERENCES ppt_imports(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_import ON knowledge_chunks(import_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_source ON knowledge_chunks(source_file);
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_type ON knowledge_chunks(file_type);
 """
 
 
@@ -379,6 +398,124 @@ class StorageService:
         )
         await self.db.commit()
 
+    async def add_knowledge_chunks(
+        self, import_id: str, source_file: str, file_type: str, chunks: list[dict],
+    ) -> int:
+        rows = []
+        created_at = datetime.utcnow().isoformat()
+        for chunk in chunks:
+            content = str(chunk.get("content") or "").strip()
+            if not content:
+                continue
+            rows.append((
+                str(chunk.get("id") or gen_id()),
+                import_id,
+                source_file,
+                file_type,
+                int(chunk.get("slide_index") or 0),
+                str(chunk.get("chunk_type") or "text"),
+                int(chunk.get("chunk_index") or 0),
+                chunk.get("char_start"),
+                chunk.get("char_end"),
+                content,
+                created_at,
+            ))
+
+        if not rows:
+            return 0
+
+        await self.db.executemany(
+            "INSERT INTO knowledge_chunks (id, import_id, source_file, file_type, slide_index, chunk_type, "
+            "chunk_index, char_start, char_end, content, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        await self.db.commit()
+        return len(rows)
+
+    async def delete_knowledge_chunks(
+        self, import_id: Optional[str] = None, source_file: Optional[str] = None,
+    ) -> int:
+        conditions: list[str] = []
+        params: list[str] = []
+        if import_id:
+            conditions.append("import_id=?")
+            params.append(import_id)
+        if source_file:
+            conditions.append("source_file=?")
+            params.append(source_file)
+        if not conditions:
+            return 0
+
+        cursor = await self.db.execute(
+            f"DELETE FROM knowledge_chunks WHERE {' AND '.join(conditions)}",
+            params,
+        )
+        await self.db.commit()
+        return cursor.rowcount
+
+    async def count_knowledge_chunks(
+        self, import_id: Optional[str] = None, source_file: Optional[str] = None,
+    ) -> int:
+        conditions: list[str] = []
+        params: list[str] = []
+        if import_id:
+            conditions.append("import_id=?")
+            params.append(import_id)
+        if source_file:
+            conditions.append("source_file=?")
+            params.append(source_file)
+
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        row = await self._fetchone(
+            f"SELECT COUNT(*) AS cnt FROM knowledge_chunks{where}",
+            tuple(params),
+        )
+        return int(row["cnt"]) if row else 0
+
+    async def search_knowledge_chunks(self, keywords: list[str], limit: int = 10) -> list[dict]:
+        terms = [term.strip() for term in keywords if term and term.strip()]
+        if not terms:
+            return []
+
+        score_parts: list[str] = []
+        score_params: list[object] = []
+        where_parts: list[str] = []
+        where_params: list[str] = []
+
+        for index, term in enumerate(terms):
+            pattern = f"%{term}%"
+            content_weight = max(1, 4 - index)
+            file_weight = max(1, content_weight - 1)
+            score_parts.append("CASE WHEN content LIKE ? THEN ? ELSE 0 END")
+            score_params.extend([pattern, content_weight])
+            score_parts.append("CASE WHEN source_file LIKE ? THEN ? ELSE 0 END")
+            score_params.extend([pattern, file_weight])
+            where_parts.append("content LIKE ?")
+            where_params.append(pattern)
+            where_parts.append("source_file LIKE ?")
+            where_params.append(pattern)
+
+        sql = (
+            "SELECT id, import_id, source_file, file_type, slide_index, chunk_type, chunk_index, "
+            "char_start, char_end, content, "
+            f"({' + '.join(score_parts)}) AS match_score "
+            "FROM knowledge_chunks "
+            f"WHERE {' OR '.join(where_parts)} "
+            "ORDER BY match_score DESC, chunk_index ASC, created_at DESC LIMIT ?"
+        )
+        return await self._fetchall(sql, [*score_params, *where_params, limit])
+
+    async def list_unindexed_imports(self, limit: int = 5) -> list[dict]:
+        return await self._fetchall(
+            "SELECT p.id, p.file_name, p.import_status, p.imported_at "
+            "FROM ppt_imports p "
+            "LEFT JOIN knowledge_chunks kc ON kc.import_id = p.id "
+            "GROUP BY p.id "
+            "HAVING COUNT(kc.id) = 0 "
+            "ORDER BY p.imported_at DESC LIMIT ?",
+            (limit,),
+        )
+
     # ===== Skill Usage Logs =====
 
     async def log_skill_usage(
@@ -409,4 +546,3 @@ class StorageService:
 
 # 全局单例
 storage = StorageService()
-

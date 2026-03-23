@@ -25,15 +25,6 @@ function darkenHexParts(hex: string, factor = 0.82): string {
 export default function App() {
   const { theme, accentColor } = useAppStore();
 
-  useEffect(() => {
-    const root = document.documentElement;
-    const body = document.body;
-    const platform = window.electronAPI?.platform ?? 'web';
-
-    root.dataset.platform = platform;
-    body.dataset.platform = platform;
-  }, []);
-
   // 主题色 CSS 变量注入
   useEffect(() => {
     const root = document.documentElement;
@@ -60,4 +51,3 @@ export default function App() {
 
   return <MainLayout />;
 }
-

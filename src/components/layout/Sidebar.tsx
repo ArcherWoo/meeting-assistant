@@ -86,12 +86,12 @@ export default function Sidebar() {
       )}
     >
       {/* Logo 区域 */}
-      <div className="titlebar-no-drag flex items-center gap-2 border-b border-surface-divider dark:border-dark-divider px-3 py-2.5">
+      <div className="flex items-center gap-2 border-b border-surface-divider dark:border-dark-divider px-3 py-2.5">
         <span className="flex h-8 w-8 items-center justify-center rounded-md border border-surface-divider dark:border-dark-divider bg-white text-lg shadow-sm dark:bg-dark-card">🍒</span>
         {!sidebarCollapsed && (
           <div className="min-w-0">
             <span className="block truncate text-sm font-semibold">Meeting Asst</span>
-            <span className="block truncate text-[11px] text-text-secondary">Windows Desktop</span>
+            <span className="block truncate text-[11px] text-text-secondary">Web App</span>
           </div>
         )}
         <button
@@ -311,4 +311,3 @@ export default function Sidebar() {
     </aside>
   );
 }
-
