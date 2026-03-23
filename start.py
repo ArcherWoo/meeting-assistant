@@ -121,7 +121,8 @@ def check_node_deps():
     """检测 node_modules，缺失则自动 npm install"""
     if not os.path.isdir(NODE_MODULES):
         warn("node_modules/ 不存在，正在运行 npm install…")
-        subprocess.check_call(["npm", "install"], cwd=ROOT_DIR)
+        # Windows 上 npm 是 npm.cmd（批处理文件），需要 shell=True 才能正确执行
+        subprocess.check_call("npm install", cwd=ROOT_DIR, shell=True)
         ok("npm 依赖安装完成")
     else:
         ok("Node.js 依赖已就绪")
