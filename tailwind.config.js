@@ -5,16 +5,16 @@ export default {
   theme: {
     extend: {
       colors: {
-        // 主色调 - 紫蓝
+        // 主色调 — 由 CSS 变量 --color-primary-rgb 驱动，支持运行时切换
         primary: {
-          DEFAULT: '#6C63FF',
+          DEFAULT: 'rgb(var(--color-primary-rgb) / <alpha-value>)',
           50: '#F0EFFF',
           100: '#E0DEFF',
           200: '#C1BDFF',
           300: '#A29CFF',
           400: '#837BFF',
           500: '#6C63FF',
-          600: '#4A3FFF',
+          600: 'rgb(var(--color-primary-dark-rgb) / <alpha-value>)',
           700: '#2819FF',
           800: '#0D00F0',
           900: '#0A00BD',

@@ -9,11 +9,19 @@ import clsx from 'clsx';
 import { useAppStore } from '@/stores/appStore';
 import {
   testLLMConnection, getSystemPrompt, updateSystemPrompt, resetSystemPrompt,
-  getEmbeddingConfig, updateEmbeddingConfig, resetEmbeddingConfig, testEmbeddingConnection,
+  getEmbeddingConfig, updateEmbeddingConfig, testEmbeddingConnection,
 } from '@/services/api';
 import type { LLMConnectionTestResult, LLMProfile } from '@/types';
 
-type SettingsTab = 'llm' | 'prompts' | 'embedding';
+type SettingsTab = 'models' | 'prompts' | 'appearance';
+
+/** 主题色预设 */
+const ACCENT_COLORS = [
+  { label: '默认蓝', value: '#2563EB' },
+  { label: '靛紫', value: '#7C3AED' },
+  { label: '翠绿', value: '#059669' },
+  { label: '玫红', value: '#DB2777' },
+] as const;
 
 /** 三种对话模式的 System Prompt 状态 */
 interface PromptState {
@@ -79,12 +87,16 @@ export default function SettingsModal() {
     setActiveLLMConfig,
     saveLLMConfig,
     removeLLMConfig,
+    theme,
+    setTheme,
+    accentColor,
+    setAccentColor,
   } = useAppStore();
   const activeProfile = useMemo(
     () => llmConfigs.find((config) => config.id === activeLLMConfigId) ?? llmConfigs[0],
     [activeLLMConfigId, llmConfigs]
   );
-  const [activeTab, setActiveTab] = useState<SettingsTab>('llm');
+  const [activeTab, setActiveTab] = useState<SettingsTab>('models');
   const [selectedId, setSelectedId] = useState(activeProfile?.id ?? '');
   const [draft, setDraft] = useState<LLMProfile>(activeProfile ?? createDraftProfile(1));
   const [isNewDraft, setIsNewDraft] = useState(false);
@@ -310,15 +322,15 @@ export default function SettingsModal() {
             {/* Tab 切换 */}
             <div className="flex items-center gap-1 rounded-lg border border-surface-divider bg-surface p-1 dark:border-dark-divider dark:bg-dark-sidebar">
               <button
-                onClick={() => setActiveTab('llm')}
+                onClick={() => setActiveTab('models')}
                 className={clsx(
                   tabBtnCls,
-                  activeTab === 'llm'
+                  activeTab === 'models'
                     ? tabBtnActiveCls
                     : tabBtnIdleCls
                 )}
               >
-                🧠 模型配置
+                🧩 模型管理
               </button>
               <button
                 onClick={() => setActiveTab('prompts')}
@@ -332,15 +344,15 @@ export default function SettingsModal() {
                 📝 System Prompts
               </button>
               <button
-                onClick={() => setActiveTab('embedding')}
+                onClick={() => setActiveTab('appearance')}
                 className={clsx(
                   tabBtnCls,
-                  activeTab === 'embedding'
+                  activeTab === 'appearance'
                     ? tabBtnActiveCls
                     : tabBtnIdleCls
                 )}
               >
-                🔍 Embedding
+                🎨 外观
               </button>
             </div>
           </div>
@@ -348,6 +360,60 @@ export default function SettingsModal() {
             ×
           </button>
         </div>
+
+        {/* 外观 Tab */}
+        {activeTab === 'appearance' && (
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5 bg-[#F7F8FA] dark:bg-dark">
+            <div className="win-panel space-y-4 p-4">
+              <SectionTitle>主题模式</SectionTitle>
+              <div className="flex gap-2">
+                {([
+                  { value: 'light', label: '☀️ 浅色' },
+                  { value: 'dark',  label: '🌙 深色' },
+                  { value: 'system', label: '💻 跟随系统' },
+                ] as const).map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => setTheme(opt.value)}
+                    className={clsx(
+                      'flex-1 rounded-lg border px-3 py-2 text-sm transition-colors',
+                      theme === opt.value
+                        ? 'border-primary/40 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
+                        : 'border-surface-divider bg-white text-text-secondary hover:border-primary/20 hover:text-text-primary dark:border-dark-divider dark:bg-dark-card dark:hover:border-primary/20'
+                    )}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="win-panel space-y-4 p-4">
+              <SectionTitle>主题色</SectionTitle>
+              <div className="flex gap-3 flex-wrap">
+                {ACCENT_COLORS.map((color) => (
+                  <button
+                    key={color.value}
+                    onClick={() => setAccentColor(color.value)}
+                    title={color.label}
+                    className={clsx(
+                      'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors',
+                      accentColor === color.value
+                        ? 'border-primary/40 bg-white shadow-sm dark:bg-dark-card font-medium'
+                        : 'border-surface-divider bg-white text-text-secondary hover:border-gray-300 dark:border-dark-divider dark:bg-dark-card'
+                    )}
+                  >
+                    <span
+                      className="inline-block h-4 w-4 rounded-full border border-black/10 flex-shrink-0"
+                      style={{ backgroundColor: color.value }}
+                    />
+                    <span>{color.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* System Prompts Tab */}
         {activeTab === 'prompts' && (
@@ -400,114 +466,10 @@ export default function SettingsModal() {
           </div>
         )}
 
-        {/* Embedding 配置 Tab */}
-        {activeTab === 'embedding' && (
-          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5 bg-[#F7F8FA] dark:bg-dark">
-            <p className="text-xs text-text-secondary">
-              配置独立的 Embedding API，用于知识库语义检索。留空则自动使用当前 LLM 的 API 凭证（部分 LLM 提供商可能不支持 /embeddings 接口）。
-            </p>
-
-            <div className="win-panel space-y-4 p-4">
-              <SectionTitle>Embedding API 配置</SectionTitle>
-
-              <Field label="API Base URL">
-                <input
-                  className={inputCls}
-                  placeholder="https://api.openai.com/v1"
-                  value={embCfg.api_url}
-                  onChange={(e) => { setEmbCfg((c) => ({ ...c, api_url: e.target.value })); setEmbTestResult(null); setEmbError(''); }}
-                />
-              </Field>
-
-              <Field label="API Key">
-                <input
-                  type="password"
-                  className={inputCls}
-                  placeholder="sk-..."
-                  value={embCfg.api_key}
-                  onChange={(e) => { setEmbCfg((c) => ({ ...c, api_key: e.target.value })); setEmbTestResult(null); setEmbError(''); }}
-                />
-              </Field>
-
-              <Field label="Embedding 模型">
-                <input
-                  className={inputCls}
-                  placeholder="text-embedding-3-small"
-                  value={embCfg.model}
-                  onChange={(e) => { setEmbCfg((c) => ({ ...c, model: e.target.value })); setEmbTestResult(null); setEmbError(''); }}
-                />
-              </Field>
-
-              {embTestResult && (
-                <p className={clsx('text-xs', embTestResult.success ? 'text-green-500' : 'text-red-500')}>
-                  {embTestResult.success ? '✅' : '❌'} {embTestResult.message}
-                </p>
-              )}
-              {embError && <p className="text-xs text-red-500">{embError}</p>}
-
-              <div className="flex items-center justify-between gap-3 pt-1">
-                <button
-                  onClick={async () => {
-                    if (!confirm('确定要清除独立 Embedding 配置吗？清除后将回退到使用 LLM API 凭证。')) return;
-                    try {
-                      await resetEmbeddingConfig();
-                      setEmbCfg({ api_url: '', api_key: '', model: 'text-embedding-3-small' });
-                      setEmbTestResult(null);
-                      setEmbError('');
-                    } catch (e: any) {
-                      setEmbError(e.message || '清除失败');
-                    }
-                  }}
-                  className="win-button-subtle h-8 px-2 text-xs"
-                >
-                  清除配置
-                </button>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    disabled={embTesting || !embCfg.api_url || !embCfg.api_key}
-                    onClick={async () => {
-                      setEmbTesting(true); setEmbTestResult(null); setEmbError('');
-                      try {
-                        const result = await testEmbeddingConnection(embCfg);
-                        setEmbTestResult(result);
-                      } catch (e: any) {
-                        setEmbError(e.message || '测试失败');
-                      } finally {
-                        setEmbTesting(false);
-                      }
-                    }}
-                    className="win-button h-8 px-3 text-xs disabled:opacity-40"
-                  >
-                    {embTesting ? '测试中...' : '测试连接'}
-                  </button>
-
-                  <button
-                    disabled={embSaving}
-                    onClick={async () => {
-                      setEmbSaving(true); setEmbError('');
-                      try {
-                        await updateEmbeddingConfig(embCfg);
-                        setEmbSaved(true);
-                        setTimeout(() => setEmbSaved(false), 2000);
-                      } catch (e: any) {
-                        setEmbError(e.message || '保存失败');
-                      } finally {
-                        setEmbSaving(false);
-                      }
-                    }}
-                    className="win-button-primary h-8 min-w-[72px] px-4 text-xs"
-                  >
-                    {embSaving ? '保存中...' : embSaved ? '✅ 已保存' : '保存'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* LLM 配置 Tab */}
-        {activeTab === 'llm' && <div className="flex flex-1 min-h-0">
+        {/* 模型管理 Tab */}
+        {activeTab === 'models' && <div className="flex flex-col flex-1 min-h-0">
+          {/* LLM 配置区 */}
+          <div className="flex flex-1 min-h-0 border-b border-surface-divider dark:border-dark-divider">
           <div className="w-[260px] border-r border-surface-divider dark:border-dark-divider bg-[#F7F8FA] p-4 space-y-3 overflow-y-auto dark:bg-dark">
             <div className="flex items-center justify-between gap-2">
               <SectionTitle>模型列表</SectionTitle>
@@ -750,10 +712,72 @@ export default function SettingsModal() {
               </label>
             </Field>
           </div>
+          </div>
+          {/* Embedding API 配置区 */}
+          <div className="flex-shrink-0 max-h-[220px] overflow-y-auto px-4 py-3 space-y-3 bg-[#F7F8FA] dark:bg-dark">
+            <SectionTitle>Embedding API 配置</SectionTitle>
+            <Field label="API Base URL">
+              <input
+                value={embCfg.api_url}
+                onChange={(e) => setEmbCfg((c) => ({ ...c, api_url: e.target.value }))}
+                placeholder="https://api.openai.com/v1"
+                className={inputCls}
+              />
+            </Field>
+            <Field label="API Key">
+              <input
+                type="password"
+                value={embCfg.api_key}
+                onChange={(e) => setEmbCfg((c) => ({ ...c, api_key: e.target.value }))}
+                placeholder="sk-..."
+                className={inputCls}
+              />
+            </Field>
+            <Field label="Embedding 模型">
+              <input
+                value={embCfg.model}
+                onChange={(e) => setEmbCfg((c) => ({ ...c, model: e.target.value }))}
+                placeholder="text-embedding-3-small"
+                className={inputCls}
+              />
+            </Field>
+            {embTestResult && (
+              <p className={clsx('text-xs', embTestResult.success ? 'text-green-600' : 'text-red-500')}>
+                {embTestResult.message}
+              </p>
+            )}
+            {embError && <p className="text-xs text-red-500">{embError}</p>}
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                onClick={async () => {
+                  setEmbTesting(true); setEmbError(''); setEmbTestResult(null);
+                  try { const r = await testEmbeddingConnection(embCfg); setEmbTestResult(r); }
+                  catch (e: any) { setEmbError((e as Error).message || '测试失败'); }
+                  finally { setEmbTesting(false); }
+                }}
+                disabled={embTesting}
+                className="win-button h-8 px-3 text-xs"
+              >
+                {embTesting ? '测试中...' : '测试连接'}
+              </button>
+              <button
+                onClick={async () => {
+                  setEmbSaving(true); setEmbError(''); setEmbSaved(false);
+                  try { await updateEmbeddingConfig(embCfg); setEmbSaved(true); setTimeout(() => setEmbSaved(false), 2000); }
+                  catch (e: any) { setEmbError((e as Error).message || '保存失败'); }
+                  finally { setEmbSaving(false); }
+                }}
+                disabled={embSaving}
+                className="win-button-primary h-8 px-3 text-xs"
+              >
+                {embSaving ? '保存中...' : embSaved ? '✅ 已保存' : '保存配置'}
+              </button>
+            </div>
+          </div>
         </div>}
 
-        {/* 底部操作区 — LLM Tab 专属 */}
-        {activeTab === 'llm' && (
+        {/* 底部操作区 — 模型管理 Tab 专属 */}
+        {activeTab === 'models' && (
         <div className="win-toolbar flex items-center justify-between gap-3 px-4 py-3">
           <button
             onClick={handleDelete}

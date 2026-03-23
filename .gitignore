@@ -1,72 +1,58 @@
 # ── 构建产物 ──────────────────────────────────────────────────
 dist/
-dist-electron/
 build/
-release/
-# 所有 out* 构建输出目录（未压缩的二进制产物，不提交到 git）
+
+# 历史遗留的 Electron 打包目录（如仍残留在本地）
+dist-electron/
 out/
 out-*/
 out[0-9]*/
+release/
 release-build/
-backend/build_tmp/
 win-unpacked-copy/
 release.zip
+release.part*.zip
 
-# ── Node.js 依赖 ───────────────────────────────────────────────
+# ── Node.js ───────────────────────────────────────────────────
 node_modules/
 npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
 
-# ── Python 缓存 ────────────────────────────────────────────────
+# ── Python ────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-.Python
 *.egg-info/
-.eggs/
-pip-wheel-metadata/
+backend/build/
+backend/build_tmp/
+backend/dist/
 
-# ── 环境变量 / API Key（绝不提交！） ──────────────────────────
+# ── 环境变量 ──────────────────────────────────────────────────
 .env
 .env.local
 .env.*.local
 backend/.env
-*.secret
 
-# ── 用户本地数据（数据库 & 向量库） ──────────────────────────
-# 注意：~/ 路径不需要在这里列出，git 只追踪项目内的文件
-# 如果你在项目目录内存有数据文件，请加在下面：
+# ── 本地数据 ──────────────────────────────────────────────────
 *.db
 *.sqlite
 *.sqlite3
 vectors/
 lancedb_data/
 
-# ── macOS ──────────────────────────────────────────────────────
+# ── OS ────────────────────────────────────────────────────────
 .DS_Store
-.AppleDouble
-.LSOverride
-
-# ── Windows ────────────────────────────────────────────────────
 Thumbs.db
-ehthumbs.db
 desktop.ini
-$RECYCLE.BIN/
 
-# ── IDE / 编辑器 ───────────────────────────────────────────────
-.vscode/settings.json
-.vscode/launch.json
+# ── IDE ───────────────────────────────────────────────────────
+.vscode/
 .idea/
 *.swp
-*.swo
 
-# ── Electron Builder 临时文件 ──────────────────────────────────
-*.spec
-.cache/
-
-# ── 日志 ──────────────────────────────────────────────────────
+# ── 日志 & 缓存 ──────────────────────────────────────────────
 logs/
 *.log
-
+.cache/
+.pytest_cache/
+out-new/

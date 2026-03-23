@@ -15,6 +15,7 @@ export default function Sidebar() {
     currentMode, setMode, sidebarCollapsed, toggleSidebar,
     activeView, setActiveView, toggleSettings,
   } = useAppStore();
+
   const {
     conversations, activeConversationId, createConversation,
     setActiveConversation, renameConversation, deleteConversation,

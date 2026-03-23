@@ -9,6 +9,7 @@ import type { AppMode, LLMConfig, LLMProfile, Theme, BackendStatus } from '@/typ
 
 interface PersistedAppState {
   theme?: Theme;
+  accentColor?: string;
   llmConfig?: LLMConfig;
   llmConfigs?: Partial<LLMProfile>[];
   activeLLMConfigId?: string;
@@ -66,6 +67,8 @@ interface AppState {
   // UI 状态
   theme: Theme;
   setTheme: (theme: Theme) => void;
+  accentColor: string;
+  setAccentColor: (color: string) => void;
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
   contextPanelVisible: boolean;
@@ -128,6 +131,8 @@ export const useAppStore = create<AppState>()(
       // UI 默认状态
       theme: 'system',
       setTheme: (theme) => set({ theme }),
+      accentColor: '#2563EB',
+      setAccentColor: (color) => set({ accentColor: color }),
       sidebarCollapsed: false,
       toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
       contextPanelVisible: false,
@@ -151,6 +156,7 @@ export const useAppStore = create<AppState>()(
         return {
           ...persisted,
           theme: persisted.theme ?? 'system',
+          accentColor: persisted.accentColor ?? '#2563EB',
           llmConfigs,
           activeLLMConfigId,
         };
@@ -160,6 +166,7 @@ export const useAppStore = create<AppState>()(
         llmConfigs: state.llmConfigs,
         activeLLMConfigId: state.activeLLMConfigId,
         theme: state.theme,
+        accentColor: state.accentColor,
       }),
     }
   )

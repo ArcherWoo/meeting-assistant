@@ -1,13 +1,11 @@
 {
   "name": "meeting-assistant",
   "version": "0.1.0",
-  "description": "AI-powered Meeting Assistant - PPT analysis, meeting summaries, and skill automation",
-  "main": "dist-electron/main.js",
+  "type": "module",
+  "description": "AI-powered Meeting Assistant - Web version with PPT analysis, meeting summaries, and skill automation",
   "scripts": {
     "dev": "vite",
-    "dev:electron": "vite && electron .",
     "build": "tsc && vite build",
-    "build:electron": "npm run build && electron-builder",
     "preview": "vite preview",
     "lint": "eslint src --ext ts,tsx",
     "backend:dev": "cd backend && python -m uvicorn main:app --reload --port 8765"
@@ -31,14 +29,10 @@
     "@types/react-syntax-highlighter": "^15.5.13",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "typescript": "^5.6.3",
-    "vite": "^6.0.1",
-    "vite-plugin-electron": "^0.28.8",
-    "vite-plugin-electron-renderer": "^0.14.6"
+    "vite": "^6.0.1"
   },
   "author": "Meeting Assistant Team",
   "license": "MIT"

@@ -265,8 +265,8 @@ export default function ChatArea() {
       </div>
 
       {/* 消息列表 */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin px-5 py-4 bg-[#F7F8FA] dark:bg-[#101726]">
-        <div className="mx-auto flex h-full w-full max-w-5xl flex-col">
+      <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-4 bg-[#F7F8FA] dark:bg-[#101726]">
+        <div className="flex h-full w-full flex-col">
         {visibleMessages.length === 0 && !agentQuery ? (
           <>
             {/* 隐藏的文件输入（欢迎屏使用） */}

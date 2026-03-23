@@ -6,8 +6,24 @@ import { useEffect } from 'react';
 import { useAppStore } from './stores/appStore';
 import MainLayout from './components/layout/MainLayout';
 
+/** 将 #rrggbb 转为 "r g b" 空格分隔格式，供 CSS rgb() 使用 */
+function hexToRgbParts(hex: string): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `${r} ${g} ${b}`;
+}
+
+/** 按比例压暗颜色（用于悬停态 primary-600） */
+function darkenHexParts(hex: string, factor = 0.82): string {
+  const r = Math.round(parseInt(hex.slice(1, 3), 16) * factor);
+  const g = Math.round(parseInt(hex.slice(3, 5), 16) * factor);
+  const b = Math.round(parseInt(hex.slice(5, 7), 16) * factor);
+  return `${r} ${g} ${b}`;
+}
+
 export default function App() {
-  const { theme } = useAppStore();
+  const { theme, accentColor } = useAppStore();
 
   useEffect(() => {
     const root = document.documentElement;
@@ -17,6 +33,13 @@ export default function App() {
     root.dataset.platform = platform;
     body.dataset.platform = platform;
   }, []);
+
+  // 主题色 CSS 变量注入
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty('--color-primary-rgb', hexToRgbParts(accentColor));
+    root.style.setProperty('--color-primary-dark-rgb', darkenHexParts(accentColor));
+  }, [accentColor]);
 
   // 主题切换：监听系统偏好 + 手动设置
   useEffect(() => {

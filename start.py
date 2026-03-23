@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Meeting Assistant — 一键启动脚本
-同时启动后端（FastAPI/Uvicorn :8765）和前端（Vite/Electron :5173）
+同时启动后端（FastAPI/Uvicorn :8765）和前端（Vite :5173）
 用法：python start.py  或  python3 start.py
 """
 
@@ -85,16 +85,22 @@ def check_python_deps():
         warn("未找到 backend/requirements.txt，跳过 Python 依赖检测")
         return
 
-    # 读取必需包名（去掉版本限定符）
+    # 读取必需包名（去掉版本限定符和 extras 后缀，如 uvicorn[standard] → uvicorn）
     with open(REQUIREMENTS) as f:
         pkgs = [
-            line.split("==")[0].split(">=")[0].split("<=")[0].strip()
+            line.split("==")[0].split(">=")[0].split("<=")[0].split("[")[0].strip()
             for line in f if line.strip() and not line.startswith("#")
         ]
 
+    # pip 包名与 import 名不一致的映射表
+    _IMPORT_OVERRIDES = {
+        "python-pptx":      "pptx",
+        "python-multipart":  "multipart",
+    }
+
     missing = []
     for pkg in pkgs:
-        import_name = pkg.replace("-", "_").lower()
+        import_name = _IMPORT_OVERRIDES.get(pkg, pkg.replace("-", "_").lower())
         try:
             __import__(import_name)
         except ImportError:
@@ -158,9 +164,11 @@ def launch_backend() -> subprocess.Popen:
             "--reload",
         ],
         cwd=BACKEND_DIR,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
@@ -180,11 +188,16 @@ def launch_frontend() -> subprocess.Popen:
     proc = subprocess.Popen(
         [npm_cmd, "run", "dev"],
         cwd=ROOT_DIR,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
-        shell=IS_WINDOWS,  # Windows 需要 shell 来解析 .cmd 脚本
+        shell=IS_WINDOWS,
+        # 在独立进程组中启动：Ctrl+C 不会传递给 CMD，
+        # CMD 永远不会触发"终止批处理作业"逻辑，彻底消除 GBK 乱码
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0,
     )
     _procs.append(proc)
     t = threading.Thread(
@@ -200,10 +213,16 @@ def shutdown(signum=None, frame=None):
     print(f"\n{YELLOW}{BOLD}正在停止所有服务…{RESET}")
     for p in _procs:
         if p.poll() is None:
-            p.terminate()
-    # 给进程 3 秒优雅退出
+            if IS_WINDOWS:
+                # taskkill /F /T 递归终止整个进程树（含独立进程组中的 node.exe 子进程）
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                    capture_output=True,
+                )
+            else:
+                p.terminate()
     import time
-    time.sleep(3)
+    time.sleep(1)
     for p in _procs:
         if p.poll() is None:
             p.kill()
@@ -231,7 +250,7 @@ def main():
 
     print(f"\n{BOLD}【2/2】启动服务{RESET}")
     info("后端：http://127.0.0.1:8765   (FastAPI + uvicorn --reload)")
-    info("前端：http://localhost:5173   (Vite dev server + Electron)")
+    info("前端：http://localhost:5173  /  http://127.0.0.1:5173   (Vite dev server)")
 
     # 注册 Ctrl+C 处理（Windows 不支持 SIGTERM）
     signal.signal(signal.SIGINT, shutdown)

@@ -4,6 +4,12 @@
 
 /* ===== 全局基础样式 ===== */
 @layer base {
+  :root {
+    /* 主题色 RGB 分量，由 App.tsx 根据 accentColor 动态写入 */
+    --color-primary-rgb: 37 99 235;      /* #2563EB 蓝色（默认） */
+    --color-primary-dark-rgb: 30 81 193; /* 深一度悬停色 */
+  }
+
   html, body, #root {
     height: 100%;
   }

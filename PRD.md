@@ -30,8 +30,7 @@ Meeting Assistant 是一款面向**非技术用户**的 AI 桌面客户端。核
 ### 1.4 技术栈
 | 层级 | 技术选型 | 说明 |
 |------|---------|------|
-| 桌面框架 | **Electron** | 跨平台桌面容器（Windows + macOS），成熟稳定 |
-| 前端 | **React + TypeScript** | 现代组件化 UI，参考 AnythingLLM 工作区设计 |
+| 前端 | **React + TypeScript + Vite** | 现代组件化 UI，Vite 构建 |
 | 后端 | **Python FastAPI** | 本地 HTTP 服务，承载所有 AI/数据/文件处理逻辑 |
 | PPT 解析 | **Docling (IBM)** + **python-pptx** | Docling 主引擎（AI 布局分析 + 高精度表格提取 → Markdown/JSON），python-pptx 辅助提取元数据与备注 |
 | LLM 接入 | **OpenAI 兼容协议** | 流式 SSE，URL + Bearer Token |
@@ -41,9 +40,8 @@ Meeting Assistant 是一款面向**非技术用户**的 AI 桌面客户端。核
 | 样式 | **TailwindCSS** | 现代简洁高级感 |
 | 状态管理 | **Zustand** | 轻量级状态管理 |
 | 安全 | **Fernet / keyring** | API Key 加密存储，本地数据加密 |
-| 打包部署 | **electron-builder + PyInstaller** | 将 Python 运行时内嵌打包，用户零配置安装 |
 
-> **架构总览**：Electron 主进程启动时自动拉起内嵌的 Python FastAPI 服务（端口随机分配），前端 Renderer 通过 `http://localhost:{port}` 与后端通信。所有 AI 推理、文件解析、知识库检索、Skill 执行均在 Python 端完成，前端仅负责 UI 渲染与交互。
+> **架构总览**：前端通过 Vite 开发服务器运行，通过 `http://localhost:8765` 与 Python FastAPI 后端通信。所有 AI 推理、文件解析、知识库检索、Skill 执行均在 Python 端完成，前端仅负责 UI 渲染与交互。
 
 ---
 
@@ -178,7 +176,7 @@ Meeting Assistant 是一款面向**非技术用户**的 AI 桌面客户端。核
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Title Bar (Electron 自定义标题栏，macOS 红绿灯 / Win 最小化关闭)  │
+│  Title Bar (浏览器标题栏)                                         │
 ├──────┬───────────────────────────────────────────────────────┤
 │      │                                                       │
 │  N   │              Main Content Area                        │
@@ -1024,7 +1022,7 @@ async def learn_from_feedback(feedback: FeedbackData) -> List[KnowhowRule]:
 
 ### 6.1 后端解析架构
 ```
-Electron Renderer (React)
+Browser (React)
     │
     ├── POST /api/ppt/parse ──→ FastAPI 后端
     │       │
@@ -1208,8 +1206,8 @@ Meeting Assistant
 ## 八、开发路线图
 
 ### Phase 1 — 基础框架（2-3 周）
-- [ ] Electron 项目初始化 + React 前端骨架
-- [ ] Python FastAPI 后端服务搭建 + Electron 自动启停管理
+- [ ] Vite + React 前端骨架搭建
+- [ ] Python FastAPI 后端服务搭建
 - [ ] 三栏布局 UI 实现（侧边栏 + 聊天区 + 详情面板）
 - [ ] OpenAI 兼容 API 接入（流式 SSE）
 - [ ] 基础 Copilot 对话功能
@@ -1609,7 +1607,7 @@ class ToolRegistry {
 
 #### 11.4.2 沙箱架构
 ```
-┌─ 主进程 (Electron + FastAPI) ───────────────────┐
+┌─ 主进程 (FastAPI) ──────────────────────────────┐
 │                                                  │
 │  ┌─ 沙箱管理器 ──────────────────────────────┐  │
 │  │                                            │  │
@@ -2157,7 +2155,7 @@ doc_chunks_schema = pa.schema([
 | 指标 | 目标值 | 说明 |
 |------|--------|------|
 | **应用启动时间** | < 3 秒 | 从点击图标到界面可交互 |
-| **FastAPI 后端启动** | < 2 秒 | Electron 启动后自动拉起 |
+| **FastAPI 后端启动** | < 2 秒 | 手动启动 uvicorn |
 | **首次消息响应** | < 500ms | 从发送到开始显示流式内容 |
 | **流式渲染帧率** | ≥ 30fps | Markdown 实时渲染不卡顿 |
 | **PPT 解析速度** | < 5 秒/50页 | python-pptx 解析 + 结构化提取 |
@@ -2229,18 +2227,9 @@ doc_chunks_schema = pa.schema([
 | **macOS** | 12.0 (Monterey) | x64 + ARM64 (Universal) | 红绿灯按钮、Keychain 集成 |
 | **Windows** | 10 (1903+) | x64 | 标题栏按钮、Credential Manager |
 
-#### 打包方案
-```
-Electron Builder 配置:
-├── macOS: .dmg (Universal Binary)
-│   └── 内嵌 Python 3.11+ (via python-build-standalone)
-├── Windows: .exe (NSIS 安装包)
-│   └── 内嵌 Python 3.11+ (via python-build-standalone)
-└── 共同:
-    ├── 前端: React 构建产物
-    ├── 后端: PyInstaller 打包的 FastAPI 可执行文件
-    └── 数据: 首次运行时初始化 ~/.meeting-assistant/
-```
+#### 部署方式
+
+纯 Web 应用，前端通过 Vite 构建，后端通过 `uvicorn` 启动 FastAPI 服务。
 
 ---
 
