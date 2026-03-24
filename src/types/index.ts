@@ -5,6 +5,7 @@
 
 // ===== 三模式架构 =====
 export type AppMode = 'copilot' | 'builder' | 'agent';
+export type PromptScope = AppMode | 'global';
 
 export const MODE_CONFIG: Record<AppMode, { label: string; icon: string; color: string }> = {
   copilot: { label: 'Copilot', icon: '💬', color: 'blue' },
@@ -131,6 +132,60 @@ export interface LLMConnectionTestResult {
   fallback: boolean;
 }
 
+export interface PromptTemplate {
+  id: string;
+  name: string;
+  description: string;
+  scope: PromptScope;
+  content: string;
+  variables: Record<string, string>;
+  placeholders: string[];
+  is_builtin?: boolean;
+  source?: 'user' | 'builtin';
+  pack_id?: string | null;
+  pack_name?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface PromptPack {
+  id: string;
+  name: string;
+  icon: string;
+  description: string;
+  recommended_modes: AppMode[];
+  tags: string[];
+  templates: PromptTemplate[];
+  template_count: number;
+  template_count_by_mode: Record<AppMode, number>;
+}
+
+export interface SystemPromptMap {
+  copilot: string;
+  builder: string;
+  agent: string;
+}
+
+export interface SystemPromptPreset {
+  id: string;
+  name: string;
+  mode: AppMode;
+  prompt: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PromptModeConfig {
+  mode: AppMode;
+  template_ids: string[];
+  variables: Record<string, string>;
+  extra_prompt: string;
+  dynamic_variables: Record<string, string>;
+  templates: Array<PromptTemplate & { rendered_content: string; missing_variables: string[] }>;
+  missing_variables: string[];
+  resolved_prompt: string;
+}
+
 // ===== PPT 解析结果 =====
 export interface PPTParseResult {
   metadata: {
@@ -204,6 +259,25 @@ export interface KnowhowRule {
   is_active: number;
   created_at: string;
   updated_at: string;
+}
+
+export type KnowhowImportStrategy = 'append' | 'replace';
+
+export interface KnowhowExportData {
+  kind: string;
+  schema_version: number;
+  exported_at: string;
+  total_rules: number;
+  rules: KnowhowRule[];
+}
+
+export interface KnowhowImportResult {
+  strategy: KnowhowImportStrategy;
+  total_in_file: number;
+  imported_count: number;
+  skipped_count: number;
+  deleted_count: number;
+  total_after_import: number;
 }
 
 // ===== Phase 2: 知识库类型 =====

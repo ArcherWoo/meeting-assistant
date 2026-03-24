@@ -6,7 +6,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo, type ChangeEvent } from 'react';
 import { useAppStore } from '@/stores/appStore';
 import { useChatStore, DEFAULT_CONVERSATION_TITLE } from '@/stores/chatStore';
-import { streamChat, extractFileText, generateAutoTitle } from '@/services/api';
+import { streamChat, extractFilesText, generateAutoTitle } from '@/services/api';
 import { MODE_CONFIG, type Message, type SkillSuggestionEvent } from '@/types';
 import MessageBubble from './MessageBubble';
 import ChatInput from './ChatInput';
@@ -53,6 +53,17 @@ export default function ChatArea() {
   const visibleMessages = visibleConversationId ? (messagesByConversation[visibleConversationId] ?? []) : [];
   const visibleIsStreaming = visibleConversationId ? (streamingByConversation[visibleConversationId] ?? false) : false;
   const visibleStreamingContent = visibleConversationId ? (streamingContentByConversation[visibleConversationId] ?? '') : '';
+  const streamingAssistantMessageId = useMemo(() => {
+    if (!visibleIsStreaming) return null;
+
+    for (let index = visibleMessages.length - 1; index >= 0; index -= 1) {
+      if (visibleMessages[index].role === 'assistant') {
+        return visibleMessages[index].id;
+      }
+    }
+
+    return null;
+  }, [visibleIsStreaming, visibleMessages]);
 
   useEffect(() => {
     if (visibleConversationId && visibleConversationId !== activeConversationId) {
@@ -214,14 +225,29 @@ export default function ChatArea() {
 
   /** 欢迎屏文件上传：提取文本后直接发送 */
   const handleWelcomeFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
     e.target.value = '';
     setWelcomeUploading(true);
     try {
-      const result = await extractFileText(file);
-      const attachmentContext = `\n\n---\n📎 附件「${result.filename}」内容（${result.char_count} 字符）：\n\n${result.text}`;
-      await handleSend('请分析这份文件的内容', attachmentContext);
+      const extracted = await extractFilesText(files);
+      const successfulResults = extracted.files;
+      const failedMessages = extracted.errors.map((item) => `${item.filename}: ${item.error}`);
+
+      if (failedMessages.length > 0) {
+        alert(`以下文件文本提取失败：\n${failedMessages.join('\n')}`);
+      }
+      if (successfulResults.length === 0) {
+        return;
+      }
+
+      const attachmentContext = successfulResults.map((result, index) => (
+        `\n\n---\n📎 附件${successfulResults.length > 1 ? ` #${index + 1}` : ''}「${result.filename}」内容（${result.char_count} 字符）：\n\n${result.text}`
+      )).join('');
+      await handleSend(
+        successfulResults.length > 1 ? '请综合分析这些文件的内容' : '请分析这份文件的内容',
+        attachmentContext,
+      );
     } catch (err: any) {
       alert(`文件文本提取失败：${err.message || '未知错误'}`);
     } finally {
@@ -283,6 +309,7 @@ export default function ChatArea() {
             <input
               ref={welcomeFileRef}
               type="file"
+              multiple
               accept=".ppt,.pptx,.pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.xls,.xlsx,.png,.jpg,.jpeg,.gif,.bmp,.webp,image/*"
               className="hidden"
               onChange={handleWelcomeFileChange}
@@ -300,6 +327,7 @@ export default function ChatArea() {
               <MessageBubble
                 key={msg.id}
                 message={msg}
+                isStreaming={msg.id === streamingAssistantMessageId}
                 onApplySkillSuggestion={handleApplySkillSuggestion}
                 onDismissSkillSuggestion={handleDismissSkillSuggestion}
               />

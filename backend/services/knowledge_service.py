@@ -5,6 +5,7 @@
 支持: PPT/PPTX, PDF, DOC/DOCX, 图片, 纯文本
 """
 import json
+import io
 import logging
 import os
 import uuid
@@ -87,6 +88,69 @@ class KnowledgeService:
     @staticmethod
     def _escape_lancedb_literal(value: str) -> str:
         return value.replace("'", "''")
+
+    @staticmethod
+    def _extract_pdf_text_with_pymupdf(file_content: bytes) -> str:
+        import fitz  # PyMuPDF
+
+        doc = fitz.open(stream=file_content, filetype="pdf")
+        try:
+            parts = []
+            for page in doc:
+                text = page.get_text().strip()
+                if text:
+                    parts.append(text)
+            return "\n\n".join(parts)
+        finally:
+            doc.close()
+
+    @staticmethod
+    def _extract_pdf_text_with_pypdf(file_content: bytes) -> str:
+        try:
+            from pypdf import PdfReader
+        except ModuleNotFoundError:
+            from PyPDF2 import PdfReader
+
+        reader = PdfReader(io.BytesIO(file_content))
+        parts = []
+        for page in reader.pages:
+            text = (page.extract_text() or "").strip()
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts)
+
+    def _extract_pdf_text_sync(self, file_content: bytes, filename: str) -> str:
+        parsers = (
+            ("PyMuPDF", self._extract_pdf_text_with_pymupdf),
+            ("pypdf", self._extract_pdf_text_with_pypdf),
+        )
+        installed_parser_names: list[str] = []
+        parser_errors: list[str] = []
+
+        for parser_name, parser in parsers:
+            try:
+                text = parser(file_content).strip()
+                installed_parser_names.append(parser_name)
+                if text:
+                    return text
+                logger.warning(f"{parser_name} 未能从 PDF 提取到文本: {filename}")
+            except ModuleNotFoundError:
+                continue
+            except ImportError:
+                continue
+            except Exception as e:
+                installed_parser_names.append(parser_name)
+                logger.warning(f"{parser_name} 解析 PDF 失败 {filename}: {e}")
+                parser_errors.append(f"{parser_name}: {e}")
+
+        if installed_parser_names:
+            if parser_errors:
+                details = "; ".join(parser_errors)
+                return f"[PDF 文件: {filename}，解析失败: {details}]"
+            return f"[PDF 文件: {filename}，未提取到可读文本，可能是扫描件或图片型 PDF]"
+
+        logger.warning(f"PDF 解析依赖缺失: {filename}")
+        return f"[PDF 文件: {filename}，缺少 PDF 解析依赖，请安装 pypdf 或 PyMuPDF]"
 
     async def _delete_vectors_for_file(self, filename: str) -> bool:
         if not self._lance_db or "doc_chunks" not in (self._lance_db.table_names() or []):
@@ -573,21 +637,7 @@ class KnowledgeService:
         """导入 PDF 文件（同步解析放入线程池）"""
         import asyncio
 
-        def _parse() -> str:
-            try:
-                import fitz  # PyMuPDF
-                doc = fitz.open(stream=file_content, filetype="pdf")
-                result = "\n\n".join(page.get_text() for page in doc)
-                doc.close()
-                return result
-            except ImportError:
-                logger.warning("PyMuPDF (fitz) 未安装，PDF 文本提取不可用。仅记录文件。")
-                return f"[PDF 文件: {filename}，需安装 PyMuPDF 以提取文本]"
-            except Exception as e:
-                logger.warning(f"PDF 解析失败: {e}")
-                return f"[PDF 文件: {filename}，解析失败: {e}]"
-
-        text = await asyncio.to_thread(_parse)
+        text = await asyncio.to_thread(self._extract_pdf_text_sync, file_content, filename)
         return await self._ingest_generic(file_content, filename, text, "pdf", embedding_fn)
 
     async def _ingest_docx(self, file_content: bytes, filename: str, embedding_fn: Optional[Any] = None) -> dict:
@@ -671,16 +721,7 @@ class KnowledgeService:
             ppt_data = await parser.parse(file_content, filename)
             text = ppt_data.get("full_markdown", "")
         elif ext in (".pdf",):
-            def _parse_pdf() -> str:
-                try:
-                    import fitz
-                    doc = fitz.open(stream=file_content, filetype="pdf")
-                    result = "\n\n".join(page.get_text() for page in doc)
-                    doc.close()
-                    return result
-                except Exception as e:
-                    return f"[PDF 解析失败: {e}]"
-            text = await asyncio.to_thread(_parse_pdf)
+            text = await asyncio.to_thread(self._extract_pdf_text_sync, file_content, filename)
         elif ext in (".doc", ".docx"):
             def _parse_docx() -> str:
                 try:

@@ -8,10 +8,11 @@ import { v4 as uuidv4 } from 'uuid';
 import clsx from 'clsx';
 import { useAppStore } from '@/stores/appStore';
 import {
-  testLLMConnection, getSystemPrompt, updateSystemPrompt, resetSystemPrompt,
+  testLLMConnection,
   getEmbeddingConfig, updateEmbeddingConfig, testEmbeddingConnection,
 } from '@/services/api';
 import type { LLMConnectionTestResult, LLMProfile } from '@/types';
+import PromptManager from './PromptManager';
 
 type SettingsTab = 'models' | 'prompts' | 'appearance';
 
@@ -22,15 +23,6 @@ const ACCENT_COLORS = [
   { label: '翠绿', value: '#059669' },
   { label: '玫红', value: '#DB2777' },
 ] as const;
-
-/** 三种对话模式的 System Prompt 状态 */
-interface PromptState {
-  value: string;
-  isCustom: boolean;
-  saving: boolean;
-  saved: boolean;
-  error: string;
-}
 
 function createDraftProfile(index: number): LLMProfile {
   return {
@@ -44,39 +36,6 @@ function createDraftProfile(index: number): LLMProfile {
     stream: true,
   };
 }
-
-// 模式列表与前端 AppMode 保持一致：copilot / builder / agent
-// placeholder 为各模式内置默认 System Prompt（后端无自定义时使用的值）
-const PROMPT_MODES = [
-  {
-    key: 'copilot',
-    label: 'Copilot 模式',
-    icon: '💬',
-    placeholder:
-      '你是一个专业的会议助手。请根据用户的问题，提供清晰、准确、有帮助的回答。' +
-      '回答时请保持简洁，优先给出结论，再补充细节。',
-  },
-  {
-    key: 'builder',
-    label: 'Skill Builder 模式',
-    icon: '🔧',
-    placeholder:
-      '你是一个 Skill Builder 助手，专门帮助用户创建和优化工作流技能（Skill）。' +
-      '请引导用户描述他们的工作场景和重复性任务，帮助他们将这些任务抽象为可执行的 Skill 模板。' +
-      '生成的 Skill 应使用标准 Markdown 格式，包含描述、触发条件、执行步骤和输出格式。',
-  },
-  {
-    key: 'agent',
-    label: 'Agent 模式',
-    icon: '🤖',
-    placeholder:
-      '你是一个智能 Agent，能够调用各种工具和技能完成复杂任务。' +
-      '请分析用户的需求，选择合适的工具，并逐步执行任务。' +
-      '执行过程中保持透明，让用户了解每一步的进展。',
-  },
-] as const;
-
-const defaultPromptState = (): PromptState => ({ value: '', isCustom: false, saving: false, saved: false, error: '' });
 
 export default function SettingsModal() {
   const {
@@ -109,13 +68,6 @@ export default function SettingsModal() {
     [connectionResult?.available_models, draft.availableModels]
   );
 
-  // System Prompt 状态（键与前端 AppMode 保持一致：copilot / builder / agent）
-  const [prompts, setPrompts] = useState<Record<string, PromptState>>({
-    copilot: defaultPromptState(),
-    builder: defaultPromptState(),
-    agent: defaultPromptState(),
-  });
-
   // Embedding 配置状态
   const [embCfg, setEmbCfg] = useState({ api_url: '', api_key: '', model: 'text-embedding-3-small' });
   const [embSaving, setEmbSaving] = useState(false);
@@ -132,23 +84,6 @@ export default function SettingsModal() {
       setConnectionError('');
     }
   };
-
-  /** 加载所有 System Prompt */
-  const loadPrompts = useCallback(async () => {
-    const results = await Promise.allSettled(
-      PROMPT_MODES.map((m) => getSystemPrompt(m.key))
-    );
-    const next: Record<string, PromptState> = {};
-    PROMPT_MODES.forEach((m, i) => {
-      const r = results[i];
-      if (r.status === 'fulfilled') {
-        next[m.key] = { value: r.value.prompt, isCustom: r.value.is_custom, saving: false, saved: false, error: '' };
-      } else {
-        next[m.key] = defaultPromptState();
-      }
-    });
-    setPrompts(next);
-  }, []);
 
   useEffect(() => {
     if (!settingsOpen || !activeProfile) return;
@@ -172,10 +107,9 @@ export default function SettingsModal() {
 
   useEffect(() => {
     if (settingsOpen) {
-      loadPrompts();
       loadEmbeddingConfig();
     }
-  }, [settingsOpen, loadPrompts, loadEmbeddingConfig]);
+  }, [settingsOpen, loadEmbeddingConfig]);
 
   if (!settingsOpen) return null;
 
@@ -265,31 +199,6 @@ export default function SettingsModal() {
       setConnectionError((error as Error).message || '连接测试失败');
     } finally {
       setTestingConnection(false);
-    }
-  };
-
-  /** 保存指定模式的 System Prompt */
-  const handleSavePrompt = async (mode: string) => {
-    setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saving: true, error: '', saved: false } }));
-    try {
-      const result = await updateSystemPrompt(mode, prompts[mode].value);
-      setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saving: false, saved: true, isCustom: true, value: result.prompt } }));
-      setTimeout(() => setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saved: false } })), 2000);
-    } catch (err: any) {
-      setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saving: false, error: err.message || '保存失败' } }));
-    }
-  };
-
-  /** 重置指定模式的 System Prompt 为默认值 */
-  const handleResetPrompt = async (mode: string) => {
-    if (!confirm('确定要重置为默认 System Prompt 吗？')) return;
-    setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saving: true, error: '', saved: false } }));
-    try {
-      const result = await resetSystemPrompt(mode);
-      setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saving: false, saved: true, isCustom: false, value: result.prompt } }));
-      setTimeout(() => setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saved: false } })), 2000);
-    } catch (err: any) {
-      setPrompts((p) => ({ ...p, [mode]: { ...p[mode], saving: false, error: err.message || '重置失败' } }));
     }
   };
 
@@ -418,51 +327,7 @@ export default function SettingsModal() {
         {/* System Prompts Tab */}
         {activeTab === 'prompts' && (
           <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5 bg-[#F7F8FA] dark:bg-dark">
-            <p className="text-xs text-text-secondary">
-              为每种对话模式配置专属的 System Prompt。留空则使用内置默认提示词。
-            </p>
-            {PROMPT_MODES.map(({ key, label, icon, placeholder }) => {
-              const ps = prompts[key];
-              return (
-                <div key={key} className="win-panel space-y-3 p-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span>{icon}</span>
-                      <span className="text-sm font-medium">{label}</span>
-                      {ps.isCustom && (
-                        <span className="win-badge border-primary/20 bg-primary/10 text-[10px] text-primary">已自定义</span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {ps.isCustom && (
-                        <button
-                          onClick={() => handleResetPrompt(key)}
-                          disabled={ps.saving}
-                          className="win-button-subtle h-8 px-2 text-xs disabled:opacity-50"
-                        >
-                          重置默认
-                        </button>
-                      )}
-                      <button
-                        onClick={() => handleSavePrompt(key)}
-                        disabled={ps.saving}
-                        className="win-button-primary h-8 min-w-[72px] px-3 text-xs"
-                      >
-                        {ps.saving ? '保存中...' : ps.saved ? '✅ 已保存' : '保存'}
-                      </button>
-                    </div>
-                  </div>
-                  <textarea
-                    value={ps.value}
-                    onChange={(e) => setPrompts((p) => ({ ...p, [key]: { ...p[key], value: e.target.value } }))}
-                    rows={5}
-                    placeholder={placeholder}
-                    className="win-input resize-y text-sm leading-6"
-                  />
-                  {ps.error && <p className="text-xs text-red-500">{ps.error}</p>}
-                </div>
-              );
-            })}
+            <PromptManager />
           </div>
         )}
 
@@ -835,4 +700,3 @@ const tabBtnActiveCls =
 
 const tabBtnIdleCls =
   'text-text-secondary hover:bg-white hover:text-text-primary dark:hover:bg-dark-card dark:hover:text-text-dark-primary';
-

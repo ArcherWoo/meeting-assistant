@@ -10,6 +10,7 @@
 """
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -330,9 +331,164 @@ class ContextAssembler:
     """
     上下文组装器 - 根据用户查询并行检索：
       1. 知识库混合检索（SQLite 结构化 + LanceDB 语义）
-      2. Know-how 规则全量注入（按权重降序，全部活跃规则）
+      2. Know-how 规则相关性过滤/排序
       3. Skill 关键词意图匹配（top-1 high/medium 置信度）
     """
+
+    QUERY_STOPWORDS = {
+        "请问",
+        "帮我",
+        "帮忙",
+        "看看",
+        "看下",
+        "分析",
+        "说明",
+        "介绍",
+        "告诉我",
+        "关于",
+        "这个",
+        "这份",
+        "一下",
+        "一下子",
+        "一下吧",
+        "是否",
+        "怎么",
+        "如何",
+        "哪些",
+        "什么",
+        "需要",
+        "一下子",
+        "里面",
+        "内容",
+        "材料",
+        "文件",
+        "文档",
+        "问题",
+        "情况",
+        "重点",
+        "合理",
+        "有无",
+        "有没有",
+        "吗",
+        "呢",
+        "吧",
+        "呀",
+        "啊",
+        "的",
+        "了",
+        "和",
+    }
+
+    TERM_ALIASES = {
+        "报价": "价格",
+        "价钱": "价格",
+        "均价": "价格",
+        "厂商": "供应商",
+        "交期": "交付",
+        "交货": "交付",
+        "资信": "资质",
+        "证书": "认证",
+        "参数": "技术参数",
+        "规格": "技术参数",
+        "质保": "售后",
+        "保修": "售后",
+        "回款": "付款",
+        "付款方式": "付款",
+        "审批流": "审批",
+        "流程": "审批",
+        "单一来源": "single source",
+    }
+
+    def _extract_query_terms(self, query: str) -> list[str]:
+        """提取 query 中可用于匹配 Know-how 的关键词。"""
+        normalized = " ".join((query or "").lower().split())
+        if not normalized:
+            return []
+
+        candidates: list[str] = []
+        candidates.extend(
+            term.strip()
+            for term in re.split(r"[\s,.;:!?，。；：！？、/\\()（）【】\[\]\"'`]+", normalized)
+            if len(term.strip()) >= 2
+        )
+        candidates.extend(re.findall(r"[a-z0-9][a-z0-9_.-]{1,}", normalized))
+
+        for segment in re.findall(r"[\u4e00-\u9fff]{2,}", normalized):
+            cleaned = segment
+            for stopword in sorted(self.QUERY_STOPWORDS, key=len, reverse=True):
+                cleaned = cleaned.replace(stopword, " ")
+            part_candidates = [part.strip() for part in cleaned.split() if len(part.strip()) >= 2]
+            candidates.extend(part_candidates)
+            for part in part_candidates:
+                if len(part) <= 4:
+                    candidates.append(part)
+                    continue
+                for size in range(2, min(len(part), 4) + 1):
+                    for index in range(0, len(part) - size + 1):
+                        candidates.append(part[index:index + size])
+
+        expanded: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            term = candidate.strip()
+            if len(term) < 2 or term in seen:
+                continue
+            seen.add(term)
+            expanded.append(term)
+
+            canonical = self.TERM_ALIASES.get(term)
+            if canonical and canonical not in seen:
+                seen.add(canonical)
+                expanded.append(canonical)
+
+        return expanded[:24]
+
+    def _normalize_rule_text(self, text: str) -> str:
+        normalized = " ".join((text or "").lower().split())
+        for raw, canonical in self.TERM_ALIASES.items():
+            normalized = normalized.replace(raw, canonical)
+        return normalized
+
+    def _score_knowhow_rule(self, query_terms: list[str], query_text: str, rule: dict) -> float:
+        """对单条 Know-how 规则打分，过滤明显无关的规则。"""
+        rule_text = str(rule.get("rule_text") or "")
+        if not rule_text:
+            return 0.0
+
+        rule_text_normalized = self._normalize_rule_text(rule_text)
+        category_text = self._normalize_rule_text(str(rule.get("category") or ""))
+        rule_keywords = {
+            keyword.lower()
+            for keyword in knowhow_service._extract_keywords(rule_text)
+            if len(keyword) >= 2
+        }
+
+        score = 0.0
+        matched_terms: set[str] = set()
+        for term in query_terms:
+            canonical_term = self.TERM_ALIASES.get(term, term)
+            if len(canonical_term) < 2 or canonical_term in matched_terms:
+                continue
+
+            if canonical_term in rule_keywords:
+                score += 3.2
+                matched_terms.add(canonical_term)
+                continue
+
+            if canonical_term in rule_text_normalized:
+                score += 2.4
+                matched_terms.add(canonical_term)
+                continue
+
+            if canonical_term in category_text:
+                score += 1.6
+                matched_terms.add(canonical_term)
+
+        # 完整 query 命中说明规则高度贴合当前问题。
+        if len(query_text) >= 4 and query_text in rule_text_normalized:
+            score += 3.0
+
+        return score
 
     async def assemble(
         self,
@@ -419,12 +575,42 @@ class ContextAssembler:
             return []
 
     async def _get_knowhow_rules(self, query: str) -> List[dict]:
-        """获取全部活跃 Know-how 规则（按权重降序，✅ Issue 3: 不限数量）"""
+        """按 query 相关性筛选并排序活跃 Know-how 规则。"""
         try:
             rules = await knowhow_service.list_rules(active_only=True)
-            logger.debug(f"[ContextAssembler] Know-how 规则获取完成: 共 {len(rules)} 条活跃规则")
-            # ✅ Issue 3: 移除 [:8] 限制，注入全部活跃规则
-            return rules
+            query_terms = self._extract_query_terms(query)
+            query_text = self._normalize_rule_text(query)
+            if not rules or not query_terms:
+                logger.debug("[ContextAssembler] Query 缺少有效关键词，跳过 Know-how 注入")
+                return []
+
+            scored_rules: list[tuple[float, dict]] = []
+            for rule in rules:
+                score = self._score_knowhow_rule(query_terms, query_text, rule)
+                # 只保留有明确内容相关性的规则，避免“采购”这类泛词导致整包规则回流。
+                if score < 2.0:
+                    continue
+                weighted_score = (
+                    score
+                    + float(rule.get("weight", 0)) * 0.15
+                    + float(rule.get("hit_count", 0)) * 0.01
+                )
+                scored_rules.append((weighted_score, rule))
+
+            scored_rules.sort(
+                key=lambda item: (
+                    item[0],
+                    int(item[1].get("weight", 0)),
+                    int(item[1].get("hit_count", 0)),
+                ),
+                reverse=True,
+            )
+            relevant_rules = [rule for _, rule in scored_rules]
+            logger.debug(
+                f"[ContextAssembler] Know-how 规则获取完成: 活跃={len(rules)} 条, "
+                f"相关={len(relevant_rules)} 条"
+            )
+            return relevant_rules
         except Exception as e:
             logger.warning(f"[ContextAssembler] Know-how 规则获取失败: {e}", exc_info=True)
             return []

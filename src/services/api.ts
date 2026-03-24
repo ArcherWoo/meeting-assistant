@@ -6,9 +6,10 @@
 import type {
   LLMConfig, LLMConnectionTestResult, PPTParseResult,
   SkillMeta, SkillMatch,
-  KnowhowRule, KnowledgeStats, IngestResult,
+  KnowhowRule, KnowhowExportData, KnowhowImportResult, KnowhowImportStrategy, KnowledgeStats, IngestResult,
   AgentMatchResult, AgentExecutionEvent,
   ContextMetadata, SkillSuggestionEvent,
+  AppMode, PromptModeConfig, PromptPack, PromptTemplate, PromptScope, SystemPromptMap, SystemPromptPreset,
 } from '@/types';
 
 /** 获取后端 API 基础 URL */
@@ -172,11 +173,11 @@ export async function streamChat(
     }
 
     if (!finished) {
-      onDone();
+      onError('响应流在收到 [DONE] 前意外结束');
     }
   } catch (error: any) {
     if (error.name === 'AbortError') {
-      onDone();
+      return;
     } else {
       onError(error.message || '网络错误');
     }
@@ -288,7 +289,7 @@ export async function deleteSkill(skillId: string): Promise<{ id: string; messag
 /** 获取指定模式的 System Prompt */
 export async function getSystemPrompt(
   mode: string
-): Promise<{ mode: string; prompt: string; is_custom: boolean }> {
+): Promise<{ mode: string; prompt: string; is_custom: boolean; resolved_prompt?: string; template_ids?: string[]; missing_variables?: string[] }> {
   const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(mode)}`);
   if (!res.ok) throw new Error('获取 System Prompt 失败');
   return res.json();
@@ -298,7 +299,7 @@ export async function getSystemPrompt(
 export async function updateSystemPrompt(
   mode: string,
   prompt: string
-): Promise<{ mode: string; prompt: string; message: string }> {
+): Promise<{ mode: string; prompt: string; resolved_prompt?: string; message: string }> {
   const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(mode)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -314,7 +315,7 @@ export async function updateSystemPrompt(
 /** 重置指定模式的 System Prompt 为默认值 */
 export async function resetSystemPrompt(
   mode: string
-): Promise<{ mode: string; prompt: string; message: string }> {
+): Promise<{ mode: string; prompt: string; resolved_prompt?: string; message: string }> {
   const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(mode)}`, {
     method: 'DELETE',
   });
@@ -325,7 +326,186 @@ export async function resetSystemPrompt(
   return res.json();
 }
 
+export async function getSystemPrompts(): Promise<{
+  prompts: SystemPromptMap;
+  defaults: SystemPromptMap;
+  custom_modes: AppMode[];
+}> {
+  const res = await fetch(`${getBaseUrl()}/settings/system-prompts`);
+  if (!res.ok) throw new Error('获取 System Prompts 失败');
+  return res.json();
+}
+
+export async function updateSystemPrompts(
+  prompts: SystemPromptMap
+): Promise<{ prompts: SystemPromptMap; defaults: SystemPromptMap; custom_modes: AppMode[]; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/system-prompts`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompts }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '保存 System Prompts 失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+export async function listSystemPromptPresets(): Promise<SystemPromptPreset[]> {
+  const res = await fetch(`${getBaseUrl()}/settings/system-prompt-presets`);
+  if (!res.ok) throw new Error('获取 System Prompt 预设失败');
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.presets ?? []);
+}
+
+export async function createSystemPromptPreset(
+  name: string,
+  mode: AppMode,
+  prompt: string
+): Promise<{ preset: SystemPromptPreset; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/system-prompt-presets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, mode, prompt }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '保存预设失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+export async function deleteSystemPromptPreset(presetId: string): Promise<{ id: string; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/system-prompt-presets/${encodeURIComponent(presetId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '删除预设失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+export async function listPromptTemplates(scope?: PromptScope): Promise<PromptTemplate[]> {
+  const query = scope ? `?scope=${encodeURIComponent(scope)}` : '';
+  const res = await fetch(`${getBaseUrl()}/settings/prompt-templates${query}`);
+  if (!res.ok) throw new Error('获取提示词模板失败');
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.templates ?? []);
+}
+
+export async function listPromptPacks(): Promise<PromptPack[]> {
+  const res = await fetch(`${getBaseUrl()}/settings/prompt-packs`);
+  if (!res.ok) throw new Error('获取官方模板包失败');
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.packs ?? []);
+}
+
+export async function createPromptTemplate(
+  payload: Pick<PromptTemplate, 'name' | 'description' | 'scope' | 'content' | 'variables'>
+): Promise<{ template: PromptTemplate; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/prompt-templates`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '创建提示词模板失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+export async function updatePromptTemplate(
+  templateId: string,
+  payload: Partial<Pick<PromptTemplate, 'name' | 'description' | 'scope' | 'content' | 'variables'>>
+): Promise<{ template: PromptTemplate; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/prompt-templates/${encodeURIComponent(templateId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '更新提示词模板失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+export async function deletePromptTemplate(templateId: string): Promise<{ id: string; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/prompt-templates/${encodeURIComponent(templateId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '删除提示词模板失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+export async function getPromptConfig(mode: string): Promise<PromptModeConfig> {
+  const res = await fetch(`${getBaseUrl()}/settings/prompt-config/${encodeURIComponent(mode)}`);
+  if (!res.ok) throw new Error('获取提示词挂载配置失败');
+  return res.json();
+}
+
+export async function updatePromptConfig(
+  mode: string,
+  payload: Pick<PromptModeConfig, 'template_ids' | 'variables' | 'extra_prompt'>
+): Promise<PromptModeConfig & { message: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/prompt-config/${encodeURIComponent(mode)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '保存提示词挂载配置失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
+export async function resetPromptConfig(
+  mode: string
+): Promise<PromptModeConfig & { message: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/prompt-config/${encodeURIComponent(mode)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '重置提示词挂载配置失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
 /** 匹配用户输入到最佳 Skill，返回命中列表（后端返回 {matches: [...], total: N}） */
+export async function applyPromptPack(
+  packId: string,
+  payload: { modes: AppMode[]; strategy?: 'append' | 'replace' }
+): Promise<{
+  pack: PromptPack;
+  strategy: 'append' | 'replace';
+  results: Array<{
+    mode: AppMode;
+    status: 'applied' | 'skipped';
+    applied_template_ids: string[];
+    template_ids: string[];
+    missing_variables?: string[];
+  }>;
+  message: string;
+}> {
+  const res = await fetch(`${getBaseUrl()}/settings/prompt-packs/${encodeURIComponent(packId)}/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '应用模板包失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
 export async function matchSkill(query: string): Promise<SkillMatch[]> {
   const res = await fetch(`${getBaseUrl()}/skills/match`, {
     method: 'POST',
@@ -438,12 +618,62 @@ export async function getKnowhowStats(): Promise<{
   return res.json();
 }
 
+/** 导出当前 Know-how 规则库 */
+export async function exportKnowhowRules(): Promise<KnowhowExportData> {
+  const res = await fetch(`${getBaseUrl()}/knowhow/export`);
+  if (!res.ok) throw new Error('导出规则库失败');
+  return res.json();
+}
+
+/** 导入 Know-how 规则库 */
+export async function importKnowhowRules(
+  payload: unknown,
+  strategy: KnowhowImportStrategy = 'append'
+): Promise<KnowhowImportResult> {
+  const res = await fetch(`${getBaseUrl()}/knowhow/import?strategy=${encodeURIComponent(strategy)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '导入规则库失败' }));
+    throw new Error(error.detail);
+  }
+  return res.json();
+}
+
 // ===== Phase 2: 知识库接口 =====
 
-/** 上传文件到知识库（支持 PPT/PDF/DOCX/图片/文本等） */
-export async function uploadFile(file: File): Promise<IngestResult> {
+export interface BatchIngestResult {
+  results: IngestResult[];
+  errors: Array<{ filename: string; error: string }>;
+  total: number;
+  success_count: number;
+  failed_count: number;
+}
+
+export interface ExtractedTextResult {
+  filename: string;
+  file_type: string;
+  text: string;
+  char_count: number;
+}
+
+export interface BatchExtractTextResult {
+  files: ExtractedTextResult[];
+  errors: Array<{ filename: string; error: string }>;
+  total: number;
+  success_count: number;
+  failed_count: number;
+}
+
+/** 批量上传文件到知识库（支持 PPT/PDF/DOCX/图片/文本等） */
+export async function uploadFiles(files: File[]): Promise<BatchIngestResult> {
+  if (files.length === 0) {
+    return { results: [], errors: [], total: 0, success_count: 0, failed_count: 0 };
+  }
   const formData = new FormData();
-  formData.append('file', file);
+  files.forEach((file) => formData.append('files', file));
   const res = await fetch(`${getBaseUrl()}/knowledge/ingest`, {
     method: 'POST',
     body: formData,
@@ -455,10 +685,22 @@ export async function uploadFile(file: File): Promise<IngestResult> {
   return res.json();
 }
 
-/** 提取文件文本内容（不写入知识库，用于附件模式） */
-export async function extractFileText(file: File): Promise<{ filename: string; file_type: string; text: string; char_count: number }> {
+/** 上传单个文件到知识库（兼容旧调用方） */
+export async function uploadFile(file: File): Promise<IngestResult> {
+  const result = await uploadFiles([file]);
+  if (result.results.length > 0) {
+    return result.results[0];
+  }
+  throw new Error(result.errors[0]?.error || '知识库导入失败');
+}
+
+/** 批量提取文件文本内容（不写入知识库，用于附件模式） */
+export async function extractFilesText(files: File[]): Promise<BatchExtractTextResult> {
+  if (files.length === 0) {
+    return { files: [], errors: [], total: 0, success_count: 0, failed_count: 0 };
+  }
   const formData = new FormData();
-  formData.append('file', file);
+  files.forEach((file) => formData.append('files', file));
   const res = await fetch(`${getBaseUrl()}/knowledge/extract-text`, {
     method: 'POST',
     body: formData,
@@ -468,6 +710,15 @@ export async function extractFileText(file: File): Promise<{ filename: string; f
     throw new Error(error.detail);
   }
   return res.json();
+}
+
+/** 提取单个文件文本内容（兼容旧调用方） */
+export async function extractFileText(file: File): Promise<ExtractedTextResult> {
+  const result = await extractFilesText([file]);
+  if (result.files.length > 0) {
+    return result.files[0];
+  }
+  throw new Error(result.errors[0]?.error || '文件文本提取失败');
 }
 
 /** 获取已导入文件列表 */

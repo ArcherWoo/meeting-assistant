@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import AsyncMock, patch
 
 
 BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -13,11 +14,44 @@ if BACKEND_ROOT not in sys.path:
 from services.hybrid_search import hybrid_search
 from services.knowledge_service import KnowledgeService
 from services.storage import storage
+from services.embedding_service import embedding_service
 
 
 class KnowledgeServiceTests(unittest.TestCase):
     def setUp(self):
         self.service = KnowledgeService()
+
+    def test_extract_pdf_text_falls_back_to_pypdf_when_pymupdf_is_missing(self):
+        with patch.object(
+            KnowledgeService,
+            "_extract_pdf_text_with_pymupdf",
+            side_effect=ModuleNotFoundError("No module named 'fitz'"),
+        ):
+            with patch.object(
+                KnowledgeService,
+                "_extract_pdf_text_with_pypdf",
+                return_value="PDF body text",
+            ) as pypdf_mock:
+                text = self.service._extract_pdf_text_sync(b"%PDF-1.4", "sample.pdf")
+
+        self.assertEqual(text, "PDF body text")
+        pypdf_mock.assert_called_once_with(b"%PDF-1.4")
+
+    def test_extract_pdf_text_reports_missing_parser_when_no_pdf_dependency_exists(self):
+        with patch.object(
+            KnowledgeService,
+            "_extract_pdf_text_with_pymupdf",
+            side_effect=ModuleNotFoundError("No module named 'fitz'"),
+        ):
+            with patch.object(
+                KnowledgeService,
+                "_extract_pdf_text_with_pypdf",
+                side_effect=ModuleNotFoundError("No module named 'pypdf'"),
+            ):
+                text = self.service._extract_pdf_text_sync(b"%PDF-1.4", "sample.pdf")
+
+        self.assertIn("缺少 PDF 解析依赖", text)
+        self.assertIn("sample.pdf", text)
 
     def test_split_into_chunks_assigns_stable_fragment_indexes(self):
         ppt_data = {
@@ -64,6 +98,38 @@ class KnowledgeServiceTests(unittest.TestCase):
                 "char_end": 268,
             },
         )
+
+
+class HybridSearchServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.original_config = (
+            embedding_service._api_url,
+            embedding_service._api_key,
+            embedding_service._model,
+            embedding_service._dimension,
+        )
+
+    async def asyncTearDown(self):
+        api_url, api_key, model, dimension = self.original_config
+        embedding_service.configure(api_url=api_url, api_key=api_key, model=model, dimension=dimension)
+
+    async def test_semantic_search_keeps_short_chinese_queries(self):
+        embedding_service.configure(api_url="https://example.com/v1", api_key="sk-test")
+        with patch.object(embedding_service, "embed_text", AsyncMock(return_value=[0.1, 0.2])) as embed_mock:
+            with patch("services.hybrid_search.knowledge_service.vector_search", AsyncMock(return_value=[{"id": "chunk-1"}])) as vector_mock:
+                result = await hybrid_search._semantic_search("电脑", limit=3)
+
+        self.assertEqual(result, [{"id": "chunk-1"}])
+        embed_mock.assert_awaited_once_with("电脑")
+        vector_mock.assert_awaited_once_with([0.1, 0.2], limit=3)
+
+    async def test_semantic_search_skips_single_character_noise(self):
+        embedding_service.configure(api_url="https://example.com/v1", api_key="sk-test")
+        with patch.object(embedding_service, "embed_text", AsyncMock(return_value=[0.1, 0.2])) as embed_mock:
+            result = await hybrid_search._semantic_search("价", limit=3)
+
+        self.assertEqual(result, [])
+        embed_mock.assert_not_awaited()
 
 
 class KnowledgeServiceIntegrationTests(unittest.IsolatedAsyncioTestCase):

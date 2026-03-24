@@ -8,7 +8,7 @@ import { useChatStore } from '@/stores/chatStore';
 import {
   listSkills, getKnowledgeStats, getKnowhowStats,
   getSkillContent, saveSkill, updateSkill, deleteSkill,
-  uploadFile, listKnowledgeImports, deleteKnowledgeImport,
+  uploadFiles, listKnowledgeImports, deleteKnowledgeImport,
 } from '@/services/api';
 import { MODE_CONFIG } from '@/types';
 import type { ContextCitation, ContextMetadata, Message, SkillMeta, KnowledgeStats, SkillSuggestionEvent } from '@/types';
@@ -187,13 +187,16 @@ export default function ContextPanel() {
 
   /** 知识库导入文件 */
   const handleKbImport = async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
     e.target.value = '';
     setImporting(true);
     try {
-      await uploadFile(file);
+      const result = await uploadFiles(files);
       await refresh();
+      if (result.errors.length > 0) {
+        alert(`以下文件导入失败：\n${result.errors.map((item) => `${item.filename}: ${item.error}`).join('\n')}`);
+      }
     } catch (err: any) {
       alert(`导入失败：${err.message || '未知错误'}`);
     } finally {
@@ -660,6 +663,7 @@ export default function ContextPanel() {
                 <input
                   ref={kbFileInputRef}
                   type="file"
+                  multiple
                   accept=".ppt,.pptx,.pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.xls,.xlsx,.png,.jpg,.jpeg,.gif,.bmp,.webp"
                   className="hidden"
                   onChange={handleKbImport}

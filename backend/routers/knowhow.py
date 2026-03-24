@@ -5,9 +5,12 @@ POST   /api/knowhow           - 添加新规则
 PUT    /api/knowhow/{rule_id} - 更新规则
 DELETE /api/knowhow/{rule_id} - 删除规则
 GET    /api/knowhow/stats     - 规则统计
+GET    /api/knowhow/export    - 导出规则库
+POST   /api/knowhow/import    - 导入规则库
 """
-from typing import Optional
-from fastapi import APIRouter, HTTPException
+from typing import Any, Literal, Optional
+from fastapi import APIRouter, Body, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from services.knowhow_service import knowhow_service
@@ -87,6 +90,31 @@ async def get_stats() -> dict:
     return await knowhow_service.get_stats()
 
 
+@router.get("/knowhow/export")
+async def export_rules() -> JSONResponse:
+    """导出 Know-how 规则库。"""
+    payload = await knowhow_service.export_rules()
+    export_date = str(payload["exported_at"]).split("T", 1)[0]
+    return JSONResponse(
+        content=payload,
+        headers={
+            "Content-Disposition": f'attachment; filename="knowhow-rules-{export_date}.json"',
+        },
+    )
+
+
+@router.post("/knowhow/import")
+async def import_rules(
+    payload: Any = Body(...),
+    strategy: Literal["append", "replace"] = "append",
+) -> dict:
+    """导入 Know-how 规则库。"""
+    try:
+        return await knowhow_service.import_rules(payload, strategy=strategy)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 # ===== 分类管理接口 =====
 
 class CategoryRenameRequest(BaseModel):
@@ -128,4 +156,3 @@ async def delete_category(name: str, delete_rules: bool = True) -> dict:
     affected = await knowhow_service.delete_category(name, delete_rules=delete_rules)
     action = "已删除" if delete_rules else "已清空分类名"
     return {"message": f"分类「{name}」{action}，影响 {affected} 条规则", "affected_rules": affected}
-

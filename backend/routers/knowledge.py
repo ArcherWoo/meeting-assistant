@@ -48,50 +48,112 @@ def _get_file_ext(filename: str) -> str:
     return os.path.splitext(filename)[1].lower()
 
 
+def _collect_uploaded_files(
+    file: UploadFile | None,
+    files: list[UploadFile] | None,
+) -> tuple[list[UploadFile], bool]:
+    """兼容旧单文件字段 `file` 与新批量字段 `files`。"""
+    collected: list[UploadFile] = []
+    if file is not None:
+        collected.append(file)
+    if files:
+        collected.extend(files)
+    batch_mode = bool(files)
+    return collected, batch_mode
+
+
+async def _build_embedding_fn():
+    """从数据库读取 Embedding 配置并返回可选 embedding_fn。"""
+    emb_url = await storage.get_setting("embedding_api_url", "")
+    emb_key = await storage.get_setting("embedding_api_key", "")
+    emb_model = await storage.get_setting("embedding_model", "text-embedding-3-small")
+
+    if not (emb_url and emb_key):
+        return None
+
+    embedding_service.configure(api_url=emb_url, api_key=emb_key, model=emb_model)
+
+    async def embedding_fn(texts: list) -> list:
+        return await embedding_service.embed_batch(texts)
+
+    return embedding_fn
+
+
+async def _validate_and_read_upload(file: UploadFile) -> tuple[str, bytes]:
+    """校验单个上传文件并读取内容。"""
+    if not file.filename:
+        raise ValueError("文件名不能为空")
+
+    ext = _get_file_ext(file.filename)
+    if ext not in ALLOWED_EXTENSIONS:
+        allowed = ", ".join(sorted(ALLOWED_EXTENSIONS))
+        raise ValueError(
+            f"不支持的文件格式 '{ext}'。支持的格式: {allowed}",
+        )
+
+    content = await file.read()
+    if not content:
+        raise ValueError("文件内容为空")
+
+    return file.filename, content
+
+
 @router.post("/knowledge/ingest")
-async def ingest_file(file: UploadFile = File(...)) -> dict:
+async def ingest_file(
+    file: UploadFile | None = File(None),
+    files: list[UploadFile] | None = File(None),
+) -> dict:
     """
     将文件导入知识库
     支持: PPT/PPTX, PDF, DOC/DOCX, 图片(PNG/JPG/...), 纯文本(TXT/MD/CSV/JSON)
     Pipeline: 解析 → LLM 结构化提取 → SQLite → 分块 → Embedding → LanceDB
     """
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="文件名不能为空")
-
-    ext = _get_file_ext(file.filename)
-    if ext not in ALLOWED_EXTENSIONS:
-        allowed = ", ".join(sorted(ALLOWED_EXTENSIONS))
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的文件格式 '{ext}'。支持的格式: {allowed}",
-        )
-
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="文件内容为空")
-
-    # 从数据库读取 Embedding 配置
-    emb_url = await storage.get_setting("embedding_api_url", "")
-    emb_key = await storage.get_setting("embedding_api_key", "")
-    emb_model = await storage.get_setting("embedding_model", "text-embedding-3-small")
+    uploads, batch_mode = _collect_uploaded_files(file, files)
+    if not uploads:
+        raise HTTPException(status_code=400, detail="至少上传一个文件")
 
     embedding_fn = None
-    if emb_url and emb_key:
-        embedding_service.configure(api_url=emb_url, api_key=emb_key, model=emb_model)
-        async def embedding_fn(texts: list) -> list:
-            return await embedding_service.embed_batch(texts)
+    embedding_fn_ready = False
+    results: list[dict] = []
+    errors: list[dict] = []
 
     try:
-        result = await knowledge_service.ingest_file(
-            file_content=content,
-            filename=file.filename,
-            llm_fn=None,
-            embedding_fn=embedding_fn,
-        )
-        return result
+        for upload in uploads:
+            filename = upload.filename or "未命名文件"
+            try:
+                validated_filename, content = await _validate_and_read_upload(upload)
+                if not embedding_fn_ready:
+                    embedding_fn = await _build_embedding_fn()
+                    embedding_fn_ready = True
+                result = await knowledge_service.ingest_file(
+                    file_content=content,
+                    filename=validated_filename,
+                    llm_fn=None,
+                    embedding_fn=embedding_fn,
+                )
+                results.append(result)
+            except ValueError as e:
+                errors.append({"filename": filename, "error": str(e)})
+            except Exception as e:
+                logger.error(f"文件导入失败: {filename} - {e}")
+                errors.append({"filename": filename, "error": f"导入失败: {str(e)}"})
     except Exception as e:
         logger.error(f"文件导入失败: {e}")
         raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
+
+    if not batch_mode:
+        if errors and not results:
+            raise HTTPException(status_code=400, detail=errors[0]["error"])
+        if results:
+            return results[0]
+
+    return {
+        "results": results,
+        "errors": errors,
+        "total": len(uploads),
+        "success_count": len(results),
+        "failed_count": len(errors),
+    }
 
 
 @router.post("/knowledge/query")
@@ -123,35 +185,53 @@ async def get_stats() -> dict:
 
 
 @router.post("/knowledge/extract-text")
-async def extract_text(file: UploadFile = File(...)) -> dict:
+async def extract_text(
+    file: UploadFile | None = File(None),
+    files: list[UploadFile] | None = File(None),
+) -> dict:
     """
     提取文件文本内容（不写入知识库）。
     用于 📎 附件模式：将文件内容作为上下文发送给 LLM。
     """
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="文件名不能为空")
+    uploads, batch_mode = _collect_uploaded_files(file, files)
+    if not uploads:
+        raise HTTPException(status_code=400, detail="至少上传一个文件")
 
-    ext = _get_file_ext(file.filename)
-    if ext not in ALLOWED_EXTENSIONS:
-        allowed = ", ".join(sorted(ALLOWED_EXTENSIONS))
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的文件格式 '{ext}'。支持的格式: {allowed}",
-        )
-
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="文件内容为空")
+    results: list[dict] = []
+    errors: list[dict] = []
 
     try:
-        result = await knowledge_service.extract_text(
-            file_content=content,
-            filename=file.filename,
-        )
-        return result
+        for upload in uploads:
+            filename = upload.filename or "未命名文件"
+            try:
+                validated_filename, content = await _validate_and_read_upload(upload)
+                result = await knowledge_service.extract_text(
+                    file_content=content,
+                    filename=validated_filename,
+                )
+                results.append(result)
+            except ValueError as e:
+                errors.append({"filename": filename, "error": str(e)})
+            except Exception as e:
+                logger.error(f"文件文本提取失败: {filename} - {e}")
+                errors.append({"filename": filename, "error": f"文本提取失败: {str(e)}"})
     except Exception as e:
         logger.error(f"文件文本提取失败: {e}")
         raise HTTPException(status_code=500, detail=f"文本提取失败: {str(e)}")
+
+    if not batch_mode:
+        if errors and not results:
+            raise HTTPException(status_code=400, detail=errors[0]["error"])
+        if results:
+            return results[0]
+
+    return {
+        "files": results,
+        "errors": errors,
+        "total": len(uploads),
+        "success_count": len(results),
+        "failed_count": len(errors),
+    }
 
 
 @router.get("/knowledge/imports")
@@ -178,4 +258,3 @@ async def delete_import(import_id: str) -> dict:
     except Exception as e:
         logger.error(f"删除导入记录失败: {e}")
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
-

@@ -142,6 +142,70 @@
   }
 
   /* 毛玻璃效果 */
+  .markdown-live-tail {
+    @apply mt-3 border-t border-dashed border-surface-divider/80 pt-3 dark:border-dark-divider;
+  }
+
+  .markdown-table-wrap {
+    @apply my-3 w-full overflow-x-auto rounded-xl border border-surface-divider bg-white/80 shadow-sm dark:border-dark-divider dark:bg-dark-sidebar/70;
+    overscroll-behavior-x: contain;
+  }
+
+  .markdown-table {
+    width: max-content;
+    min-width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    table-layout: auto;
+  }
+
+  .markdown-table thead {
+    @apply bg-slate-100/80 dark:bg-slate-900/60;
+  }
+
+  .markdown-table tbody tr:nth-child(even) {
+    @apply bg-slate-50/70 dark:bg-slate-950/20;
+  }
+
+  .markdown-table th,
+  .markdown-table td {
+    min-width: 140px;
+    max-width: 320px;
+    @apply border-b border-r border-surface-divider/80 px-3 py-2 align-top text-left text-[12px] leading-6 dark:border-dark-divider;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .markdown-table th:last-child,
+  .markdown-table td:last-child {
+    border-right: none;
+  }
+
+  .markdown-table tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  .markdown-mermaid {
+    @apply overflow-x-auto;
+    overscroll-behavior-x: contain;
+  }
+
+  .markdown-mermaid svg {
+    display: block;
+    max-width: max-content;
+    min-width: min(100%, 420px);
+    height: auto;
+    margin: 0 auto;
+  }
+
+  .markdown-body .katex-display {
+    @apply my-3 overflow-x-auto overflow-y-hidden;
+  }
+
+  .markdown-body .katex-display > .katex {
+    min-width: fit-content;
+  }
+
   .glass {
     @apply backdrop-blur-xl bg-white/70 dark:bg-dark-sidebar/70;
   }

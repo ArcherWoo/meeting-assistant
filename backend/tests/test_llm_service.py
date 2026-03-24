@@ -11,7 +11,7 @@ if BACKEND_ROOT not in sys.path:
     sys.path.insert(0, BACKEND_ROOT)
 
 from services.llm_service import LLMService
-from services.context_assembler import AssembledContext
+from services.context_assembler import AssembledContext, ContextAssembler
 from routers.chat import (
     ChatRequest,
     _calculate_context_budget_chars,
@@ -227,6 +227,71 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreater(large_budget, small_budget)
         self.assertGreater(large_budget, 0)
+
+    async def test_context_assembler_filters_irrelevant_knowhow_rules(self):
+        assembler = ContextAssembler()
+        rules = [
+            {
+                "id": "price-rule",
+                "category": "采购预审",
+                "rule_text": "价格与历史同品类均价对比，偏差应在合理范围内",
+                "weight": 3,
+                "hit_count": 2,
+            },
+            {
+                "id": "supplier-rule",
+                "category": "采购预审",
+                "rule_text": "供应商必须提供 ISO 9001 质量管理体系认证或相关行业资质",
+                "weight": 3,
+                "hit_count": 8,
+            },
+            {
+                "id": "weather-rule",
+                "category": "闲聊",
+                "rule_text": "今天天气晴朗适合外出活动",
+                "weight": 5,
+                "hit_count": 100,
+            },
+        ]
+
+        with patch("services.context_assembler.knowhow_service.list_rules", AsyncMock(return_value=rules)):
+            filtered = await assembler._get_knowhow_rules("这份采购材料需要重点看供应商资质和认证吗")
+
+        self.assertEqual([rule["id"] for rule in filtered], ["supplier-rule"])
+
+    async def test_context_assembler_sorts_knowhow_rules_by_relevance_then_weight(self):
+        assembler = ContextAssembler()
+        rules = [
+            {
+                "id": "price-rule",
+                "category": "采购预审",
+                "rule_text": "价格与历史同品类均价对比，偏差应在合理范围内",
+                "weight": 2,
+                "hit_count": 0,
+            },
+            {
+                "id": "price-and-supplier-rule",
+                "category": "采购预审",
+                "rule_text": "供应商报价需要同时核查价格偏差与历史合作记录",
+                "weight": 3,
+                "hit_count": 5,
+            },
+            {
+                "id": "payment-rule",
+                "category": "采购预审",
+                "rule_text": "付款方式与条件是否合理",
+                "weight": 3,
+                "hit_count": 3,
+            },
+        ]
+
+        with patch("services.context_assembler.knowhow_service.list_rules", AsyncMock(return_value=rules)):
+            filtered = await assembler._get_knowhow_rules("请帮我看这次供应商报价和价格是否合理")
+
+        self.assertEqual(
+            [rule["id"] for rule in filtered],
+            ["price-and-supplier-rule", "price-rule"],
+        )
 
 
 if __name__ == "__main__":

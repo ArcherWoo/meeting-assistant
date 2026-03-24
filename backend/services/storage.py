@@ -4,7 +4,7 @@ SQLite 存储服务 - 统一数据库连接与 Schema 管理
 """
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Union
 
@@ -132,6 +132,19 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Prompt templates
+CREATE TABLE IF NOT EXISTS prompt_templates (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    description    TEXT DEFAULT '',
+    scope          TEXT NOT NULL DEFAULT 'global',
+    content        TEXT NOT NULL,
+    variables_json TEXT DEFAULT '{}',
+    created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_prompt_templates_scope ON prompt_templates(scope);
+
 -- PPT 导入记录表
 CREATE TABLE IF NOT EXISTS ppt_imports (
     id                   TEXT PRIMARY KEY,
@@ -168,6 +181,11 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_type ON knowledge_chunks(file_ty
 def gen_id() -> str:
     """生成 UUID 字符串"""
     return str(uuid.uuid4())
+
+
+def utc_now_iso() -> str:
+    """返回带 UTC 时区信息的 ISO 时间字符串。"""
+    return datetime.now(timezone.utc).isoformat()
 
 
 class StorageService:
@@ -212,7 +230,7 @@ class StorageService:
 
     async def create_workspace(self, name: str, description: str = "", icon: str = "📁") -> dict:
         wid = gen_id()
-        now = datetime.utcnow().isoformat()
+        now = utc_now_iso()
         await self.db.execute(
             "INSERT INTO workspaces (id, name, description, icon, created_at, updated_at) VALUES (?,?,?,?,?,?)",
             (wid, name, description, icon, now, now),
@@ -230,7 +248,7 @@ class StorageService:
 
     async def create_conversation(self, workspace_id: str, title: str = "新对话", mode: str = "copilot") -> dict:
         cid = gen_id()
-        now = datetime.utcnow().isoformat()
+        now = utc_now_iso()
         await self.db.execute(
             "INSERT INTO conversations (id, workspace_id, title, mode, created_at, updated_at) VALUES (?,?,?,?,?,?)",
             (cid, workspace_id, title, mode, now, now),
@@ -253,7 +271,7 @@ class StorageService:
         fields = {k: v for k, v in kwargs.items() if k in allowed}
         if not fields:
             return
-        fields["updated_at"] = datetime.utcnow().isoformat()
+        fields["updated_at"] = utc_now_iso()
         set_clause = ", ".join(f"{k}=?" for k in fields)
         await self.db.execute(
             f"UPDATE conversations SET {set_clause} WHERE id=?",
@@ -273,7 +291,7 @@ class StorageService:
         duration_ms: int = 0, metadata: str = "{}",
     ) -> dict:
         mid = gen_id()
-        now = datetime.utcnow().isoformat()
+        now = utc_now_iso()
         await self.db.execute(
             "INSERT INTO messages (id, conversation_id, role, content, model, token_input, token_output, duration_ms, metadata, created_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -340,7 +358,7 @@ class StorageService:
 
     async def add_knowhow_rule(self, category: str, rule_text: str, weight: int = 2, source: str = "user") -> str:
         rid = gen_id()
-        now = datetime.utcnow().isoformat()
+        now = utc_now_iso()
         await self.db.execute(
             "INSERT INTO knowhow_rules (id, category, rule_text, weight, source, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
             (rid, category, rule_text, weight, source, now, now),
@@ -370,11 +388,63 @@ class StorageService:
         return row["value"] if row else default
 
     async def set_setting(self, key: str, value: str) -> None:
+        updated_at = utc_now_iso()
         await self.db.execute(
             "INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=?, updated_at=?",
-            (key, value, datetime.utcnow().isoformat(), value, datetime.utcnow().isoformat()),
+            (key, value, updated_at, value, updated_at),
         )
         await self.db.commit()
+
+    async def add_prompt_template(
+        self,
+        template_id: str,
+        name: str,
+        description: str,
+        scope: str,
+        content: str,
+        variables_json: str = "{}",
+    ) -> str:
+        now = utc_now_iso()
+        await self.db.execute(
+            "INSERT INTO prompt_templates (id, name, description, scope, content, variables_json, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (template_id, name, description, scope, content, variables_json, now, now),
+        )
+        await self.db.commit()
+        return template_id
+
+    async def get_prompt_template(self, template_id: str) -> Optional[dict]:
+        return await self._fetchone("SELECT * FROM prompt_templates WHERE id=?", (template_id,))
+
+    async def list_prompt_templates(self, scope: Optional[str] = None) -> list[dict]:
+        if scope:
+            return await self._fetchall(
+                "SELECT * FROM prompt_templates WHERE scope IN (?, 'global') ORDER BY updated_at DESC, name COLLATE NOCASE ASC",
+                (scope,),
+            )
+        return await self._fetchall(
+            "SELECT * FROM prompt_templates ORDER BY updated_at DESC, name COLLATE NOCASE ASC"
+        )
+
+    async def update_prompt_template(self, template_id: str, **kwargs: str) -> bool:
+        allowed = {"name", "description", "scope", "content", "variables_json"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if not fields:
+            return False
+
+        fields["updated_at"] = utc_now_iso()
+        set_clause = ", ".join(f"{key}=?" for key in fields)
+        cursor = await self.db.execute(
+            f"UPDATE prompt_templates SET {set_clause} WHERE id=?",
+            (*fields.values(), template_id),
+        )
+        await self.db.commit()
+        return cursor.rowcount > 0
+
+    async def delete_prompt_template(self, template_id: str) -> bool:
+        cursor = await self.db.execute("DELETE FROM prompt_templates WHERE id=?", (template_id,))
+        await self.db.commit()
+        return cursor.rowcount > 0
 
     # ===== PPT Imports =====
 
@@ -402,7 +472,7 @@ class StorageService:
         self, import_id: str, source_file: str, file_type: str, chunks: list[dict],
     ) -> int:
         rows = []
-        created_at = datetime.utcnow().isoformat()
+        created_at = utc_now_iso()
         for chunk in chunks:
             content = str(chunk.get("content") or "").strip()
             if not content:

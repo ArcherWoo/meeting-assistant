@@ -228,7 +228,8 @@ class HybridSearchService:
         """LanceDB semantic search."""
         if not embedding_service.is_configured:
             return []
-        if len(query.strip()) < 4:
+        # 仅跳过空串或 1 字符噪声查询，保留 2~3 字中文短查询的语义召回机会。
+        if len(query.strip()) < 2:
             return []
         try:
             query_vec = await embedding_service.embed_text(query)

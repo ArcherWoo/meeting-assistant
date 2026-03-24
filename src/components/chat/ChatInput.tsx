@@ -5,10 +5,11 @@
 import { useState, useRef, useCallback, useEffect, type KeyboardEvent, type ChangeEvent } from 'react';
 import clsx from 'clsx';
 import { useAppStore } from '@/stores/appStore';
-import { extractFileText } from '@/services/api';
+import { extractFilesText } from '@/services/api';
 
 /** 附件信息 */
 interface Attachment {
+  id: string;
   filename: string;
   fileType: string;
   fileSize: number;
@@ -32,7 +33,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
   const { llmConfigs, activeLLMConfigId, setActiveLLMConfig, toggleSettings } = useAppStore();
   const [input, setInput] = useState('');
   const [uploading, setUploading] = useState(false);
-  const [attachment, setAttachment] = useState<Attachment | null>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const activeLLMConfig = llmConfigs.find((config) => config.id === activeLLMConfigId) ?? llmConfigs[0];
@@ -52,22 +53,37 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
 
   /** 处理文件选择 → 提取文本作为附件 */
   const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
     e.target.value = '';
 
     setUploading(true);
     try {
-      const result = await extractFileText(file);
-      setAttachment({
-        filename: result.filename,
-        fileType: result.file_type,
-        fileSize: file.size,
-        text: result.text,
-        charCount: result.char_count,
-      });
+      const result = await extractFilesText(files);
+      const fileSizeQueue = files.reduce<Record<string, number[]>>((acc, file) => {
+        if (!acc[file.name]) {
+          acc[file.name] = [];
+        }
+        acc[file.name].push(file.size);
+        return acc;
+      }, {});
+      const nextAttachments = result.files.map((item, index) => ({
+        id: globalThis.crypto?.randomUUID?.() ?? `${item.filename}-${index}-${Date.now()}-${Math.random()}`,
+        filename: item.filename,
+        fileType: item.file_type,
+        fileSize: fileSizeQueue[item.filename]?.shift() ?? 0,
+        text: item.text,
+        charCount: item.char_count,
+      }));
+      const failedMessages = result.errors.map((item) => `${item.filename}: ${item.error}`);
+
+      if (nextAttachments.length > 0) {
+        setAttachments((current) => [...current, ...nextAttachments]);
+      }
+      if (failedMessages.length > 0) {
+        alert(`以下文件文本提取失败：\n${failedMessages.join('\n')}`);
+      }
     } catch (err: any) {
-      // 提取失败时显示错误提示
       alert(`文件文本提取失败：${err.message || '未知错误'}`);
     } finally {
       setUploading(false);
@@ -75,7 +91,9 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
   };
 
   /** 移除附件 */
-  const removeAttachment = () => setAttachment(null);
+  const removeAttachment = (id: string) => {
+    setAttachments((current) => current.filter((attachment) => attachment.id !== id));
+  };
 
   /** 格式化文件大小 */
   const formatSize = (bytes: number) => {
@@ -97,17 +115,19 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
   const handleSend = () => {
     const trimmed = input.trim();
     // 允许只有附件没有文字（此时用默认提示词）
-    if (!trimmed && !attachment) return;
+    if (!trimmed && attachments.length === 0) return;
     if (isStreaming) return;
 
-    const userMessage = trimmed || '请分析这份文件的内容';
-    const attachmentContext = attachment
-      ? `\n\n---\n📎 附件「${attachment.filename}」内容（${attachment.charCount} 字符）：\n\n${attachment.text}`
+    const userMessage = trimmed || (attachments.length > 1 ? '请综合分析这些文件的内容' : '请分析这份文件的内容');
+    const attachmentContext = attachments.length > 0
+      ? attachments.map((attachment, index) => (
+          `\n\n---\n📎 附件${attachments.length > 1 ? ` #${index + 1}` : ''}「${attachment.filename}」内容（${attachment.charCount} 字符）：\n\n${attachment.text}`
+        )).join('')
       : undefined;
 
     onSend(userMessage, attachmentContext);
     setInput('');
-    setAttachment(null);
+    setAttachments([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -121,7 +141,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
     }
   };
 
-  const canSend = Boolean(input.trim() || attachment) && !disabled;
+  const canSend = Boolean(input.trim() || attachments.length > 0) && !disabled;
 
   return (
     <div className="border-t border-surface-divider dark:border-dark-divider bg-surface-card dark:bg-dark-card px-4 py-3">
@@ -134,23 +154,34 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
       )}
 
       {/* 附件预览 */}
-      {attachment && (
-        <div className="mb-2 flex items-center gap-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 shadow-sm dark:border-blue-800 dark:bg-blue-900/20">
-          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-white text-sm shadow-sm dark:bg-blue-950/40">📎</span>
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium truncate">{attachment.filename}</p>
-            <p className="text-[11px] text-text-secondary mt-0.5">
-              {attachment.fileType.toUpperCase()} · {formatSize(attachment.fileSize)} · {attachment.charCount} 字符
+      {attachments.length > 0 && (
+        <div className="mb-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 shadow-sm dark:border-blue-800 dark:bg-blue-900/20">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-white text-sm shadow-sm dark:bg-blue-950/40">📎</span>
+            <p className="text-xs font-medium">
+              已添加 {attachments.length} 个附件
             </p>
           </div>
-          <button
-            onClick={removeAttachment}
-            className="win-icon-button h-8 w-8 flex-shrink-0 text-sm"
-            title="移除附件"
-            aria-label="移除附件"
-          >
-            ✕
-          </button>
+          <div className="space-y-2">
+            {attachments.map((attachment) => (
+              <div key={attachment.id} className="flex items-center gap-3 rounded-md border border-blue-100 bg-white/80 px-3 py-2 dark:border-blue-900/40 dark:bg-blue-950/20">
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium truncate">{attachment.filename}</p>
+                  <p className="text-[11px] text-text-secondary mt-0.5">
+                    {attachment.fileType.toUpperCase()} · {formatSize(attachment.fileSize)} · {attachment.charCount} 字符
+                  </p>
+                </div>
+                <button
+                  onClick={() => removeAttachment(attachment.id)}
+                  className="win-icon-button h-8 w-8 flex-shrink-0 text-sm"
+                  title="移除附件"
+                  aria-label={`移除附件 ${attachment.filename}`}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -168,6 +199,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
           <input
             ref={fileInputRef}
             type="file"
+            multiple
             accept=".ppt,.pptx,.pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.xls,.xlsx,.png,.jpg,.jpeg,.gif,.bmp,.webp,image/*"
             className="hidden"
             onChange={handleFileChange}
@@ -195,8 +227,8 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
             placeholder={
               disabled
                 ? '请先配置 API Key...'
-                : attachment
-                  ? '输入提示词，或直接发送让 AI 分析附件内容...'
+                : attachments.length > 0
+                  ? '输入提示词，或直接发送让 AI 分析这些附件内容...'
                   : '输入消息，Enter 发送，Shift+Enter 换行'
             }
             disabled={disabled}
@@ -261,4 +293,3 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
     </div>
   );
 }
-

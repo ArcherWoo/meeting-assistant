@@ -10,9 +10,9 @@ Know-how 规则服务 - 业务经验规则管理与匹配
 """
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Literal, List, Optional
 
-from services.storage import storage
+from services.storage import gen_id, storage
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +90,148 @@ class KnowhowService:
         await storage.db.execute("DELETE FROM knowhow_rules WHERE id=?", (rule_id,))
         await storage.db.commit()
         return True
+
+    def _extract_import_rules(self, payload: Any) -> List[dict]:
+        """从导入载荷中提取规则列表。"""
+        if isinstance(payload, list):
+            raw_rules = payload
+        elif isinstance(payload, dict):
+            raw_rules = payload.get("rules")
+        else:
+            raise ValueError("导入文件格式不正确")
+
+        if not isinstance(raw_rules, list):
+            raise ValueError("导入文件中缺少 rules 数组")
+
+        rules = [self._normalize_import_rule(rule, index + 1) for index, rule in enumerate(raw_rules)]
+        if not rules:
+            raise ValueError("导入文件中没有可导入的规则")
+        return rules
+
+    @staticmethod
+    def _normalize_import_rule(raw_rule: Any, index: int) -> dict:
+        """标准化导入规则，兼容导出备份和手工维护的 JSON。"""
+        if not isinstance(raw_rule, dict):
+            raise ValueError(f"第 {index} 条规则格式不正确")
+
+        category = str(raw_rule.get("category") or "").strip() or "未分类"
+        rule_text = str(raw_rule.get("rule_text") or "").strip()
+        if not rule_text:
+            raise ValueError(f"第 {index} 条规则缺少内容")
+
+        try:
+            weight = round(float(raw_rule.get("weight", 2)), 1)
+        except (TypeError, ValueError):
+            weight = 2.0
+        weight = max(0.0, min(5.0, weight))
+
+        try:
+            hit_count = max(0, int(raw_rule.get("hit_count", 0)))
+        except (TypeError, ValueError):
+            hit_count = 0
+
+        try:
+            confidence = float(raw_rule.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        confidence = max(0.0, min(1.0, confidence))
+
+        source = str(raw_rule.get("source") or "imported").strip() or "imported"
+        is_active_raw = raw_rule.get("is_active", 1)
+        if isinstance(is_active_raw, str):
+            is_active = 0 if is_active_raw.strip().lower() in {"0", "false", "no", "off"} else 1
+        else:
+            is_active = 1 if bool(is_active_raw) else 0
+
+        now = datetime.now(timezone.utc).isoformat()
+        created_at = str(raw_rule.get("created_at") or now)
+        updated_at = str(raw_rule.get("updated_at") or created_at)
+
+        return {
+            "category": category,
+            "rule_text": rule_text,
+            "weight": weight,
+            "hit_count": hit_count,
+            "confidence": confidence,
+            "source": source,
+            "is_active": is_active,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        }
+
+    async def export_rules(self) -> dict:
+        """导出当前 Know-how 规则库。"""
+        rules = await storage.list_knowhow_rules(active_only=False)
+        return {
+            "kind": "knowhow_rules_export",
+            "schema_version": 1,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "total_rules": len(rules),
+            "rules": rules,
+        }
+
+    async def import_rules(
+        self,
+        payload: Any,
+        strategy: Literal["append", "replace"] = "append",
+    ) -> dict:
+        """导入 Know-how 规则库，支持追加或覆盖。"""
+        if strategy not in {"append", "replace"}:
+            raise ValueError("导入策略不支持")
+
+        rules = self._extract_import_rules(payload)
+        existing_rules = await storage.list_knowhow_rules(active_only=False)
+        existing_keys = {
+            (str(rule.get("category") or "").strip(), str(rule.get("rule_text") or "").strip())
+            for rule in existing_rules
+        }
+
+        deleted_count = 0
+        if strategy == "replace":
+            cursor = await storage.db.execute("DELETE FROM knowhow_rules")
+            deleted_count = max(cursor.rowcount, 0)
+            existing_keys.clear()
+
+        rows = []
+        skipped_count = 0
+        for rule in rules:
+            key = (rule["category"], rule["rule_text"])
+            if key in existing_keys:
+                skipped_count += 1
+                continue
+
+            existing_keys.add(key)
+            rows.append((
+                gen_id(),
+                rule["category"],
+                rule["rule_text"],
+                rule["weight"],
+                rule["hit_count"],
+                rule["confidence"],
+                rule["source"],
+                rule["is_active"],
+                rule["created_at"],
+                rule["updated_at"],
+            ))
+
+        if rows:
+            await storage.db.executemany(
+                "INSERT INTO knowhow_rules ("
+                "id, category, rule_text, weight, hit_count, confidence, source, is_active, created_at, updated_at"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
+        await storage.db.commit()
+
+        total_after_import = len(await storage.list_knowhow_rules(active_only=False))
+        return {
+            "strategy": strategy,
+            "total_in_file": len(rules),
+            "imported_count": len(rows),
+            "skipped_count": skipped_count,
+            "deleted_count": deleted_count,
+            "total_after_import": total_after_import,
+        }
 
     async def check_against_content(
         self, content: str, category: str = "采购预审",
@@ -203,4 +345,3 @@ class KnowhowService:
 
 # 全局单例
 knowhow_service = KnowhowService()
-

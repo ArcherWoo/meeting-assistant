@@ -14,6 +14,7 @@ from services.llm_service import LLMService
 from services.storage import storage
 from services.context_assembler import context_assembler, AssembledContext
 from services.embedding_service import embedding_service
+from services.prompt_template_service import DEFAULT_SYSTEM_PROMPTS
 
 logger = logging.getLogger(__name__)
 
@@ -103,24 +104,7 @@ def _fallback_auto_title(dialogue_lines: list[str]) -> str:
 
     return "新对话"
 
-# 各模式默认 System Prompt（与 settings.py 中的 DEFAULT_PROMPTS 保持一致）
-# 模式与前端 AppMode 对应：copilot / builder / agent
-_DEFAULT_PROMPTS: dict[str, str] = {
-    "copilot": (
-        "你是一个专业的会议助手。请根据用户的问题，提供清晰、准确、有帮助的回答。"
-        "回答时请保持简洁，优先给出结论，再补充细节。"
-    ),
-    "builder": (
-        "你是一个 Skill Builder 助手，专门帮助用户创建和优化工作流技能（Skill）。"
-        "请引导用户描述他们的工作场景和重复性任务，帮助他们将这些任务抽象为可执行的 Skill 模板。"
-        "生成的 Skill 应使用标准 Markdown 格式，包含描述、触发条件、执行步骤和输出格式。"
-    ),
-    "agent": (
-        "你是一个智能 Agent，能够调用各种工具和技能完成复杂任务。"
-        "请分析用户的需求，选择合适的工具，并逐步执行任务。"
-        "执行过程中保持透明，让用户了解每一步的进展。"
-    ),
-}
+_DEFAULT_PROMPTS: dict[str, str] = DEFAULT_SYSTEM_PROMPTS
 
 
 class ChatMessage(BaseModel):
@@ -171,7 +155,8 @@ async def _build_messages(request: ChatRequest) -> list[dict]:
 
     # 从数据库获取自定义 System Prompt（未设置时使用默认值）
     custom_prompt = await storage.get_setting(f"system_prompt_{request.mode}", default="")
-    system_content = custom_prompt.strip() if custom_prompt.strip() else _DEFAULT_PROMPTS.get(request.mode, "")
+    base_prompt = custom_prompt.strip() if custom_prompt.strip() else _DEFAULT_PROMPTS.get(request.mode, "")
+    system_content = base_prompt
 
     if system_content:
         messages = [{"role": "system", "content": system_content}] + messages

@@ -3,18 +3,54 @@
  * 支持规则的 CRUD 操作、分类筛选、启用/禁用
  * 分类增删改操作内联在筛选行中，无独立 Tab
  */
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, type ChangeEvent } from 'react';
 import clsx from 'clsx';
 import {
   listKnowhowRules, createKnowhowRule, updateKnowhowRule,
   deleteKnowhowRule, getKnowhowStats,
   renameKnowhowCategory, deleteKnowhowCategory,
+  exportKnowhowRules, importKnowhowRules,
 } from '@/services/api';
-import type { KnowhowRule } from '@/types';
+import type { KnowhowExportData, KnowhowImportStrategy, KnowhowRule } from '@/types';
 
 /** 规则分类选项 */
 const PRESET_CATEGORIES = ['采购预审', '合规性', '价格合理性', '技术规格', '供应商资质', '流程规范', '其他'] as const;
 type RuleStatusFilter = 'all' | 'active' | 'inactive';
+
+function getImportRuleCount(payload: unknown): number {
+  if (Array.isArray(payload)) return payload.length;
+  if (payload && typeof payload === 'object' && Array.isArray((payload as { rules?: unknown[] }).rules)) {
+    return (payload as { rules: unknown[] }).rules.length;
+  }
+  return 0;
+}
+
+function downloadKnowhowExport(data: KnowhowExportData) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+  const url = window.URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  const exportDate = data.exported_at?.slice(0, 10) || new Date().toISOString().slice(0, 10);
+
+  anchor.href = url;
+  anchor.download = `knowhow-rules-${exportDate}.json`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+function buildImportNotice(result: {
+  strategy: KnowhowImportStrategy;
+  total_in_file: number;
+  imported_count: number;
+  skipped_count: number;
+  deleted_count: number;
+  total_after_import: number;
+}): string {
+  const action = result.strategy === 'replace' ? `已覆盖导入，先清空了 ${result.deleted_count} 条旧规则。` : '已追加导入。';
+  const skipped = result.skipped_count > 0 ? `跳过重复 ${result.skipped_count} 条。` : '';
+  return `${action} 本次读取 ${result.total_in_file} 条，成功导入 ${result.imported_count} 条。${skipped} 当前共有 ${result.total_after_import} 条规则。`;
+}
 
 interface Props {
   /** 是否作为独立面板展示（vs 嵌入 ContextPanel） */
@@ -28,8 +64,12 @@ export default function KnowhowManager({ standalone = true }: Props) {
   const [filterCategory, setFilterCategory] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<RuleStatusFilter>('all');
   const [loading, setLoading] = useState(true);
+  const [busyAction, setBusyAction] = useState<'import' | 'export' | ''>('');
   const [editingRule, setEditingRule] = useState<Partial<KnowhowRule> | null>(null);
+  const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [pendingImport, setPendingImport] = useState<{ fileName: string; ruleCount: number; payload: unknown } | null>(null);
+  const [importStrategy, setImportStrategy] = useState<KnowhowImportStrategy>('append');
 
   // 分类内联管理状态
   const [renamingCat, setRenamingCat] = useState<string | null>(null);
@@ -38,6 +78,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
   const [deleteRules, setDeleteRulesFlag] = useState(true);
   const [addingCategory, setAddingCategory] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const categoryOptions = useMemo(
     () => Array.from(new Set([...PRESET_CATEGORIES, ...(stats?.categories ?? []), ...rules.map((rule) => rule.category)])),
@@ -176,6 +217,70 @@ export default function KnowhowManager({ standalone = true }: Props) {
     }
   };
 
+  /** 导出规则库 */
+  const handleExport = async () => {
+    setBusyAction('export');
+    setError('');
+    try {
+      const data = await exportKnowhowRules();
+      downloadKnowhowExport(data);
+      setNotice(`已导出 ${data.total_rules} 条规则。`);
+    } catch (e: unknown) {
+      setNotice('');
+      setError((e as Error).message);
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  /** 选择导入文件 */
+  const handleImportFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    setError('');
+    setNotice('');
+
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text) as unknown;
+      const ruleCount = getImportRuleCount(payload);
+      if (ruleCount <= 0) {
+        throw new Error('导入文件中没有可识别的规则');
+      }
+
+      setImportStrategy('append');
+      setPendingImport({ fileName: file.name, ruleCount, payload });
+    } catch {
+      setPendingImport(null);
+      setError('导入文件不是有效的 Know-how JSON');
+    }
+  };
+
+  /** 确认导入 */
+  const handleConfirmImport = async () => {
+    if (!pendingImport) return;
+
+    setBusyAction('import');
+    setError('');
+    try {
+      const result = await importKnowhowRules(pendingImport.payload, importStrategy);
+      if (importStrategy === 'replace') {
+        setFilterCategory('');
+        setStatusFilter('all');
+      }
+      setPendingImport(null);
+      setNotice(buildImportNotice(result));
+      await loadData();
+    } catch (e: unknown) {
+      setNotice('');
+      setError((e as Error).message);
+    } finally {
+      setBusyAction('');
+    }
+  };
+
   return (
     <div className={clsx('flex flex-col', standalone ? 'h-full' : 'max-h-[500px]')}>
       {/* 头部：标题 + 统计 + 新建规则 */}
@@ -188,12 +293,35 @@ export default function KnowhowManager({ standalone = true }: Props) {
             </p>
           )}
         </div>
-        <button
-          onClick={() => setEditingRule({ category: categoryOptions[0] ?? '采购预审', rule_text: '', weight: 1.0, source: 'manual' })}
-          className="win-button-primary h-8 px-3 text-xs"
-        >
-          + 新建规则
-        </button>
+        <div className="flex items-center gap-2">
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            onChange={handleImportFileChange}
+          />
+          <button
+            onClick={handleExport}
+            disabled={busyAction === 'import' || busyAction === 'export'}
+            className="win-button h-8 px-3 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {busyAction === 'export' ? '导出中...' : '导出'}
+          </button>
+          <button
+            onClick={() => importInputRef.current?.click()}
+            disabled={busyAction === 'import' || busyAction === 'export'}
+            className="win-button h-8 px-3 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {busyAction === 'import' ? '导入中...' : '导入'}
+          </button>
+          <button
+            onClick={() => setEditingRule({ category: categoryOptions[0] ?? '采购预审', rule_text: '', weight: 1.0, source: 'manual' })}
+            className="win-button-primary h-8 px-3 text-xs"
+          >
+            + 新建规则
+          </button>
+        </div>
       </div>
 
       {/* 错误提示 */}
@@ -201,6 +329,14 @@ export default function KnowhowManager({ standalone = true }: Props) {
         <div className="mx-4 mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">
           {error}
           <button onClick={() => setError('')} className="ml-2 underline">关闭</button>
+        </div>
+      )}
+
+      {/* 成功提示 */}
+      {notice && (
+        <div className="mx-4 mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300">
+          {notice}
+          <button onClick={() => setNotice('')} className="ml-2 underline">关闭</button>
         </div>
       )}
 
@@ -319,6 +455,60 @@ export default function KnowhowManager({ standalone = true }: Props) {
             <div className="flex justify-end gap-2">
               <button onClick={() => setDeletingCat(null)} className="win-button h-8 px-3 text-xs">取消</button>
               <button onClick={handleDeleteCategory} className="inline-flex h-8 items-center justify-center rounded-md bg-red-500 px-3 text-xs font-medium text-white shadow-sm transition-colors hover:bg-red-600">确认删除</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 导入确认对话框 */}
+      {pendingImport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => busyAction !== 'import' && setPendingImport(null)}>
+          <div className="win-modal w-96 p-5" onClick={(e) => e.stopPropagation()}>
+            <h4 className="text-sm font-medium mb-3">导入 Know-how 规则</h4>
+            <p className="text-xs text-text-secondary mb-3">
+              文件「{pendingImport.fileName}」中发现 {pendingImport.ruleCount} 条规则。
+            </p>
+            <div className="space-y-2 mb-4">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  checked={importStrategy === 'append'}
+                  onChange={() => setImportStrategy('append')}
+                  className="mt-0.5"
+                />
+                <div>
+                  <p className="text-xs font-medium">追加导入</p>
+                  <p className="text-[10px] text-text-secondary">保留现有规则，已存在的同分类同内容规则会自动跳过。</p>
+                </div>
+              </label>
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  checked={importStrategy === 'replace'}
+                  onChange={() => setImportStrategy('replace')}
+                  className="mt-0.5"
+                />
+                <div>
+                  <p className="text-xs font-medium">覆盖导入</p>
+                  <p className="text-[10px] text-text-secondary">先清空当前规则库，再按这个文件重建。</p>
+                </div>
+              </label>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setPendingImport(null)}
+                disabled={busyAction === 'import'}
+                className="win-button h-8 px-3 text-xs disabled:opacity-60"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleConfirmImport}
+                disabled={busyAction === 'import'}
+                className="win-button-primary h-8 px-3 text-xs disabled:opacity-60"
+              >
+                {busyAction === 'import' ? '导入中...' : '开始导入'}
+              </button>
             </div>
           </div>
         </div>
