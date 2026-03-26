@@ -5,31 +5,28 @@
   "description": "AI-powered Meeting Assistant - Web version with PPT analysis, meeting summaries, and skill automation",
   "scripts": {
     "dev": "vite",
+    "dev:frontend": "vite",
+    "dev:backend": "cd backend && python -m uvicorn main:app --reload --port 5173",
+    "dev:all": "python start.py",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "lint": "eslint src --ext ts,tsx",
-    "backend:dev": "cd backend && python -m uvicorn main:app --reload --port 8765"
+    "backend:dev": "cd backend && python -m uvicorn main:app --reload --port 5173",
+    "test:backend": "pytest backend/tests -q"
   },
   "dependencies": {
     "clsx": "^2.1.1",
-    "katex": "^0.16.41",
     "lucide-react": "^0.460.0",
-    "mermaid": "^11.13.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.1",
     "react-router-dom": "^6.28.0",
-    "react-syntax-highlighter": "^15.6.1",
-    "rehype-katex": "^7.0.1",
-    "remark-gfm": "^4.0.0",
-    "remark-math": "^6.0.0",
     "uuid": "^11.0.0",
     "zustand": "^5.0.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@types/react-syntax-highlighter": "^15.5.13",
     "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",

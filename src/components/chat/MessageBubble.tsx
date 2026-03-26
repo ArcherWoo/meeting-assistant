@@ -4,15 +4,65 @@
  * AI 消息支持 Markdown、代码块渲染、上下文来源徽标和 Skill 推荐卡
  */
 import clsx from 'clsx';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import type { ContextCitation, ContextMetadata, Message, SkillSuggestionEvent } from '@/types';
-import SmartMarkdown from './SmartMarkdown';
 
 interface Props {
   message: Message;
-  isStreaming?: boolean;
   onApplySkillSuggestion?: (message: Message, suggestion: SkillSuggestionEvent) => void;
   onDismissSkillSuggestion?: (message: Message) => void;
 }
+
+const markdownComponents: Components = {
+  p: ({ children }) => <p className="my-2 whitespace-pre-wrap">{children}</p>,
+  h1: ({ children }) => <h1 className="mt-4 mb-2 text-lg font-semibold">{children}</h1>,
+  h2: ({ children }) => <h2 className="mt-4 mb-2 text-base font-semibold">{children}</h2>,
+  h3: ({ children }) => <h3 className="mt-3 mb-2 text-sm font-semibold">{children}</h3>,
+  ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-5">{children}</ul>,
+  ol: ({ children }) => <ol className="my-2 list-decimal space-y-1 pl-5">{children}</ol>,
+  li: ({ children }) => <li className="whitespace-pre-wrap">{children}</li>,
+  blockquote: ({ children }) => (
+    <blockquote className="my-3 border-l-4 border-primary/35 bg-surface/80 px-3 py-2 text-text-secondary dark:bg-dark-sidebar/70 dark:text-text-dark-secondary">
+      {children}
+    </blockquote>
+  ),
+  a: ({ href, children }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="font-medium text-primary underline decoration-primary/35 underline-offset-2 hover:decoration-primary"
+    >
+      {children}
+    </a>
+  ),
+  code: ({ className, children }) => {
+    const code = String(children).replace(/\n$/, '');
+    const match = /language-([\w-]+)/.exec(className || '');
+    const isBlockCode = Boolean(match) || code.includes('\n');
+
+    if (isBlockCode) {
+      return (
+        <div className="my-3 overflow-x-auto rounded-xl border border-surface-divider bg-slate-950/95 shadow-sm dark:border-dark-divider dark:bg-slate-950">
+          {match?.[1] && (
+            <div className="border-b border-white/10 px-3 py-2 text-[10px] uppercase tracking-[0.12em] text-slate-300">
+              {match[1]}
+            </div>
+          )}
+          <pre className="m-0 p-4 text-[12px] leading-6 text-slate-100">
+            <code className="font-mono">{code}</code>
+          </pre>
+        </div>
+      );
+    }
+
+    return (
+      <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[0.92em] text-slate-700 dark:bg-slate-800 dark:text-slate-100">
+        {children}
+      </code>
+    );
+  },
+};
 
 function renderContextBadge(label: string, value: number, tone: 'blue' | 'emerald' | 'amber') {
   const toneClassMap = {
@@ -97,7 +147,6 @@ function getContextCountSummary(context: ContextMetadata, kind: 'injected' | 're
 
 export default function MessageBubble({
   message,
-  isStreaming = false,
   onApplySkillSuggestion,
   onDismissSkillSuggestion,
 }: Props) {
@@ -351,7 +400,11 @@ export default function MessageBubble({
           {isUser ? (
             <p className="whitespace-pre-wrap">{message.content}</p>
           ) : message.content ? (
-            <SmartMarkdown content={message.content} streaming={isStreaming} />
+            <div className="markdown-body text-[13px] leading-6">
+              <ReactMarkdown components={markdownComponents}>
+                {message.content}
+              </ReactMarkdown>
+            </div>
           ) : (
             <span className="inline-flex items-center gap-1 text-text-secondary">
               <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />

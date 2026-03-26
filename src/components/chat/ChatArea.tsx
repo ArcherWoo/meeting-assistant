@@ -53,17 +53,6 @@ export default function ChatArea() {
   const visibleMessages = visibleConversationId ? (messagesByConversation[visibleConversationId] ?? []) : [];
   const visibleIsStreaming = visibleConversationId ? (streamingByConversation[visibleConversationId] ?? false) : false;
   const visibleStreamingContent = visibleConversationId ? (streamingContentByConversation[visibleConversationId] ?? '') : '';
-  const streamingAssistantMessageId = useMemo(() => {
-    if (!visibleIsStreaming) return null;
-
-    for (let index = visibleMessages.length - 1; index >= 0; index -= 1) {
-      if (visibleMessages[index].role === 'assistant') {
-        return visibleMessages[index].id;
-      }
-    }
-
-    return null;
-  }, [visibleIsStreaming, visibleMessages]);
 
   useEffect(() => {
     if (visibleConversationId && visibleConversationId !== activeConversationId) {
@@ -327,7 +316,6 @@ export default function ChatArea() {
               <MessageBubble
                 key={msg.id}
                 message={msg}
-                isStreaming={msg.id === streamingAssistantMessageId}
                 onApplySkillSuggestion={handleApplySkillSuggestion}
                 onDismissSkillSuggestion={handleDismissSkillSuggestion}
               />

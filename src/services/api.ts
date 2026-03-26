@@ -14,7 +14,11 @@ import type {
 
 /** 获取后端 API 基础 URL */
 function getBaseUrl(): string {
-  return 'http://127.0.0.1:8765/api';
+  const configured = (import.meta.env.VITE_API_BASE_URL || '').trim();
+  if (configured) {
+    return configured.replace(/\/+$/, '');
+  }
+  return '/api';
 }
 
 // ===== 健康检查 =====

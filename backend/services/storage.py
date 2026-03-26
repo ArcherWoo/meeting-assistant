@@ -9,10 +9,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import aiosqlite
-
-# 数据根目录
-DATA_DIR = Path.home() / ".meeting-assistant" / "data"
-DB_PATH = DATA_DIR / "main.db"
+from services.runtime_paths import DATA_DIR, DB_PATH
 
 # ===== Schema 定义（PRD §13.1）=====
 _SCHEMA_SQL = """

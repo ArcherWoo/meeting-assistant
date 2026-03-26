@@ -6,13 +6,14 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from services.runtime_paths import USER_SKILLS_DIR
 from services.skill_parser import SkillMeta, SkillParser
 
 logger = logging.getLogger(__name__)
 
 # Skill 文件搜索路径
 _BACKEND_SKILLS_DIR = Path(__file__).parent.parent / "skills"
-_USER_SKILLS_DIR = Path.home() / ".meeting-assistant" / "skills"
+_USER_SKILLS_DIR = USER_SKILLS_DIR
 
 
 class SkillManager:
@@ -78,4 +79,3 @@ class SkillManager:
 
 # 全局单例
 skill_manager = SkillManager()
-

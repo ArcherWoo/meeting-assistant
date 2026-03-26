@@ -13,7 +13,7 @@ async function initBackend(): Promise<void> {
   try {
     // 健康检查
     const healthy = await checkHealth();
-    useAppStore.getState().setBackend({ connected: healthy, port: 8765 });
+    useAppStore.getState().setBackend({ connected: healthy, port: 5173 });
   } catch (error) {
     console.warn('[Init] Backend connection failed:', error);
     useAppStore.getState().setBackend({ connected: false, port: 0 });

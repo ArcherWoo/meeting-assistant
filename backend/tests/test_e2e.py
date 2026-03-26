@@ -8,7 +8,7 @@ import json
 import sys
 import httpx
 
-BASE_URL = "http://127.0.0.1:8765/api"
+BASE_URL = "http://127.0.0.1:5173/api"
 PASSED = 0
 FAILED = 0
 
@@ -166,4 +166,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-

@@ -41,7 +41,7 @@ Meeting Assistant 是一款面向**非技术用户**的 AI 桌面客户端。核
 | 状态管理 | **Zustand** | 轻量级状态管理 |
 | 安全 | **Fernet / keyring** | API Key 加密存储，本地数据加密 |
 
-> **架构总览**：前端通过 Vite 开发服务器运行，通过 `http://localhost:8765` 与 Python FastAPI 后端通信。所有 AI 推理、文件解析、知识库检索、Skill 执行均在 Python 端完成，前端仅负责 UI 渲染与交互。
+> **架构总览**：前端通过 Vite 开发服务器运行，开发时浏览器访问 `http://localhost:4173`，并与 `http://localhost:5173` 上的 Python FastAPI 后端通信。所有 AI 推理、文件解析、知识库检索、Skill 执行均在 Python 端完成，前端仅负责 UI 渲染与交互。
 
 ---
 

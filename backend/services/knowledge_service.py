@@ -13,12 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Callable, Awaitable, Any
 
+from services.runtime_paths import VECTORS_DIR
 from services.storage import storage, gen_id
 
 logger = logging.getLogger(__name__)
-
-# LanceDB 数据目录
-VECTORS_DIR = Path.home() / ".meeting-assistant" / "data" / "vectors"
 
 # LLM 结构化提取 Prompt（PRD §12.4）
 EXTRACTION_PROMPT = """请从以下 PPT 内容中提取所有采购相关的结构化信息。

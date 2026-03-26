@@ -56,3 +56,6 @@ logs/
 .cache/
 .pytest_cache/
 out-new/
+.server-venv/
+.server-data/
+deploy/server.env
