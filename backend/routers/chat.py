@@ -104,9 +104,6 @@ def _fallback_auto_title(dialogue_lines: list[str]) -> str:
 
     return "新对话"
 
-_DEFAULT_PROMPTS: dict[str, str] = DEFAULT_SYSTEM_PROMPTS
-
-
 class ChatMessage(BaseModel):
     """单条消息"""
     role: str  # system / user / assistant / tool
@@ -153,20 +150,41 @@ async def _build_messages(request: ChatRequest) -> list[dict]:
     if has_system or not request.mode:
         return messages
 
-    # 从数据库获取自定义 System Prompt（未设置时使用默认值）
+    # 从数据库获取自定义 System Prompt；未设置时回退到角色默认值或旧内置默认值
     custom_prompt = await storage.get_setting(f"system_prompt_{request.mode}", default="")
-    base_prompt = custom_prompt.strip() if custom_prompt.strip() else _DEFAULT_PROMPTS.get(request.mode, "")
-    system_content = base_prompt
+    if custom_prompt.strip():
+        base_prompt = custom_prompt.strip()
+    else:
+        role = await storage.get_role(request.mode)
+        if role and role.get("system_prompt"):
+            base_prompt = role["system_prompt"]
+        else:
+            base_prompt = DEFAULT_SYSTEM_PROMPTS.get(request.mode, "")
 
-    if system_content:
-        messages = [{"role": "system", "content": system_content}] + messages
+    if base_prompt:
+        messages = [{"role": "system", "content": base_prompt}] + messages
     return messages
 
 
 async def _assemble_context(request: ChatRequest, messages: list[dict]) -> AssembledContext:
-    """独立的上下文组装步骤，仅 copilot 模式下执行 RAG 检索。"""
-    if request.mode != "copilot":
+    """独立的上下文组装步骤，仅拥有 'rag' 能力的角色才执行 RAG 检索。"""
+    if not request.mode:
         return AssembledContext()
+
+    # 从数据库获取角色，检查是否具备 rag 能力
+    import json as _json
+    role = await storage.get_role(request.mode)
+    if role:
+        try:
+            caps = _json.loads(role.get("capabilities") or "[]")
+        except (ValueError, TypeError):
+            caps = []
+        if "rag" not in caps:
+            return AssembledContext()
+    else:
+        # 角色不存在时降级：仅旧内置 copilot/agent 支持 RAG
+        if request.mode not in {"copilot", "agent"}:
+            return AssembledContext()
 
     # 配置 embedding 服务：优先 DB 中独立 embedding 配置，回退到 LLM API 凭证
     emb_url = await storage.get_setting("embedding_api_url")

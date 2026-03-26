@@ -3,15 +3,23 @@
  * 遵循 PRD §10.2 前端状态结构 + §4.2 请求格式
  */
 
-// ===== 三模式架构 =====
-export type AppMode = 'copilot' | 'builder' | 'agent';
-export type PromptScope = AppMode | 'global';
+// ===== 角色系统（动态，替代旧的三模式硬编码架构）=====
+export interface Role {
+  id: string;
+  name: string;
+  icon: string;
+  description: string;
+  system_prompt: string;
+  capabilities: string[];   // e.g. ['rag', 'skills']
+  is_builtin: number;       // 1 = builtin, 0 = user-created
+  sort_order: number;
+  created_at?: string;
+  updated_at?: string;
+}
 
-export const MODE_CONFIG: Record<AppMode, { label: string; icon: string; color: string }> = {
-  copilot: { label: 'Copilot', icon: '💬', color: 'blue' },
-  builder: { label: 'Skill Builder', icon: '🔧', color: 'orange' },
-  agent: { label: 'Agent', icon: '🤖', color: 'green' },
-};
+// 向后兼容：AppMode 保留为字符串别名（数据库 mode 字段现在存储任意 Role ID）
+export type AppMode = string;
+export type PromptScope = string;  // 'global' | <any role id>
 
 // ===== 消息类型 =====
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
@@ -153,30 +161,26 @@ export interface PromptPack {
   name: string;
   icon: string;
   description: string;
-  recommended_modes: AppMode[];
+  recommended_modes: string[];
   tags: string[];
   templates: PromptTemplate[];
   template_count: number;
-  template_count_by_mode: Record<AppMode, number>;
+  template_count_by_mode: Record<string, number>;
 }
 
-export interface SystemPromptMap {
-  copilot: string;
-  builder: string;
-  agent: string;
-}
+export type SystemPromptMap = Record<string, string>;
 
 export interface SystemPromptPreset {
   id: string;
   name: string;
-  mode: AppMode;
+  mode: string;
   prompt: string;
   created_at: string;
   updated_at: string;
 }
 
 export interface PromptModeConfig {
-  mode: AppMode;
+  mode: string;
   template_ids: string[];
   variables: Record<string, string>;
   extra_prompt: string;

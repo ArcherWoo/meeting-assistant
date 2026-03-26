@@ -5,15 +5,16 @@ from typing import Any, Optional
 
 from services.storage import gen_id, storage
 
+# 保留向后兼容——这些常量被 settings.py / chat.py 导入
 VALID_PROMPT_MODES = {"copilot", "builder", "agent"}
 VALID_PROMPT_SCOPES = {"global", *VALID_PROMPT_MODES}
 DYNAMIC_VARIABLE_KEYS = {"mode", "mode_label", "today", "current_date"}
-MODE_LABELS = {
+MODE_LABELS: dict[str, str] = {
     "copilot": "Copilot",
     "builder": "Skill Builder",
     "agent": "Agent",
 }
-DEFAULT_SYSTEM_PROMPTS = {
+DEFAULT_SYSTEM_PROMPTS: dict[str, str] = {
     "copilot": (
         "你是一个专业的会议助手。请根据用户的问题，提供清晰、准确、有帮助的回答。"
         "回答时请保持简洁，优先给出结论，再补充细节。"
@@ -237,16 +238,16 @@ class PromptTemplateService:
 
     @staticmethod
     def _validate_mode(mode: str) -> str:
+        """接受任意非空字符串作为 mode（角色 ID）。"""
         normalized = (mode or "").strip()
-        if normalized not in VALID_PROMPT_MODES:
-            raise ValueError(f"不支持的模式：{mode}")
+        if not normalized:
+            raise ValueError("模式不能为空")
         return normalized
 
     @staticmethod
     def _validate_scope(scope: str) -> str:
+        """接受 'global' 或任意非空字符串（动态角色 ID）作为 scope。"""
         normalized = (scope or "global").strip() or "global"
-        if normalized not in VALID_PROMPT_SCOPES:
-            raise ValueError(f"不支持的作用域：{scope}")
         return normalized
 
     @staticmethod
@@ -313,7 +314,7 @@ class PromptTemplateService:
         today = date.today().isoformat()
         return {
             "mode": normalized_mode,
-            "mode_label": MODE_LABELS[normalized_mode],
+            "mode_label": MODE_LABELS.get(normalized_mode, normalized_mode),
             "today": today,
             "current_date": today,
         }
@@ -423,12 +424,15 @@ class PromptTemplateService:
             raise KeyError("模板不存在")
 
     async def list_builtin_packs(self) -> list[dict]:
+        # 使用数据库中的角色列表，而非硬编码模式
+        db_roles = await storage.list_roles()
+        role_ids = sorted(r["id"] for r in db_roles) if db_roles else sorted(VALID_PROMPT_MODES)
         packs: list[dict] = []
         for pack in _BUILTIN_PROMPT_PACKS:
             templates = [self._build_builtin_template(pack, template) for template in pack["templates"]]
             counts_by_mode = {
                 mode: len([template for template in templates if template["scope"] in {"global", mode}])
-                for mode in sorted(VALID_PROMPT_MODES)
+                for mode in role_ids
             }
             packs.append({
                 "id": pack["id"],

@@ -1,18 +1,18 @@
 /**
  * 侧边栏组件
- * 包含：Logo、新建对话、对话列表、模式切换、设置入口
+ * 包含：Logo、新建对话、对话列表、角色切换、设置入口
  */
 import { useState, type KeyboardEvent } from 'react';
 import { useAppStore } from '@/stores/appStore';
 import { useChatStore } from '@/stores/chatStore';
-import { MODE_CONFIG, type AppMode } from '@/types';
 import clsx from 'clsx';
 
 export default function Sidebar() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const {
-    currentMode, setMode, sidebarCollapsed, toggleSidebar,
+    roles, currentRoleId, setCurrentRoleId,
+    sidebarCollapsed, toggleSidebar,
     activeView, setActiveView, toggleSettings,
   } = useAppStore();
 
@@ -20,6 +20,10 @@ export default function Sidebar() {
     conversations, activeConversationId, createConversation,
     setActiveConversation, renameConversation, deleteConversation,
   } = useChatStore();
+
+  /** 根据 role id 查找图标，找不到时回退到 💬 */
+  const getRoleIcon = (roleId: string) =>
+    roles.find((r) => r.id === roleId)?.icon ?? '💬';
 
   const startRename = (id: string, title: string) => {
     setEditingId(id);
@@ -40,20 +44,20 @@ export default function Sidebar() {
   /** 新建对话：同时切换回聊天视图 */
   const handleNewChat = () => {
     setActiveView('chat');
-    const id = createConversation(currentMode);
+    const id = createConversation(currentRoleId);
     if (!sidebarCollapsed) {
       startRename(id, '新对话');
     }
   };
 
-  /** 切换模式：同时切换回聊天视图 */
-  const handleSetMode = (mode: AppMode) => {
-    setMode(mode);
+  /** 切换角色：同时切换回聊天视图 */
+  const handleSetRole = (roleId: string) => {
+    setCurrentRoleId(roleId);
     setActiveView('chat');
-    const firstMatchingConversation = conversations.find((conversation) => conversation.mode === mode);
-    if (firstMatchingConversation) {
+    const firstMatch = conversations.find((c) => c.mode === roleId);
+    if (firstMatch) {
       cancelRename();
-      setActiveConversation(firstMatchingConversation.id);
+      setActiveConversation(firstMatch.id);
     }
   };
 
@@ -62,7 +66,7 @@ export default function Sidebar() {
     cancelRename();
     const conversation = conversations.find((item) => item.id === conversationId);
     if (conversation) {
-      setMode(conversation.mode);
+      setCurrentRoleId(conversation.mode);
     }
     setActiveView('chat');
     setActiveConversation(conversationId);
@@ -141,11 +145,11 @@ export default function Sidebar() {
                 onClick={() => handleSelectConversation(conv.id)}
                 className="flex min-h-[44px] w-full items-center justify-center text-left"
               >
-                <span>{MODE_CONFIG[conv.mode].icon}</span>
+                <span>{getRoleIcon(conv.mode)}</span>
               </button>
             ) : (
               <div className="flex items-center gap-2 min-w-0 px-3 py-2.5">
-                <span className="flex-shrink-0">{MODE_CONFIG[conv.mode].icon}</span>
+                <span className="flex-shrink-0">{getRoleIcon(conv.mode)}</span>
 
                 {editingId === conv.id ? (
                   <div className="flex items-center gap-1 flex-1 min-w-0">
@@ -213,7 +217,7 @@ export default function Sidebar() {
         ))}
       </div>
 
-      {/* 底部：模式切换 + 设置 */}
+      {/* 底部：角色切换 + 设置 */}
       <div className={clsx(
         'border-t border-surface-divider dark:border-dark-divider',
         sidebarCollapsed ? 'p-2 space-y-2' : 'p-3 space-y-2'
@@ -221,20 +225,20 @@ export default function Sidebar() {
         {sidebarCollapsed ? (
           <>
             <div className="flex flex-col gap-1">
-              {(Object.keys(MODE_CONFIG) as AppMode[]).map((mode) => (
+              {roles.map((role) => (
                 <button
-                  key={mode}
-                  onClick={() => handleSetMode(mode)}
+                  key={role.id}
+                  onClick={() => handleSetRole(role.id)}
                   className={clsx(
                   'flex min-h-[40px] w-full items-center justify-center rounded-md border text-sm transition-colors',
-                    currentMode === mode
+                    currentRoleId === role.id
                     ? 'border-primary/20 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
                     : 'border-transparent text-text-secondary hover:border-surface-divider hover:bg-white dark:hover:border-dark-divider dark:hover:bg-dark-card'
                   )}
-                  title={MODE_CONFIG[mode].label}
-                  aria-label={MODE_CONFIG[mode].label}
+                  title={role.name}
+                  aria-label={role.name}
                 >
-                  <span>{MODE_CONFIG[mode].icon}</span>
+                  <span>{role.icon}</span>
                 </button>
               ))}
             </div>
@@ -265,20 +269,20 @@ export default function Sidebar() {
         ) : (
           <>
           <div className="space-y-1">
-            {(Object.keys(MODE_CONFIG) as AppMode[]).map((mode) => (
+            {roles.map((role) => (
               <button
-                key={mode}
-                onClick={() => handleSetMode(mode)}
+                key={role.id}
+                onClick={() => handleSetRole(role.id)}
                 className={clsx(
                   'flex w-full items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors',
-                  currentMode === mode
+                  currentRoleId === role.id
                     ? 'border-primary/20 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
                     : 'border-transparent text-text-secondary hover:border-surface-divider hover:bg-white hover:text-text-primary dark:hover:border-dark-divider dark:hover:bg-dark-card dark:hover:text-text-dark-primary'
                 )}
-                title={MODE_CONFIG[mode].label}
+                title={role.name}
               >
-                <span>{MODE_CONFIG[mode].icon}</span>
-                <span>{MODE_CONFIG[mode].label}</span>
+                <span>{role.icon}</span>
+                <span>{role.name}</span>
               </button>
             ))}
           </div>

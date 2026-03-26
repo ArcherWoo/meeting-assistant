@@ -9,19 +9,8 @@ import {
   resetSystemPrompt,
   updateSystemPrompt,
 } from '@/services/api';
-import type { AppMode, SystemPromptMap, SystemPromptPreset } from '@/types';
-
-const MODES: Array<{ key: AppMode; label: string; description: string }> = [
-  { key: 'copilot', label: 'Copilot', description: '日常问答、分析、总结时使用。' },
-  { key: 'builder', label: 'Skill Builder', description: '设计 Skill、流程和提示词时使用。' },
-  { key: 'agent', label: 'Agent', description: '需要分步执行、透明反馈时使用。' },
-];
-
-const emptyPrompts = (): SystemPromptMap => ({
-  copilot: '',
-  builder: '',
-  agent: '',
-});
+import { useAppStore } from '@/stores/appStore';
+import type { SystemPromptMap, SystemPromptPreset } from '@/types';
 
 function formatTime(value: string): string {
   if (!value) return '';
@@ -36,24 +25,32 @@ function formatTime(value: string): string {
 }
 
 export default function PromptManager() {
-  const [prompts, setPrompts] = useState<SystemPromptMap>(emptyPrompts());
+  const { roles } = useAppStore();
+  const [prompts, setPrompts] = useState<SystemPromptMap>({});
   const [presets, setPresets] = useState<SystemPromptPreset[]>([]);
-  const [presetNames, setPresetNames] = useState<Record<AppMode, string>>({
-    copilot: '',
-    builder: '',
-    agent: '',
-  });
-  const [collapsedModes, setCollapsedModes] = useState<Record<AppMode, boolean>>({
-    copilot: false,
-    builder: true,
-    agent: true,
-  });
+  const [presetNames, setPresetNames] = useState<Record<string, string>>({});
+  const [collapsedModes, setCollapsedModes] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
-  const [busyModes, setBusyModes] = useState<Partial<Record<AppMode, string>>>({});
+  const [busyModes, setBusyModes] = useState<Record<string, string>>({});
   const [presetBusyId, setPresetBusyId] = useState<string | null>(null);
-  const [modeNotice, setModeNotice] = useState<Partial<Record<AppMode, { ok: boolean; text: string }>>>({});
-  const [presetNotice, setPresetNotice] = useState<Partial<Record<AppMode, { ok: boolean; text: string }>>>({});
+  const [modeNotice, setModeNotice] = useState<Record<string, { ok: boolean; text: string } | undefined>>({});
+  const [presetNotice, setPresetNotice] = useState<Record<string, { ok: boolean; text: string } | undefined>>({});
   const [error, setError] = useState('');
+
+  // 当角色列表就绪时，初始化折叠状态和预设名称（仅做第一次初始化）
+  useEffect(() => {
+    if (roles.length === 0) return;
+    setCollapsedModes((prev) => {
+      const next = { ...prev };
+      roles.forEach((r, i) => { if (!(r.id in next)) next[r.id] = i !== 0; });
+      return next;
+    });
+    setPresetNames((prev) => {
+      const next = { ...prev };
+      roles.forEach((r) => { if (!(r.id in next)) next[r.id] = ''; });
+      return next;
+    });
+  }, [roles]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -77,67 +74,66 @@ export default function PromptManager() {
   }, [loadData]);
 
   const groupedPresets = useMemo(
-    () =>
-      Object.fromEntries(
-        MODES.map((mode) => [mode.key, presets.filter((preset) => preset.mode === mode.key)]),
-      ) as Record<AppMode, SystemPromptPreset[]>,
-    [presets],
+    () => Object.fromEntries(
+      roles.map((role) => [role.id, presets.filter((preset) => preset.mode === role.id)])
+    ) as Record<string, SystemPromptPreset[]>,
+    [roles, presets],
   );
 
   const promptCount = useMemo(
-    () => MODES.reduce((total, mode) => total + prompts[mode.key].trim().length, 0),
+    () => Object.values(prompts).reduce((total, text) => total + (text?.trim().length ?? 0), 0),
     [prompts],
   );
 
-  const updatePrompt = (mode: AppMode, value: string) => {
-    setPrompts((current) => ({ ...current, [mode]: value }));
-    setModeNotice((current) => ({ ...current, [mode]: undefined }));
+  const updatePrompt = (roleId: string, value: string) => {
+    setPrompts((current) => ({ ...current, [roleId]: value }));
+    setModeNotice((current) => ({ ...current, [roleId]: undefined }));
   };
 
-  const togglePresetPanel = (mode: AppMode) => {
-    setCollapsedModes((current) => ({ ...current, [mode]: !current[mode] }));
+  const togglePresetPanel = (roleId: string) => {
+    setCollapsedModes((current) => ({ ...current, [roleId]: !current[roleId] }));
   };
 
-  const saveModePrompt = async (mode: AppMode) => {
-    setBusyModes((current) => ({ ...current, [mode]: 'save' }));
-    setModeNotice((current) => ({ ...current, [mode]: undefined }));
+  const saveModePrompt = async (roleId: string) => {
+    setBusyModes((current) => ({ ...current, [roleId]: 'save' }));
+    setModeNotice((current) => ({ ...current, [roleId]: undefined }));
     try {
-      const result = await updateSystemPrompt(mode, prompts[mode]);
-      setPrompts((current) => ({ ...current, [mode]: result.prompt }));
-      setModeNotice((current) => ({ ...current, [mode]: { ok: true, text: '已保存' } }));
+      const result = await updateSystemPrompt(roleId, prompts[roleId] ?? '');
+      setPrompts((current) => ({ ...current, [roleId]: result.prompt }));
+      setModeNotice((current) => ({ ...current, [roleId]: { ok: true, text: '已保存' } }));
     } catch (err) {
-      setModeNotice((current) => ({ ...current, [mode]: { ok: false, text: (err as Error).message || '保存失败' } }));
+      setModeNotice((current) => ({ ...current, [roleId]: { ok: false, text: (err as Error).message || '保存失败' } }));
     } finally {
-      setBusyModes((current) => ({ ...current, [mode]: '' }));
+      setBusyModes((current) => ({ ...current, [roleId]: '' }));
     }
   };
 
-  const restoreDefault = async (mode: AppMode) => {
-    setBusyModes((current) => ({ ...current, [mode]: 'reset' }));
-    setModeNotice((current) => ({ ...current, [mode]: undefined }));
+  const restoreDefault = async (roleId: string) => {
+    setBusyModes((current) => ({ ...current, [roleId]: 'reset' }));
+    setModeNotice((current) => ({ ...current, [roleId]: undefined }));
     try {
-      const result = await resetSystemPrompt(mode);
-      setPrompts((current) => ({ ...current, [mode]: result.prompt }));
-      setModeNotice((current) => ({ ...current, [mode]: { ok: true, text: '已恢复默认' } }));
+      const result = await resetSystemPrompt(roleId);
+      setPrompts((current) => ({ ...current, [roleId]: result.prompt }));
+      setModeNotice((current) => ({ ...current, [roleId]: { ok: true, text: '已恢复默认' } }));
     } catch (err) {
-      setModeNotice((current) => ({ ...current, [mode]: { ok: false, text: (err as Error).message || '恢复失败' } }));
+      setModeNotice((current) => ({ ...current, [roleId]: { ok: false, text: (err as Error).message || '恢复失败' } }));
     } finally {
-      setBusyModes((current) => ({ ...current, [mode]: '' }));
+      setBusyModes((current) => ({ ...current, [roleId]: '' }));
     }
   };
 
-  const savePreset = async (mode: AppMode) => {
-    setPresetNotice((current) => ({ ...current, [mode]: undefined }));
-    setBusyModes((current) => ({ ...current, [mode]: 'preset' }));
+  const savePreset = async (roleId: string) => {
+    setPresetNotice((current) => ({ ...current, [roleId]: undefined }));
+    setBusyModes((current) => ({ ...current, [roleId]: 'preset' }));
     try {
-      const result = await createSystemPromptPreset(presetNames[mode], mode, prompts[mode]);
-      setPresetNames((current) => ({ ...current, [mode]: '' }));
+      const result = await createSystemPromptPreset(presetNames[roleId] ?? '', roleId, prompts[roleId] ?? '');
+      setPresetNames((current) => ({ ...current, [roleId]: '' }));
       setPresets((current) => [result.preset, ...current]);
-      setPresetNotice((current) => ({ ...current, [mode]: { ok: true, text: result.message } }));
+      setPresetNotice((current) => ({ ...current, [roleId]: { ok: true, text: result.message } }));
     } catch (err) {
-      setPresetNotice((current) => ({ ...current, [mode]: { ok: false, text: (err as Error).message || '保存预设失败' } }));
+      setPresetNotice((current) => ({ ...current, [roleId]: { ok: false, text: (err as Error).message || '保存预设失败' } }));
     } finally {
-      setBusyModes((current) => ({ ...current, [mode]: '' }));
+      setBusyModes((current) => ({ ...current, [roleId]: '' }));
     }
   };
 
@@ -172,12 +168,8 @@ export default function PromptManager() {
     }
   };
 
-  if (loading) {
-    return <div className="win-panel px-4 py-6 text-sm text-text-secondary">正在加载 System Prompts...</div>;
-  }
-
   return (
-    <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_340px]">
+    <div className={clsx('grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_340px]', loading && 'opacity-50 pointer-events-none')}>
       <section className="space-y-4">
         <div className="win-panel space-y-4 p-4">
           <div className="flex items-center justify-between gap-3">
@@ -194,42 +186,42 @@ export default function PromptManager() {
           )}
 
           <div className="space-y-4">
-            {MODES.map((mode) => (
-              <div key={mode.key} className="rounded-lg border border-surface-divider bg-white px-4 py-4 shadow-sm dark:border-dark-divider dark:bg-dark-card">
+            {roles.map((role) => (
+              <div key={role.id} className="rounded-lg border border-surface-divider bg-white px-4 py-4 shadow-sm dark:border-dark-divider dark:bg-dark-card">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <h5 className="text-sm font-medium">{mode.label}</h5>
-                    <p className="mt-1 text-xs text-text-secondary">{mode.description}</p>
+                    <h5 className="text-sm font-medium">{role.icon} {role.name}</h5>
+                    {role.description && <p className="mt-1 text-xs text-text-secondary">{role.description}</p>}
                   </div>
                   <div className="flex items-center gap-2">
                     <button
-                      onClick={() => void saveModePrompt(mode.key)}
-                      disabled={Boolean(busyModes[mode.key])}
+                      onClick={() => void saveModePrompt(role.id)}
+                      disabled={Boolean(busyModes[role.id])}
                       className="win-button-primary h-8 px-3 text-xs"
                     >
-                      {busyModes[mode.key] === 'save' ? '保存中...' : '保存'}
+                      {busyModes[role.id] === 'save' ? '保存中...' : '保存'}
                     </button>
                     <button
-                      onClick={() => void restoreDefault(mode.key)}
-                      disabled={Boolean(busyModes[mode.key])}
+                      onClick={() => void restoreDefault(role.id)}
+                      disabled={Boolean(busyModes[role.id])}
                       className="win-button h-8 px-3 text-xs"
                     >
-                      {busyModes[mode.key] === 'reset' ? '恢复中...' : '恢复默认'}
+                      {busyModes[role.id] === 'reset' ? '恢复中...' : '恢复默认'}
                     </button>
                   </div>
                 </div>
 
                 <textarea
-                  value={prompts[mode.key]}
-                  onChange={(event) => updatePrompt(mode.key, event.target.value)}
+                  value={prompts[role.id] ?? ''}
+                  onChange={(event) => updatePrompt(role.id, event.target.value)}
                   rows={7}
                   className="win-input mt-3 resize-y text-sm leading-6"
-                  placeholder={`填写 ${mode.label} 的系统提示词`}
+                  placeholder={`填写 ${role.name} 的系统提示词`}
                 />
 
-                {modeNotice[mode.key] && (
-                  <p className={clsx('mt-2 text-xs', modeNotice[mode.key]?.ok ? 'text-green-600 dark:text-green-400' : 'text-red-500')}>
-                    {modeNotice[mode.key]?.text}
+                {modeNotice[role.id] && (
+                  <p className={clsx('mt-2 text-xs', modeNotice[role.id]?.ok ? 'text-green-600 dark:text-green-400' : 'text-red-500')}>
+                    {modeNotice[role.id]?.text}
                   </p>
                 )}
               </div>
@@ -239,63 +231,63 @@ export default function PromptManager() {
       </section>
 
       <section className="space-y-4">
-        {MODES.map((mode) => (
-          <div key={mode.key} className="win-panel space-y-4 p-4">
+        {roles.map((role) => (
+          <div key={role.id} className="win-panel space-y-4 p-4">
             <button
               type="button"
-              onClick={() => togglePresetPanel(mode.key)}
+              onClick={() => togglePresetPanel(role.id)}
               className="flex w-full items-center justify-between gap-3 text-left"
             >
               <div>
-                <h4 className="text-sm font-medium">{mode.label} 预设</h4>
+                <h4 className="text-sm font-medium">{role.icon} {role.name} 预设</h4>
               </div>
               <div className="flex items-center gap-2">
                 <span className="win-badge border-surface-divider bg-surface px-2 py-1 text-[10px] text-text-secondary dark:border-dark-divider dark:bg-dark-sidebar dark:text-text-dark-secondary">
-                  {groupedPresets[mode.key].length}
+                  {(groupedPresets[role.id] ?? []).length}
                 </span>
                 <span className="text-xs text-text-secondary">
-                  {collapsedModes[mode.key] ? '展开' : '收起'}
+                  {collapsedModes[role.id] ? '展开' : '收起'}
                 </span>
               </div>
             </button>
 
-            {!collapsedModes[mode.key] && (
+            {!collapsedModes[role.id] && (
               <>
-                {presetNotice[mode.key] && (
+                {presetNotice[role.id] && (
                   <div className={clsx(
                     'rounded-lg px-3 py-3 text-xs',
-                    presetNotice[mode.key]?.ok
+                    presetNotice[role.id]?.ok
                       ? 'border border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-900/20 dark:text-emerald-300'
                       : 'border border-red-200 bg-red-50 text-red-600 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-300'
                   )}>
-                    {presetNotice[mode.key]?.text}
+                    {presetNotice[role.id]?.text}
                   </div>
                 )}
 
                 <div className="space-y-2">
                   <input
                     type="text"
-                    value={presetNames[mode.key]}
-                    onChange={(event) => setPresetNames((current) => ({ ...current, [mode.key]: event.target.value }))}
-                    placeholder={`给 ${mode.label} 这一项起个名字`}
+                    value={presetNames[role.id] ?? ''}
+                    onChange={(event) => setPresetNames((current) => ({ ...current, [role.id]: event.target.value }))}
+                    placeholder={`给 ${role.name} 这一项起个名字`}
                     className="win-input text-sm"
                   />
                   <button
-                    onClick={() => void savePreset(mode.key)}
-                    disabled={Boolean(busyModes[mode.key])}
+                    onClick={() => void savePreset(role.id)}
+                    disabled={Boolean(busyModes[role.id])}
                     className="win-button-primary h-8 w-full text-xs"
                   >
-                    {busyModes[mode.key] === 'preset' ? '保存中...' : '保存当前为预设'}
+                    {busyModes[role.id] === 'preset' ? '保存中...' : '保存当前为预设'}
                   </button>
                 </div>
 
                 <div className="space-y-2 border-t border-surface-divider pt-4 dark:border-dark-divider">
-                  {groupedPresets[mode.key].length === 0 ? (
+                  {(groupedPresets[role.id] ?? []).length === 0 ? (
                     <p className="rounded-lg border border-dashed border-surface-divider px-3 py-4 text-xs text-text-secondary dark:border-dark-divider">
                       还没有保存过预设。
                     </p>
                   ) : (
-                    groupedPresets[mode.key].map((preset) => (
+                    (groupedPresets[role.id] ?? []).map((preset) => (
                       <div key={preset.id} className="rounded-lg border border-surface-divider bg-white px-3 py-3 shadow-sm dark:border-dark-divider dark:bg-dark-card">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0 flex-1">

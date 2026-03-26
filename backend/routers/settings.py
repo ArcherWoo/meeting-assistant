@@ -1,10 +1,14 @@
 """
 设置路由
-GET  /api/settings/system-prompt/{mode}      - 获取指定模式的 System Prompt
-PUT  /api/settings/system-prompt/{mode}      - 保存指定模式的 System Prompt
-DELETE /api/settings/system-prompt/{mode}    - 重置指定模式的 System Prompt
-GET  /api/settings/system-prompts            - 批量获取三种模式的 System Prompt
-PUT  /api/settings/system-prompts            - 批量保存三种模式的 System Prompt
+GET  /api/settings/roles                     - 获取角色列表
+POST /api/settings/roles                     - 创建角色
+PUT  /api/settings/roles/{id}               - 更新角色
+DELETE /api/settings/roles/{id}             - 删除角色
+GET  /api/settings/system-prompt/{mode}      - 获取指定角色的 System Prompt
+PUT  /api/settings/system-prompt/{mode}      - 保存指定角色的 System Prompt
+DELETE /api/settings/system-prompt/{mode}    - 重置指定角色的 System Prompt
+GET  /api/settings/system-prompts            - 批量获取所有角色的 System Prompt
+PUT  /api/settings/system-prompts            - 批量保存角色的 System Prompt
 GET  /api/settings/system-prompt-presets     - 获取已保存的 System Prompt 预设
 POST /api/settings/system-prompt-presets     - 保存一个 System Prompt 预设
 DELETE /api/settings/system-prompt-presets/{id} - 删除一个 System Prompt 预设
@@ -12,9 +16,9 @@ GET  /api/settings/prompt-templates          - 获取提示词模板列表
 POST /api/settings/prompt-templates          - 创建提示词模板
 PUT  /api/settings/prompt-templates/{id}     - 更新提示词模板
 DELETE /api/settings/prompt-templates/{id}   - 删除提示词模板
-GET  /api/settings/prompt-config/{mode}      - 获取指定模式的模板挂载配置
-PUT  /api/settings/prompt-config/{mode}      - 保存指定模式的模板挂载配置
-DELETE /api/settings/prompt-config/{mode}    - 重置指定模式的模板挂载配置
+GET  /api/settings/prompt-config/{mode}      - 获取指定角色的模板挂载配置
+PUT  /api/settings/prompt-config/{mode}      - 保存指定角色的模板挂载配置
+DELETE /api/settings/prompt-config/{mode}    - 重置指定角色的模板挂载配置
 GET  /api/settings/embedding                 - 获取 Embedding API 配置
 PUT  /api/settings/embedding                 - 保存 Embedding API 配置
 DELETE /api/settings/embedding               - 清除 Embedding API 配置
@@ -29,16 +33,31 @@ from pydantic import BaseModel, Field
 
 from services.prompt_template_service import (
     DEFAULT_SYSTEM_PROMPTS,
-    VALID_PROMPT_MODES,
-    VALID_PROMPT_SCOPES,
     prompt_template_service,
 )
 from services.storage import storage, utc_now_iso
 
 router = APIRouter()
 
-VALID_MODES = VALID_PROMPT_MODES
 _SYSTEM_PROMPT_PRESETS_KEY = "system_prompt_presets"
+_LEGACY_MODES = {"copilot", "builder", "agent"}
+
+
+class RoleCreateRequest(BaseModel):
+    name: str
+    icon: str = "💬"
+    description: str = ""
+    system_prompt: str = ""
+    capabilities: list[str] = Field(default_factory=list)
+
+
+class RoleUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    icon: Optional[str] = None
+    description: Optional[str] = None
+    system_prompt: Optional[str] = None
+    capabilities: Optional[list[str]] = None
+    sort_order: Optional[int] = None
 
 
 class SystemPromptRequest(BaseModel):
@@ -93,16 +112,29 @@ def _settings_key(mode: str) -> str:
 
 
 def _ensure_mode(mode: str) -> str:
+    """接受任意非空字符串作为角色 ID。"""
     normalized = (mode or "").strip()
-    if normalized not in VALID_MODES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的模式：{mode}，可选值：{', '.join(sorted(VALID_MODES))}",
-        )
+    if not normalized:
+        raise HTTPException(status_code=400, detail="角色 ID 不能为空")
     return normalized
 
 
-def _default_prompt(mode: str) -> str:
+def _normalize_role_row(row: dict) -> dict:
+    """将数据库角色行标准化：解析 capabilities JSON。"""
+    caps = row.get("capabilities") or "[]"
+    if isinstance(caps, str):
+        try:
+            caps = json.loads(caps)
+        except json.JSONDecodeError:
+            caps = []
+    return {**row, "capabilities": caps}
+
+
+async def _role_default_prompt(mode: str) -> str:
+    """从角色表或内置默认值获取角色的默认 System Prompt。"""
+    role = await storage.get_role(mode)
+    if role and role.get("system_prompt"):
+        return role["system_prompt"]
     return DEFAULT_SYSTEM_PROMPTS.get(mode, "")
 
 
@@ -111,17 +143,20 @@ async def _get_prompt(mode: str) -> tuple[str, bool]:
     value = await storage.get_setting(_settings_key(normalized_mode), default="")
     if value:
         return value, True
-    return _default_prompt(normalized_mode), False
+    return await _role_default_prompt(normalized_mode), False
 
 
 async def _get_prompt_bundle() -> dict:
+    """获取所有角色的 System Prompt（自定义覆盖 + 默认值）。"""
+    roles = await storage.list_roles()
     prompts: dict[str, str] = {}
     defaults: dict[str, str] = {}
     custom_modes: list[str] = []
-    for mode in sorted(VALID_MODES):
+    for role in roles:
+        mode = role["id"]
         prompt, is_custom = await _get_prompt(mode)
         prompts[mode] = prompt
-        defaults[mode] = _default_prompt(mode)
+        defaults[mode] = role.get("system_prompt") or DEFAULT_SYSTEM_PROMPTS.get(mode, "")
         if is_custom:
             custom_modes.append(mode)
     return {
@@ -129,16 +164,6 @@ async def _get_prompt_bundle() -> dict:
         "defaults": defaults,
         "custom_modes": custom_modes,
     }
-
-
-def _normalize_prompt_payload(prompts: dict[str, str]) -> dict[str, str]:
-    normalized: dict[str, str] = {}
-    for mode in sorted(VALID_MODES):
-        value = str(prompts.get(mode, "") or "").strip()
-        if not value:
-            raise HTTPException(status_code=400, detail=f"{mode} 模式的 System Prompt 不能为空")
-        normalized[mode] = value
-    return normalized
 
 
 async def _load_system_prompt_presets() -> list[dict]:
@@ -163,7 +188,7 @@ async def _load_system_prompt_presets() -> list[dict]:
 
         mode = str(item.get("mode") or "").strip()
         prompt = str(item.get("prompt") or "").strip()
-        if mode in VALID_MODES and prompt:
+        if mode and prompt:
             presets.append({
                 "id": preset_id,
                 "name": name,
@@ -174,11 +199,12 @@ async def _load_system_prompt_presets() -> list[dict]:
             })
             continue
 
-        prompts = item.get("prompts") if isinstance(item.get("prompts"), dict) else {}
-        if prompts:
+        # 迁移旧格式（prompts 字典）
+        legacy_prompts = item.get("prompts") if isinstance(item.get("prompts"), dict) else {}
+        if legacy_prompts:
             needs_migration = True
-            for legacy_mode in sorted(VALID_MODES):
-                legacy_prompt = str(prompts.get(legacy_mode) or "").strip()
+            for legacy_mode in sorted(_LEGACY_MODES):
+                legacy_prompt = str(legacy_prompts.get(legacy_mode) or "").strip()
                 if not legacy_prompt:
                     continue
                 presets.append({
@@ -201,6 +227,67 @@ async def _save_system_prompt_presets(presets: list[dict]) -> None:
         _SYSTEM_PROMPT_PRESETS_KEY,
         json.dumps(presets, ensure_ascii=False),
     )
+
+
+# ===== Role CRUD =====
+
+@router.get("/settings/roles")
+async def list_roles() -> dict:
+    rows = await storage.list_roles()
+    return {"roles": [_normalize_role_row(r) for r in rows]}
+
+
+@router.post("/settings/roles")
+async def create_role(request: RoleCreateRequest) -> dict:
+    name = request.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="角色名称不能为空")
+    role = await storage.create_role(
+        name=name,
+        icon=request.icon.strip() or "💬",
+        description=request.description.strip(),
+        system_prompt=request.system_prompt.strip(),
+        capabilities=request.capabilities,
+    )
+    return {"role": _normalize_role_row(role), "message": f"角色"{name}"已创建"}
+
+
+@router.put("/settings/roles/{role_id}")
+async def update_role(role_id: str, request: RoleUpdateRequest) -> dict:
+    existing = await storage.get_role(role_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="角色不存在")
+
+    updates: dict = {}
+    if request.name is not None:
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="角色名称不能为空")
+        updates["name"] = name
+    if request.icon is not None:
+        updates["icon"] = request.icon.strip() or "💬"
+    if request.description is not None:
+        updates["description"] = request.description.strip()
+    if request.system_prompt is not None:
+        updates["system_prompt"] = request.system_prompt.strip()
+    if request.capabilities is not None:
+        updates["capabilities"] = request.capabilities
+    if request.sort_order is not None:
+        updates["sort_order"] = request.sort_order
+
+    updated = await storage.update_role(role_id, **updates)
+    return {"role": _normalize_role_row(updated or existing), "message": "角色已更新"}
+
+
+@router.delete("/settings/roles/{role_id}")
+async def delete_role(role_id: str) -> dict:
+    try:
+        deleted = await storage.delete_role(role_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="角色不存在")
+    return {"id": role_id, "message": "角色已删除"}
 
 
 @router.get("/settings/system-prompt/{mode}")
@@ -237,7 +324,7 @@ async def update_system_prompt(mode: str, request: SystemPromptRequest) -> dict:
 async def reset_system_prompt(mode: str) -> dict:
     normalized_mode = _ensure_mode(mode)
     await storage.set_setting(_settings_key(normalized_mode), "")
-    prompt = _default_prompt(normalized_mode)
+    prompt = await _role_default_prompt(normalized_mode)
     return {
         "mode": normalized_mode,
         "prompt": prompt,
@@ -253,9 +340,10 @@ async def get_system_prompts() -> dict:
 
 @router.put("/settings/system-prompts")
 async def update_system_prompts(request: SystemPromptBundleRequest) -> dict:
-    normalized_prompts = _normalize_prompt_payload(request.prompts)
-    for mode, prompt in normalized_prompts.items():
-        await storage.set_setting(_settings_key(mode), prompt)
+    for mode, prompt in request.prompts.items():
+        normalized_mode = (mode or "").strip()
+        if normalized_mode:
+            await storage.set_setting(_settings_key(normalized_mode), (prompt or "").strip())
     bundle = await _get_prompt_bundle()
     return {
         **bundle,
@@ -309,16 +397,8 @@ async def delete_system_prompt_preset(preset_id: str) -> dict:
 
 @router.get("/settings/prompt-templates")
 async def list_prompt_templates(scope: Optional[str] = None) -> dict:
-    normalized_scope = None
-    if scope is not None:
-        normalized_scope = scope.strip()
-        if normalized_scope not in VALID_PROMPT_SCOPES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"不支持的作用域：{scope}，可选值：{', '.join(sorted(VALID_PROMPT_SCOPES))}",
-            )
-
-    templates = await prompt_template_service.list_templates(normalized_scope if normalized_scope and normalized_scope != "global" else normalized_scope)
+    normalized_scope = scope.strip() if scope else None
+    templates = await prompt_template_service.list_templates(normalized_scope)
     if normalized_scope == "global":
         templates = [template for template in templates if template["scope"] == "global"]
     return {"templates": templates, "total": len(templates)}
@@ -388,7 +468,7 @@ async def get_prompt_config(mode: str) -> dict:
     normalized_mode = _ensure_mode(mode)
     base_prompt = await storage.get_setting(_settings_key(normalized_mode), default="")
     if not base_prompt:
-        base_prompt = DEFAULT_SYSTEM_PROMPTS.get(normalized_mode, "")
+        base_prompt = await _role_default_prompt(normalized_mode)
     return await prompt_template_service.resolve_mode_prompt(normalized_mode, base_prompt)
 
 
@@ -407,7 +487,7 @@ async def update_prompt_config(mode: str, request: PromptConfigRequest) -> dict:
 
     base_prompt = await storage.get_setting(_settings_key(normalized_mode), default="")
     if not base_prompt:
-        base_prompt = DEFAULT_SYSTEM_PROMPTS.get(normalized_mode, "")
+        base_prompt = await _role_default_prompt(normalized_mode)
 
     resolved = await prompt_template_service.resolve_mode_prompt(normalized_mode, base_prompt)
     return {
@@ -439,7 +519,7 @@ async def reset_prompt_config(mode: str) -> dict:
     await prompt_template_service.reset_mode_config(normalized_mode)
     base_prompt = await storage.get_setting(_settings_key(normalized_mode), default="")
     if not base_prompt:
-        base_prompt = DEFAULT_SYSTEM_PROMPTS.get(normalized_mode, "")
+        base_prompt = await _role_default_prompt(normalized_mode)
 
     resolved = await prompt_template_service.resolve_mode_prompt(normalized_mode, base_prompt)
     return {

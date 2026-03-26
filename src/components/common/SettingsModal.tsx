@@ -324,12 +324,10 @@ export default function SettingsModal() {
           </div>
         )}
 
-        {/* System Prompts Tab */}
-        {activeTab === 'prompts' && (
-          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5 bg-[#F7F8FA] dark:bg-dark">
-            <PromptManager />
-          </div>
-        )}
+        {/* System Prompts Tab — 保持常驻挂载，避免切换 Tab 时重新 fetch */}
+        <div className={clsx('flex-1 overflow-y-auto px-4 py-4 space-y-5 bg-[#F7F8FA] dark:bg-dark', activeTab !== 'prompts' && 'hidden')}>
+          <PromptManager />
+        </div>
 
         {/* 模型管理 Tab */}
         {activeTab === 'models' && <div className="flex flex-col flex-1 min-h-0">

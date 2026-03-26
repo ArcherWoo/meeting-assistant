@@ -7,20 +7,22 @@ import { useState, useRef, useEffect, useCallback, useMemo, type ChangeEvent } f
 import { useAppStore } from '@/stores/appStore';
 import { useChatStore, DEFAULT_CONVERSATION_TITLE } from '@/stores/chatStore';
 import { streamChat, extractFilesText, generateAutoTitle } from '@/services/api';
-import { MODE_CONFIG, type Message, type SkillSuggestionEvent } from '@/types';
+import { type Message, type SkillSuggestionEvent } from '@/types';
 import MessageBubble from './MessageBubble';
 import ChatInput from './ChatInput';
 import AgentExecutionPanel from '../agent/AgentExecutionPanel';
 
 export default function ChatArea() {
   const {
-    currentMode,
+    currentRoleId,
+    roles,
     llmConfigs,
     activeLLMConfigId,
     toggleContextPanel,
     contextPanelVisible,
     backend,
   } = useAppStore();
+  const currentRole = roles.find((r) => r.id === currentRoleId);
   const {
     conversations, activeConversationId, messagesByConversation,
     streamingByConversation, streamingContentByConversation,
@@ -43,11 +45,11 @@ export default function ChatArea() {
 
   const modeConversation = useMemo(() => {
     const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
-    if (activeConversation?.mode === currentMode) {
+    if (activeConversation?.mode === currentRoleId) {
       return activeConversation;
     }
-    return conversations.find((conversation) => conversation.mode === currentMode) ?? null;
-  }, [conversations, activeConversationId, currentMode]);
+    return conversations.find((conversation) => conversation.mode === currentRoleId) ?? null;
+  }, [conversations, activeConversationId, currentRoleId]);
 
   const visibleConversationId = modeConversation?.id ?? null;
   const visibleMessages = visibleConversationId ? (messagesByConversation[visibleConversationId] ?? []) : [];
@@ -80,18 +82,18 @@ export default function ChatArea() {
   /** 发送消息（支持附件上下文） */
   const handleSend = async (content: string, attachmentContext?: string) => {
     // Agent 模式：触发 Skill 匹配 → 执行工作流
-    if (currentMode === 'agent') {
+    if (currentRoleId === 'agent') {
       let convId = visibleConversationId;
-      if (!convId) convId = createConversation(currentMode);
+      if (!convId) convId = createConversation(currentRoleId);
       addMessage({ conversationId: convId, role: 'user', content });
       setAgentQuery(content);
       return;
     }
 
-    // Copilot / Builder 模式：正常 LLM 对话
+    // 正常 LLM 对话
     let convId = visibleConversationId;
     if (!convId) {
-      convId = createConversation(currentMode);
+      convId = createConversation(currentRoleId);
     } else if (activeConversationId !== convId) {
       setActiveConversation(convId);
     }
@@ -201,7 +203,7 @@ export default function ChatArea() {
         delete abortMapRef.current[targetConvId];
       },
       controller.signal,
-      currentMode,
+      currentRoleId,
       content,
       (metadata) => {
         updateMessageMetadata(assistantMsgId, { context: metadata }, targetConvId);
@@ -260,11 +262,11 @@ export default function ChatArea() {
       <div className="win-toolbar h-12 px-4 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
           <div className="flex h-8 w-8 items-center justify-center rounded-md border border-surface-divider dark:border-dark-divider bg-white dark:bg-dark-sidebar text-base shadow-sm">
-            <span>{MODE_CONFIG[currentMode].icon}</span>
+            <span>{currentRole?.icon ?? '💬'}</span>
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2 min-w-0">
-              <span className="text-sm font-semibold truncate">{MODE_CONFIG[currentMode].label}</span>
+              <span className="text-sm font-semibold truncate">{currentRole?.name ?? currentRoleId}</span>
               <span
                 className={backend.connected
                   ? 'win-badge border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300'
@@ -304,7 +306,7 @@ export default function ChatArea() {
               onChange={handleWelcomeFileChange}
             />
             <WelcomeScreen
-              mode={currentMode}
+              mode={currentRoleId}
               onQuickMessage={handleSend}
               onUploadFile={() => welcomeFileRef.current?.click()}
               uploading={welcomeUploading}

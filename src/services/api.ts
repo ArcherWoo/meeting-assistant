@@ -4,12 +4,12 @@
  * 支持流式 SSE 和普通 REST 请求
  */
 import type {
-  LLMConfig, LLMConnectionTestResult, PPTParseResult,
+  Role, LLMConfig, LLMConnectionTestResult, PPTParseResult,
   SkillMeta, SkillMatch,
   KnowhowRule, KnowhowExportData, KnowhowImportResult, KnowhowImportStrategy, KnowledgeStats, IngestResult,
   AgentMatchResult, AgentExecutionEvent,
   ContextMetadata, SkillSuggestionEvent,
-  AppMode, PromptModeConfig, PromptPack, PromptTemplate, PromptScope, SystemPromptMap, SystemPromptPreset,
+  PromptModeConfig, PromptPack, PromptTemplate, PromptScope, SystemPromptMap, SystemPromptPreset,
 } from '@/types';
 
 /** 获取后端 API 基础 URL */
@@ -333,7 +333,7 @@ export async function resetSystemPrompt(
 export async function getSystemPrompts(): Promise<{
   prompts: SystemPromptMap;
   defaults: SystemPromptMap;
-  custom_modes: AppMode[];
+  custom_modes: string[];
 }> {
   const res = await fetch(`${getBaseUrl()}/settings/system-prompts`);
   if (!res.ok) throw new Error('获取 System Prompts 失败');
@@ -342,7 +342,7 @@ export async function getSystemPrompts(): Promise<{
 
 export async function updateSystemPrompts(
   prompts: SystemPromptMap
-): Promise<{ prompts: SystemPromptMap; defaults: SystemPromptMap; custom_modes: AppMode[]; message: string }> {
+): Promise<{ prompts: SystemPromptMap; defaults: SystemPromptMap; custom_modes: string[]; message: string }> {
   const res = await fetch(`${getBaseUrl()}/settings/system-prompts`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -364,7 +364,7 @@ export async function listSystemPromptPresets(): Promise<SystemPromptPreset[]> {
 
 export async function createSystemPromptPreset(
   name: string,
-  mode: AppMode,
+  mode: string,
   prompt: string
 ): Promise<{ preset: SystemPromptPreset; message: string }> {
   const res = await fetch(`${getBaseUrl()}/settings/system-prompt-presets`, {
@@ -485,12 +485,12 @@ export async function resetPromptConfig(
 /** 匹配用户输入到最佳 Skill，返回命中列表（后端返回 {matches: [...], total: N}） */
 export async function applyPromptPack(
   packId: string,
-  payload: { modes: AppMode[]; strategy?: 'append' | 'replace' }
+  payload: { modes: string[]; strategy?: 'append' | 'replace' }
 ): Promise<{
   pack: PromptPack;
   strategy: 'append' | 'replace';
   results: Array<{
-    mode: AppMode;
+    mode: string;
     status: 'applied' | 'skipped';
     applied_template_ids: string[];
     template_ids: string[];
@@ -918,4 +918,65 @@ export async function testEmbeddingConnection(
   });
   if (!res.ok) throw new Error('测试请求失败');
   return res.json();
+}
+
+// ===== Role CRUD =====
+
+/** 获取所有角色列表 */
+export async function listRoles(): Promise<Role[]> {
+  const res = await fetch(`${getBaseUrl()}/settings/roles`);
+  if (!res.ok) throw new Error('获取角色列表失败');
+  const data = await res.json();
+  return data.roles as Role[];
+}
+
+/** 创建新角色 */
+export async function createRole(payload: {
+  name: string;
+  icon?: string;
+  description?: string;
+  system_prompt?: string;
+  capabilities?: string[];
+}): Promise<Role> {
+  const res = await fetch(`${getBaseUrl()}/settings/roles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error('创建角色失败');
+  const data = await res.json();
+  return data.role as Role;
+}
+
+/** 更新角色 */
+export async function updateRole(
+  roleId: string,
+  payload: Partial<{
+    name: string;
+    icon: string;
+    description: string;
+    system_prompt: string;
+    capabilities: string[];
+    sort_order: number;
+  }>
+): Promise<Role> {
+  const res = await fetch(`${getBaseUrl()}/settings/roles/${roleId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error('更新角色失败');
+  const data = await res.json();
+  return data.role as Role;
+}
+
+/** 删除角色 */
+export async function deleteRole(roleId: string): Promise<void> {
+  const res = await fetch(`${getBaseUrl()}/settings/roles/${roleId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || '删除角色失败');
+  }
 }

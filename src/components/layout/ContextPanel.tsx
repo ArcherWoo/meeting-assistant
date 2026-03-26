@@ -10,7 +10,6 @@ import {
   getSkillContent, saveSkill, updateSkill, deleteSkill,
   uploadFiles, listKnowledgeImports, deleteKnowledgeImport,
 } from '@/services/api';
-import { MODE_CONFIG } from '@/types';
 import type { ContextCitation, ContextMetadata, Message, SkillMeta, KnowledgeStats, SkillSuggestionEvent } from '@/types';
 
 /** 已导入文件记录 */
@@ -118,7 +117,8 @@ function getMetadataMessage(messages: Message[]): Message | null {
 }
 
 export default function ContextPanel() {
-  const { toggleContextPanel, currentMode } = useAppStore();
+  const { toggleContextPanel, currentRoleId, roles } = useAppStore();
+  const currentRole = roles.find((r) => r.id === currentRoleId);
   const {
     conversations,
     activeConversationId,
@@ -146,11 +146,11 @@ export default function ContextPanel() {
 
   const modeConversation = useMemo(() => {
     const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
-    if (activeConversation?.mode === currentMode) {
+    if (activeConversation?.mode === currentRoleId) {
       return activeConversation;
     }
-    return conversations.find((conversation) => conversation.mode === currentMode) ?? null;
-  }, [conversations, activeConversationId, currentMode]);
+    return conversations.find((conversation) => conversation.mode === currentRoleId) ?? null;
+  }, [conversations, activeConversationId, currentRoleId]);
 
   const visibleConversationId = modeConversation?.id ?? null;
   const visibleMessages = visibleConversationId ? (messagesByConversation[visibleConversationId] ?? []) : [];
@@ -218,8 +218,8 @@ export default function ContextPanel() {
     }
   };
 
-  // 初始加载 + 模式切换时刷新
-  useEffect(() => { refresh(); }, [currentMode, refresh]);
+  // 初始加载 + 角色切换时刷新
+  useEffect(() => { refresh(); }, [currentRoleId, refresh]);
 
   // 定时轮询刷新（每 10 秒）
   useEffect(() => {
@@ -365,7 +365,7 @@ export default function ContextPanel() {
           <section>
             <h4 className="win-section-title mb-2">当前模式</h4>
             <div className="win-panel-muted px-3 py-3 text-sm font-medium text-primary">
-              {MODE_CONFIG[currentMode].icon} {MODE_CONFIG[currentMode].label} 模式
+              {currentRole?.icon ?? '💬'} {currentRole?.name ?? currentRoleId} 模式
             </div>
           </section>
 
@@ -583,9 +583,9 @@ export default function ContextPanel() {
               </div>
             ) : (
               <p className="rounded-lg border border-dashed border-surface-divider px-3 py-3 text-[11px] leading-5 text-text-secondary dark:border-dark-divider">
-                {currentMode === 'copilot'
-                  ? '发送一条 Copilot 消息后，这里会展示最近一条回答引用的文件名、位置和摘要。'
-                  : '当前模式通常不会注入引用元数据；切换到 Copilot 并发起对话后，这里会展示最近回答的上下文引用。'}
+                {currentRole?.capabilities?.includes('rag')
+                  ? `发送一条消息后，这里会展示最近一条回答引用的文件名、位置和摘要。`
+                  : '当前角色未启用 RAG；切换到支持 RAG 的角色并发起对话后，这里会展示上下文引用。'}
               </p>
             )}
           </section>

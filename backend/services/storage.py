@@ -154,6 +154,21 @@ CREATE TABLE IF NOT EXISTS ppt_imports (
     imported_at          DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 角色表
+CREATE TABLE IF NOT EXISTS roles (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    icon          TEXT DEFAULT '💬',
+    description   TEXT DEFAULT '',
+    system_prompt TEXT DEFAULT '',
+    capabilities  TEXT DEFAULT '[]',
+    is_builtin    INTEGER DEFAULT 0,
+    sort_order    INTEGER DEFAULT 0,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_roles_sort ON roles(sort_order, created_at);
+
 -- 通用知识片段表（无 embedding 时也可检索）
 CREATE TABLE IF NOT EXISTS knowledge_chunks (
     id          TEXT PRIMARY KEY,
@@ -203,6 +218,8 @@ class StorageService:
         await self._db.commit()
         # 确保默认工作区存在
         await self._ensure_default_workspace()
+        # 确保默认角色存在
+        await self._ensure_default_roles()
 
     async def close(self) -> None:
         """关闭数据库连接"""
@@ -224,6 +241,133 @@ class StorageService:
         row = await self._fetchone("SELECT id FROM workspaces LIMIT 1")
         if not row:
             await self.create_workspace("默认工作区", "系统自动创建的默认工作区", "📋")
+
+    async def _ensure_default_roles(self) -> None:
+        """确保三个内置角色存在（copilot / builder / agent）"""
+        import json as _json
+        defaults = [
+            {
+                "id": "copilot",
+                "name": "Copilot",
+                "icon": "💬",
+                "description": "日常问答、分析、总结",
+                "system_prompt": (
+                    "你是一个专业的会议助手。请根据用户的问题，提供清晰、准确、有帮助的回答。"
+                    "回答时请保持简洁，优先给出结论，再补充细节。"
+                ),
+                "capabilities": _json.dumps(["rag"]),
+                "is_builtin": 1,
+                "sort_order": 0,
+            },
+            {
+                "id": "builder",
+                "name": "Skill Builder",
+                "icon": "🔧",
+                "description": "设计 Skill、流程和提示词",
+                "system_prompt": (
+                    "你是一个 Skill Builder 助手，专门帮助用户创建和优化工作流技能（Skill）。"
+                    "请引导用户描述他们的工作场景和重复性任务，帮助他们将这些任务抽象为可执行的 Skill 模板。"
+                    "生成的 Skill 应使用标准 Markdown 格式，包含描述、触发条件、执行步骤和输出格式。"
+                ),
+                "capabilities": _json.dumps(["skills"]),
+                "is_builtin": 1,
+                "sort_order": 1,
+            },
+            {
+                "id": "agent",
+                "name": "Agent",
+                "icon": "🤖",
+                "description": "分步执行、透明反馈",
+                "system_prompt": (
+                    "你是一个智能 Agent，能够调用各种工具和技能完成复杂任务。"
+                    "请分析用户的需求，选择合适的工具，并逐步执行任务。"
+                    "执行过程中保持透明，让用户了解每一步的进展。"
+                ),
+                "capabilities": _json.dumps(["rag", "skills"]),
+                "is_builtin": 1,
+                "sort_order": 2,
+            },
+        ]
+        for role in defaults:
+            existing = await self._fetchone("SELECT id FROM roles WHERE id=?", (role["id"],))
+            if not existing:
+                now = utc_now_iso()
+                await self.db.execute(
+                    "INSERT INTO roles (id, name, icon, description, system_prompt, capabilities, is_builtin, sort_order, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (role["id"], role["name"], role["icon"], role["description"],
+                     role["system_prompt"], role["capabilities"], role["is_builtin"],
+                     role["sort_order"], now, now),
+                )
+        await self.db.commit()
+
+    # ===== Role CRUD =====
+
+    async def list_roles(self) -> list[dict]:
+        return await self._fetchall("SELECT * FROM roles ORDER BY sort_order ASC, created_at ASC")
+
+    async def get_role(self, role_id: str) -> Optional[dict]:
+        return await self._fetchone("SELECT * FROM roles WHERE id=?", (role_id,))
+
+    async def create_role(
+        self,
+        name: str,
+        icon: str = "💬",
+        description: str = "",
+        system_prompt: str = "",
+        capabilities: Optional[list] = None,
+    ) -> dict:
+        import json as _json
+        rid = gen_id()
+        now = utc_now_iso()
+        caps = _json.dumps(capabilities or [])
+        # 计算排序值（追加到最后）
+        row = await self._fetchone("SELECT MAX(sort_order) AS max_order FROM roles")
+        sort_order = (row["max_order"] or 0) + 1 if row else 1
+        await self.db.execute(
+            "INSERT INTO roles (id, name, icon, description, system_prompt, capabilities, is_builtin, sort_order, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,0,?,?,?)",
+            (rid, name, icon, description, system_prompt, caps, sort_order, now, now),
+        )
+        await self.db.commit()
+        return {
+            "id": rid, "name": name, "icon": icon, "description": description,
+            "system_prompt": system_prompt, "capabilities": capabilities or [],
+            "is_builtin": 0, "sort_order": sort_order,
+            "created_at": now, "updated_at": now,
+        }
+
+    async def update_role(self, role_id: str, **kwargs) -> Optional[dict]:
+        import json as _json
+        allowed = {"name", "icon", "description", "system_prompt", "capabilities", "sort_order"}
+        fields: dict = {}
+        for k, v in kwargs.items():
+            if k not in allowed:
+                continue
+            if k == "capabilities" and isinstance(v, list):
+                fields[k] = _json.dumps(v)
+            else:
+                fields[k] = v
+        if not fields:
+            return await self.get_role(role_id)
+        fields["updated_at"] = utc_now_iso()
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        await self.db.execute(
+            f"UPDATE roles SET {set_clause} WHERE id=?",
+            (*fields.values(), role_id),
+        )
+        await self.db.commit()
+        return await self.get_role(role_id)
+
+    async def delete_role(self, role_id: str) -> bool:
+        row = await self._fetchone("SELECT is_builtin FROM roles WHERE id=?", (role_id,))
+        if not row:
+            return False
+        if row["is_builtin"]:
+            raise ValueError("内置角色不可删除")
+        await self.db.execute("DELETE FROM roles WHERE id=?", (role_id,))
+        await self.db.commit()
+        return True
 
     async def create_workspace(self, name: str, description: str = "", icon: str = "📁") -> dict:
         wid = gen_id()

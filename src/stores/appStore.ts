@@ -1,11 +1,11 @@
 /**
  * 全局应用状态管理 (Zustand)
- * 管理：模式切换、UI 状态、后端连接、多模型配置
+ * 管理：角色切换、UI 状态、后端连接、多模型配置
  */
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { v4 as uuidv4 } from 'uuid';
-import type { AppMode, LLMConfig, LLMProfile, Theme, BackendStatus } from '@/types';
+import type { Role, LLMConfig, LLMProfile, Theme, BackendStatus } from '@/types';
 
 interface PersistedAppState {
   theme?: Theme;
@@ -49,9 +49,14 @@ const normalizeLLMProfiles = (
 const initialLLMConfigs = normalizeLLMProfiles();
 
 interface AppState {
-  // 当前模式
-  currentMode: AppMode;
-  setMode: (mode: AppMode) => void;
+  // 角色系统
+  roles: Role[];
+  currentRoleId: string;
+  setRoles: (roles: Role[]) => void;
+  setCurrentRoleId: (id: string) => void;
+  /** 向后兼容别名 */
+  currentMode: string;
+  setMode: (mode: string) => void;
 
   // 后端连接状态
   backend: BackendStatus;
@@ -84,9 +89,14 @@ interface AppState {
 export const useAppStore = create<AppState>()(
   persist(
     (set) => ({
-      // 默认 Copilot 模式
+      // 角色系统
+      roles: [],
+      currentRoleId: 'copilot',
+      setRoles: (roles) => set({ roles }),
+      setCurrentRoleId: (id) => set({ currentRoleId: id, currentMode: id }),
+      // 向后兼容别名
       currentMode: 'copilot',
-      setMode: (mode) => set({ currentMode: mode }),
+      setMode: (mode) => set({ currentMode: mode, currentRoleId: mode }),
 
       // 后端初始未连接
       backend: { connected: false, port: 0 },
