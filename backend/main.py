@@ -135,7 +135,7 @@ app = create_app()
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=int(os.getenv("MEETING_ASSISTANT_PORT", "5173")))
-    parser.add_argument("--host", type=str, default=os.getenv("MEETING_ASSISTANT_HOST", "127.0.0.1"))
+    parser.add_argument("--host", type=str, default=os.getenv("MEETING_ASSISTANT_HOST", "0.0.0.0"))
     args = parser.parse_args()
 
     uvicorn.run(app, host=args.host, port=args.port)

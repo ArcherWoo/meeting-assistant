@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -44,6 +45,36 @@ def _handle_stop(signum: int, _frame) -> None:
             CHILD_PROCESS.terminate()
         except Exception:  # noqa: BLE001
             pass
+
+
+def _get_local_ip() -> str:
+    """Return the machine's primary LAN IP, falling back to 127.0.0.1."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+
+
+def _print_banner(host: str, port: str) -> None:
+    """Print a high-visibility startup banner with the actual access URL."""
+    GREEN  = "\033[92m"
+    CYAN   = "\033[96m"
+    BOLD   = "\033[1m"
+    RESET  = "\033[0m"
+
+    display_host = _get_local_ip() if host in ("0.0.0.0", "::") else host
+    url = f"http://{display_host}:{port}"
+    border = "=" * 54
+
+    print(f"\n{GREEN}{border}{RESET}")
+    print(f"{BOLD}  Meeting Assistant — Server Runner{RESET}")
+    print(f"{GREEN}{border}{RESET}")
+    print(f"  {CYAN}Server is running at: {BOLD}{url}{RESET}")
+    if host in ("0.0.0.0", "::"):
+        print(f"  Listening on all interfaces ({host}:{port})")
+    print(f"{GREEN}{border}{RESET}\n")
 
 
 def _build_command(env: dict[str, str], env_file: Path) -> list[str]:
@@ -98,6 +129,9 @@ def main() -> int:
         signal.signal(signal.SIGTERM, _handle_stop)
 
     command = _build_command(env, env_file)
+    host = env.get("MEETING_ASSISTANT_HOST", "0.0.0.0")
+    port = env.get("MEETING_ASSISTANT_PORT", "5173")
+    _print_banner(host, port)
     _write_line(runner_log, f"runner started, env={env_file}")
 
     while not SHUTTING_DOWN:
