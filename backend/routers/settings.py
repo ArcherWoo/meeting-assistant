@@ -249,7 +249,7 @@ async def create_role(request: RoleCreateRequest) -> dict:
         system_prompt=request.system_prompt.strip(),
         capabilities=request.capabilities,
     )
-    return {"role": _normalize_role_row(role), "message": f"角色"{name}"已创建"}
+    return {"role": _normalize_role_row(role), "message": f"角色 '{name}' 已创建"}
 
 
 @router.put("/settings/roles/{role_id}")
