@@ -187,11 +187,13 @@ class KnowledgeService:
         await self._delete_vectors_for_file(filename)
 
     async def initialize(self) -> None:
-        """初始化 LanceDB 连接"""
+        """初始化 LanceDB 连接（异步，避免阻塞事件循环）"""
+        import asyncio
         VECTORS_DIR.mkdir(parents=True, exist_ok=True)
         try:
             import lancedb
-            self._lance_db = lancedb.connect(str(VECTORS_DIR))
+            # lancedb.connect 是同步阻塞调用，必须放入线程池以防阻塞事件循环
+            self._lance_db = await asyncio.to_thread(lancedb.connect, str(VECTORS_DIR))
             logger.info(f"LanceDB 已连接: {VECTORS_DIR}")
         except ImportError:
             logger.warning("lancedb 未安装，向量检索功能不可用")
