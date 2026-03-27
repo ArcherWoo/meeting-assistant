@@ -10,11 +10,12 @@ import { useAppStore } from '@/stores/appStore';
 import {
   testLLMConnection,
   getEmbeddingConfig, updateEmbeddingConfig, testEmbeddingConnection,
+  createRole, updateRole, deleteRole, listRoles,
 } from '@/services/api';
-import type { LLMConnectionTestResult, LLMProfile } from '@/types';
+import type { LLMConnectionTestResult, LLMProfile, Role } from '@/types';
 import PromptManager from './PromptManager';
 
-type SettingsTab = 'models' | 'prompts' | 'appearance';
+type SettingsTab = 'models' | 'prompts' | 'roles' | 'appearance';
 
 /** 主题色预设 */
 const ACCENT_COLORS = [
@@ -50,6 +51,10 @@ export default function SettingsModal() {
     setTheme,
     accentColor,
     setAccentColor,
+    roles,
+    setRoles,
+    currentRoleId,
+    setCurrentRoleId,
   } = useAppStore();
   const activeProfile = useMemo(
     () => llmConfigs.find((config) => config.id === activeLLMConfigId) ?? llmConfigs[0],
@@ -67,6 +72,14 @@ export default function SettingsModal() {
     () => Array.from(new Set([...(draft.availableModels ?? []), ...(connectionResult?.available_models ?? [])])),
     [connectionResult?.available_models, draft.availableModels]
   );
+
+  // Roles tab state
+  const [selectedRoleId, setSelectedRoleId] = useState<string>('');
+  const [roleDraft, setRoleDraft] = useState<Partial<Role>>({});
+  const [roleIsNew, setRoleIsNew] = useState(false);
+  const [roleSaving, setRoleSaving] = useState(false);
+  const [roleSaved, setRoleSaved] = useState(false);
+  const [roleError, setRoleError] = useState('');
 
   // Embedding 配置状态
   const [embCfg, setEmbCfg] = useState({ api_url: '', api_key: '', model: 'text-embedding-3-small' });
@@ -110,6 +123,111 @@ export default function SettingsModal() {
       loadEmbeddingConfig();
     }
   }, [settingsOpen, loadEmbeddingConfig]);
+
+  // Auto-select first role when switching to roles tab
+  useEffect(() => {
+    if (activeTab === 'roles' && !roleIsNew && roles.length > 0) {
+      const found = roles.find((r) => r.id === selectedRoleId);
+      if (!found) {
+        setSelectedRoleId(roles[0].id);
+        setRoleDraft({ ...roles[0] });
+      }
+    }
+  }, [activeTab, roles, selectedRoleId, roleIsNew]);
+
+  const handleSelectRole = (role: Role) => {
+    setSelectedRoleId(role.id);
+    setRoleDraft({ ...role });
+    setRoleIsNew(false);
+    setRoleSaved(false);
+    setRoleError('');
+  };
+
+  const handleNewRole = () => {
+    setSelectedRoleId('__new__');
+    setRoleDraft({ name: '', icon: '🤖', description: '', system_prompt: '', capabilities: [] });
+    setRoleIsNew(true);
+    setRoleSaved(false);
+    setRoleError('');
+  };
+
+  const handleSaveRole = async () => {
+    if (!roleDraft.name?.trim()) {
+      setRoleError('角色名称不能为空');
+      return;
+    }
+    setRoleSaving(true);
+    setRoleError('');
+    try {
+      let savedRole: Role;
+      if (roleIsNew) {
+        savedRole = await createRole({
+          name: roleDraft.name.trim(),
+          icon: roleDraft.icon || '🤖',
+          description: roleDraft.description || '',
+          system_prompt: roleDraft.system_prompt || '',
+          capabilities: roleDraft.capabilities || [],
+        });
+      } else {
+        savedRole = await updateRole(selectedRoleId, {
+          name: roleDraft.name.trim(),
+          icon: roleDraft.icon,
+          description: roleDraft.description,
+          system_prompt: roleDraft.system_prompt,
+          capabilities: roleDraft.capabilities,
+        });
+      }
+      const updatedRoles = await listRoles();
+      setRoles(updatedRoles);
+      setSelectedRoleId(savedRole.id);
+      setRoleDraft({ ...savedRole });
+      setRoleIsNew(false);
+      setRoleSaved(true);
+      setTimeout(() => setRoleSaved(false), 2000);
+    } catch (e) {
+      setRoleError((e as Error).message || '保存失败');
+    } finally {
+      setRoleSaving(false);
+    }
+  };
+
+  const handleDeleteRole = async () => {
+    if (roleIsNew) {
+      if (roles.length > 0) handleSelectRole(roles[0]);
+      return;
+    }
+    setRoleSaving(true);
+    setRoleError('');
+    try {
+      await deleteRole(selectedRoleId);
+      const updatedRoles = await listRoles();
+      setRoles(updatedRoles);
+      if (currentRoleId === selectedRoleId && updatedRoles.length > 0) {
+        setCurrentRoleId(updatedRoles[0].id);
+      }
+      if (updatedRoles.length > 0) {
+        setSelectedRoleId(updatedRoles[0].id);
+        setRoleDraft({ ...updatedRoles[0] });
+        setRoleIsNew(false);
+      } else {
+        setSelectedRoleId('');
+        setRoleDraft({});
+      }
+    } catch (e) {
+      setRoleError((e as Error).message || '删除失败');
+    } finally {
+      setRoleSaving(false);
+    }
+  };
+
+  const toggleCapability = (cap: string) => {
+    const caps = roleDraft.capabilities ?? [];
+    setRoleDraft((d) => ({
+      ...d,
+      capabilities: caps.includes(cap) ? caps.filter((c) => c !== cap) : [...caps, cap],
+    }));
+    setRoleSaved(false);
+  };
 
   if (!settingsOpen) return null;
 
@@ -212,6 +330,9 @@ export default function SettingsModal() {
     setTestingConnection(false);
     setConnectionResult(null);
     setConnectionError('');
+    setRoleIsNew(false);
+    setRoleSaved(false);
+    setRoleError('');
     toggleSettings();
   };
 
@@ -251,6 +372,17 @@ export default function SettingsModal() {
                 )}
               >
                 📝 System Prompts
+              </button>
+              <button
+                onClick={() => setActiveTab('roles')}
+                className={clsx(
+                  tabBtnCls,
+                  activeTab === 'roles'
+                    ? tabBtnActiveCls
+                    : tabBtnIdleCls
+                )}
+              >
+                🎭 角色管理
               </button>
               <button
                 onClick={() => setActiveTab('appearance')}
@@ -328,6 +460,157 @@ export default function SettingsModal() {
         <div className={clsx('flex-1 overflow-y-auto px-4 py-4 space-y-5 bg-[#F7F8FA] dark:bg-dark', activeTab !== 'prompts' && 'hidden')}>
           <PromptManager />
         </div>
+
+        {/* 角色管理 Tab */}
+        {activeTab === 'roles' && (
+          <div className="flex flex-col flex-1 min-h-0">
+            <div className="flex flex-1 min-h-0 border-b border-surface-divider dark:border-dark-divider">
+              {/* 左侧：角色列表 */}
+              <div className="w-[200px] flex-shrink-0 border-r border-surface-divider dark:border-dark-divider bg-[#F7F8FA] p-4 space-y-3 overflow-y-auto dark:bg-dark">
+                <div className="flex items-center justify-between gap-2">
+                  <SectionTitle>角色列表</SectionTitle>
+                  <button onClick={handleNewRole} className="win-button-primary h-7 px-2.5 text-xs">
+                    + 新增
+                  </button>
+                </div>
+                <div className="space-y-1">
+                  {roles.map((role) => (
+                    <button
+                      key={role.id}
+                      onClick={() => handleSelectRole(role)}
+                      className={clsx(
+                        'w-full text-left rounded-lg border p-2.5 text-sm transition-colors',
+                        selectedRoleId === role.id && !roleIsNew
+                          ? 'border-primary/30 bg-white dark:bg-dark-card'
+                          : 'border-surface-divider bg-white hover:border-primary/20 dark:border-dark-divider dark:bg-dark-card dark:hover:border-primary/20'
+                      )}
+                    >
+                      <div className="flex items-center justify-between gap-1 min-w-0">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="flex-shrink-0">{role.icon}</span>
+                          <span className="truncate text-xs font-medium">{role.name}</span>
+                        </div>
+                        {role.is_builtin && (
+                          <span className="win-badge flex-shrink-0 text-[9px] border-blue-200 bg-blue-50 text-blue-600 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-400">
+                            内置
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  ))}
+                  {roleIsNew && (
+                    <button
+                      className="w-full text-left rounded-lg border border-primary/30 bg-white p-2.5 text-sm dark:bg-dark-card"
+                    >
+                      <div className="flex items-center justify-between gap-1 min-w-0">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span>{roleDraft.icon || '🤖'}</span>
+                          <span className="truncate text-xs font-medium">{roleDraft.name || '新角色'}</span>
+                        </div>
+                        <span className="win-badge flex-shrink-0 text-[9px] border-amber-200 bg-amber-50 text-amber-600 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-400">
+                          未保存
+                        </span>
+                      </div>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* 右侧：角色编辑表单 */}
+              <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 bg-[#F7F8FA] dark:bg-dark">
+                {(selectedRoleId || roleIsNew) ? (
+                  <>
+                    <SectionTitle>{roleIsNew ? '新建角色' : '编辑角色'}</SectionTitle>
+                    <div className="grid grid-cols-[1fr_120px] gap-3">
+                      <Field label="角色名称">
+                        <input
+                          type="text"
+                          value={roleDraft.name ?? ''}
+                          onChange={(e) => { setRoleDraft((d) => ({ ...d, name: e.target.value })); setRoleSaved(false); }}
+                          placeholder="例如：客服助手"
+                          className={inputCls}
+                        />
+                      </Field>
+                      <Field label="图标（Emoji）">
+                        <input
+                          type="text"
+                          value={roleDraft.icon ?? ''}
+                          onChange={(e) => { setRoleDraft((d) => ({ ...d, icon: e.target.value })); setRoleSaved(false); }}
+                          placeholder="🤖"
+                          className={inputCls}
+                        />
+                      </Field>
+                    </div>
+                    <Field label="描述">
+                      <input
+                        type="text"
+                        value={roleDraft.description ?? ''}
+                        onChange={(e) => { setRoleDraft((d) => ({ ...d, description: e.target.value })); setRoleSaved(false); }}
+                        placeholder="简短描述此角色的用途"
+                        className={inputCls}
+                      />
+                    </Field>
+                    <Field label="System Prompt">
+                      <textarea
+                        value={roleDraft.system_prompt ?? ''}
+                        onChange={(e) => { setRoleDraft((d) => ({ ...d, system_prompt: e.target.value })); setRoleSaved(false); }}
+                        placeholder="输入此角色的系统提示词..."
+                        rows={8}
+                        className="win-input w-full resize-none"
+                      />
+                    </Field>
+                    <Field label="能力">
+                      <div className="flex gap-4">
+                        {[
+                          { key: 'rag', label: '📚 RAG 知识检索' },
+                          { key: 'skills', label: '🔧 技能匹配' },
+                        ].map(({ key, label }) => (
+                          <label key={key} className="flex items-center gap-2 cursor-pointer text-sm">
+                            <input
+                              type="checkbox"
+                              checked={(roleDraft.capabilities ?? []).includes(key)}
+                              onChange={() => toggleCapability(key)}
+                              className="w-4 h-4 accent-primary"
+                            />
+                            <span>{label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </Field>
+                    {roleError && (
+                      <p className="text-xs text-red-500 bg-red-50 dark:bg-red-900/20 rounded-md px-3 py-2">
+                        {roleError}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-sm text-text-secondary mt-8 text-center">从左侧选择一个角色进行编辑，或点击"新增"创建新角色</p>
+                )}
+              </div>
+            </div>
+
+            {/* 底部操作栏 */}
+            <div className="win-toolbar flex items-center justify-between gap-3 px-4 py-3">
+              <button
+                onClick={handleDeleteRole}
+                disabled={!!(roleSaving || (!roleIsNew && (!selectedRoleId || (roles.find((r) => r.id === selectedRoleId)?.is_builtin ?? true))))}
+                className="win-button-subtle h-8 px-3 text-sm text-red-500 hover:text-red-600 disabled:opacity-40"
+              >
+                {roleIsNew ? '放弃新增' : '删除角色'}
+              </button>
+              <div className="flex items-center gap-3">
+                <button onClick={handleClose} className="win-button h-8 px-4 text-sm">取消</button>
+                <button
+                  onClick={handleSaveRole}
+                  disabled={roleSaving || (!roleIsNew && !selectedRoleId)}
+                  className="win-button-primary h-8 min-w-[84px] px-4 text-sm"
+                >
+                  {roleSaving ? '保存中...' : roleSaved ? '✅ 已保存' : '保存'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* 模型管理 Tab */}
         {activeTab === 'models' && <div className="flex flex-col flex-1 min-h-0">
