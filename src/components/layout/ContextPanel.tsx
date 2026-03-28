@@ -148,10 +148,10 @@ export default function ContextPanel({ width }: { width?: number }) {
 
   const modeConversation = useMemo(() => {
     const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
-    if (activeConversation?.mode === currentRoleId) {
+    if (activeConversation?.roleId === currentRoleId) {
       return activeConversation;
     }
-    return conversations.find((conversation) => conversation.mode === currentRoleId) ?? null;
+    return conversations.find((conversation) => conversation.roleId === currentRoleId) ?? null;
   }, [conversations, activeConversationId, currentRoleId]);
 
   const visibleConversationId = modeConversation?.id ?? null;
@@ -369,11 +369,11 @@ export default function ContextPanel({ width }: { width?: number }) {
 
       <div className="flex-1 overflow-y-auto scrollbar-thin p-3.5">
         <div className="space-y-4">
-          {/* 当前模式 */}
+          {/* 当前角色 */}
           <section>
-            <h4 className="win-section-title mb-2">当前模式</h4>
+            <h4 className="win-section-title mb-2">当前角色</h4>
             <div className="win-panel-muted px-3 py-3 text-sm font-medium text-primary">
-              {currentRole?.icon ?? '💬'} {currentRole?.name ?? currentRoleId} 模式
+              {currentRole?.icon ?? '💬'} {currentRole?.name ?? currentRoleId}
             </div>
           </section>
 

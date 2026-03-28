@@ -98,7 +98,67 @@ Meeting Assistant/
 
 ---
 
-## 5. 已知问题与限制
+## 5. 角色系统与状态管理
+
+### 5.1 动态角色（Role）架构
+
+应用已从旧的三模式硬编码（`copilot / builder / agent`）迁移至**数据库驱动的动态角色系统**。
+
+| 层级 | 位置 | 说明 |
+|------|------|------|
+| **数据库** | `backend/services/storage.py` → `roles` 表 | 角色持久化存储，支持 CRUD |
+| **后端 API** | `backend/routers/settings.py` `/settings/roles/*` | GET / POST / PUT / DELETE 角色端点 |
+| **前端 API** | `src/services/api.ts` `listRoles / createRole / updateRole / deleteRole` | HTTP 封装 |
+| **全局状态** | `src/stores/appStore.ts` `roles: Role[]` + `currentRoleId: string` | Zustand store，持久化到 localStorage |
+| **初始化** | `src/main.tsx` `initBackend()` | 启动时调用 `listRoles()` 并写入 store，同步设置 `rolesLoaded = true` |
+
+**角色数据结构**（`src/types/index.ts`）：
+```typescript
+interface Role {
+  id: string;            // 唯一标识（如 "copilot"、"my-role-xyz"）
+  name: string;          // 显示名称
+  icon: string;          // emoji 图标
+  description: string;
+  system_prompt: string; // 该角色的系统提示词
+  capabilities: string[];// 能力列表（如 ["rag"]）
+  is_builtin: number;    // 0 = 用户创建，1 = 内置（当前三个默认角色均为 0）
+  sort_order: number;
+}
+```
+
+### 5.2 状态管理规范
+
+**`appStore`**（`src/stores/appStore.ts`）管理：
+- 角色列表 `roles`、当前角色 `currentRoleId`、`rolesLoaded` 加载标志
+- LLM 配置 `llmConfigs / activeLLMConfigId`
+- 主题、侧边栏折叠、Context Panel 可见性等 UI 状态
+
+**`chatStore`**（`src/stores/chatStore.ts`）管理：
+- 对话列表 `conversations`、活跃对话 `activeConversationId`
+- 消息列表 `messages`、流式状态 `isStreaming`
+- 两个 store 均通过 Zustand `persist` 中间件持久化到 **localStorage**
+
+### 5.3 localStorage 向后兼容迁移
+
+旧版数据使用 `Conversation.mode`（字符串），新版已重命名为 `Conversation.roleId`。
+`chatStore.ts` 的 `normalizeConversations()` 函数在 Zustand **rehydration** 阶段自动执行迁移：
+
+```typescript
+// chatStore.ts（简化）
+function normalizeConversations(convs: any[]): Conversation[] {
+  return convs.map((c) => ({
+    ...c,
+    roleId: c.roleId ?? c.mode ?? 'copilot', // 旧 mode 字段 → roleId
+    mode: undefined,                           // 清除旧字段
+  }));
+}
+```
+
+此迁移对用户透明，**零数据丢失**，无需手动清空 localStorage。
+
+---
+
+## 6. 已知问题与限制
 
 | 问题 | 说明 |
 |------|------|
@@ -108,7 +168,7 @@ Meeting Assistant/
 
 ---
 
-## 6. 本地开发指南
+## 7. 本地开发指南
 
 ### 开发端口约定
 
@@ -161,17 +221,17 @@ http://localhost:4173
 
 ---
 
-## 7. 注意事项
+## 8. 注意事项
 
 > ⚠️ **绝不提交 API Key**：确保 `.env` 文件在 `.gitignore` 中，密钥通过环境变量读取，不硬编码。
 
 ---
 
-## 8. Phase 1（Orchestrator 层）深度复查与交接记录
+## 9. Phase 1（Orchestrator 层）深度复查与交接记录
 
 > 本节作为当前阶段的**唯一交接上下文依据**。结论以实际代码复核与构建/测试结果为准，不以口头判断代替。
 
-### 8.1 当前总体结论
+### 9.1 当前总体结论
 
 - 本轮 Phase 1 主链路改造已经落地，包含：RAG/Know-how/Skill 上下文组装、动态 token 预算、SSE 尾事件注入、Copilot 内联 Skill 推荐。
 - 当前代码已通过：
@@ -179,7 +239,7 @@ http://localhost:4173
 - **但不能判定为“已经完全没问题”**。深度复查后，仍确认存在若干**必须继续修复**的问题，其中最高优先级问题仍然直接影响 **LLM 回答质量**。
 - 当前状态应定义为：**Phase 1 主方案已实现，但尚未达到“质量审查收口”标准，必须继续完成剩余问题修复后才能收尾。**
 
-### 8.2 本轮已完成项
+### 9.2 本轮已完成项
 
 #### 8.2.1 后端：上下文组装与预算控制
 
@@ -222,7 +282,7 @@ http://localhost:4173
 - `src/components/chat/ChatInput.tsx`
   - 已支持外部 `prefillText` 注入并自动写入输入框，形成 Skill 推荐 → 输入框预填 → 用户确认发送的闭环。
 
-### 8.3 已验证项
+### 9.3 已验证项
 
 #### 8.3.1 构建验证
 
@@ -244,7 +304,7 @@ http://localhost:4173
 - **Skill 交互闭环**：已采用 Copilot 内联推荐条，而不是强制跳转 Agent 面板。
 - **多对话流式隔离**：`ChatArea.tsx` 中 `AbortController`、streaming 状态与 Skill 推荐已按 `conversationId` 进行隔离管理。
 
-### 8.4 本轮深度复查结论
+### 9.4 本轮深度复查结论
 
 - 本轮复查覆盖了以下关键文件与调用链：
   - `backend/services/hybrid_search.py`
@@ -256,7 +316,7 @@ http://localhost:4173
   - 关联核对：`src/types/index.ts`、`src/stores/chatStore.ts`
 - 结论：**已确认存在 3 个仍需继续修复的问题**。这些问题并非编译级错误，而是会影响回答质量、召回率、状态语义、或前端能力溯源闭环的一致性问题。
 
-### 8.5 已发现但未修复的问题（必须继续处理）
+### 9.5 已发现但未修复的问题（必须继续处理）
 
 #### P0 — Know-how 仍然是“全量活跃规则注入”，存在上下文污染风险
 
@@ -374,7 +434,7 @@ http://localhost:4173
 
 - **状态标记**：`Closed`
 
-### 8.6 下一步待办（必须继续执行）
+### 9.6 下一步待办（必须继续执行）
 
 1. **先修 P0：Know-how 相关性过滤**
    - 原因：这是当前最直接影响 LLM 回答质量的问题。
@@ -386,7 +446,7 @@ http://localhost:4173
 3. **修复 Abort / Done 语义**
    - 原因：这是状态正确性问题，会影响自动命名与中止体验，但相对前两项对回答质量影响略低。
 
-### 8.7 推荐处理顺序（含原因）
+### 9.7 推荐处理顺序（含原因）
 
 #### 第一优先序列：先保回答质量
 
@@ -401,7 +461,7 @@ http://localhost:4173
 
 **原因**：这是重要一致性问题，但优先级略低于回答质量与能力下发完整性。
 
-### 8.8 后续实现时必须遵守的背景约束
+### 9.8 后续实现时必须遵守的背景约束
 
 - **LLM 回答质量优先**，不能为了简化实现而牺牲回答质量。
 - **Token 预算必须按完整条目注入**，禁止回退到拼接后硬截断。
@@ -411,13 +471,13 @@ http://localhost:4173
 - 中文 token 预算仍按保守估算：**1 个汉字 ≈ 0.6 token**。
 - 当前构建与测试已通过，但这**不等于**逻辑审查完成；后续改动仍需继续执行构建与测试验证。
 
-### 8.9 当前残余风险（即使暂未列为最高优先级，也不能遗忘）
+### 9.9 当前残余风险（即使暂未列为最高优先级，也不能遗忘）
 
 - 当前未进行真正的前端 UI 自动化/E2E 验证；`context_metadata` 的展示闭环虽已落地，但仍缺少自动化回归验证。
 - `ChatArea.tsx` 当前 `prefillText` 是组件级单值状态，后续仍需复查是否存在跨对话误写或覆盖未发送草稿的风险。
 - 当前已通过构建与后端测试，但并未因此证明所有 SSE 边界时序都已覆盖；后续修复 `Abort` 语义后应补一次针对流中止场景的验证。
 
-### 8.10 交接结论
+### 9.10 交接结论
 
 - **已经完成**：Phase 1 主链路功能改造与基础验证。
 - **已经确认没回退的点**：构建可过、后端测试可过、SSE 元数据顺序正确、Skill 推荐保持对话内联、token 预算不再硬截断。

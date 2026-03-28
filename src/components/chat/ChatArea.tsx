@@ -45,10 +45,10 @@ export default function ChatArea() {
 
   const modeConversation = useMemo(() => {
     const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
-    if (activeConversation?.mode === currentRoleId) {
+    if (activeConversation?.roleId === currentRoleId) {
       return activeConversation;
     }
-    return conversations.find((conversation) => conversation.mode === currentRoleId) ?? null;
+    return conversations.find((conversation) => conversation.roleId === currentRoleId) ?? null;
   }, [conversations, activeConversationId, currentRoleId]);
 
   const visibleConversationId = modeConversation?.id ?? null;

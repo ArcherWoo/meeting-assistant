@@ -6,16 +6,21 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { v4 as uuidv4 } from 'uuid';
-import type { Conversation, Message, Attachment, AppMode, MessageMetadata } from '@/types';
+import type { Conversation, Message, Attachment, MessageMetadata } from '@/types';
 
 export const DEFAULT_CONVERSATION_TITLE = '新对话';
 
 const normalizeConversations = (conversations: Conversation[] = []) => (
-  conversations.map((conversation) => (
-    conversation.title === DEFAULT_CONVERSATION_TITLE && conversation.isTitleCustomized
+  conversations.map((raw) => {
+    // Migrate old localStorage data: { mode: '...' } → { roleId: '...' }
+    const c = raw as Conversation & { mode?: string };
+    const conversation: Conversation = c.roleId
+      ? c
+      : { ...c, roleId: c.mode ?? 'copilot' };
+    return conversation.title === DEFAULT_CONVERSATION_TITLE && conversation.isTitleCustomized
       ? { ...conversation, isTitleCustomized: false }
-      : conversation
-  ))
+      : conversation;
+  })
 );
 
 interface ChatState {
@@ -41,7 +46,7 @@ interface ChatState {
   pendingAttachments: Attachment[];
 
   // Actions
-  createConversation: (mode: AppMode) => string;
+  createConversation: (roleId: string) => string;
   setActiveConversation: (id: string) => void;
   renameConversation: (id: string, title: string, isManual?: boolean) => void;
   deleteConversation: (id: string) => void;
@@ -72,13 +77,13 @@ export const useChatStore = create<ChatState>()(
       streamingContent: '',
       pendingAttachments: [],
 
-      createConversation: (mode) => {
+      createConversation: (roleId) => {
         const id = uuidv4();
         const conversation: Conversation = {
           id,
           workspaceId: 'default',
           title: DEFAULT_CONVERSATION_TITLE,
-          mode,
+          roleId,
           isPinned: false,
           isTitleCustomized: false,
           createdAt: new Date().toISOString(),

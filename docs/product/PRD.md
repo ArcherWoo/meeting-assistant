@@ -148,18 +148,24 @@ Meeting Assistant 是一款面向**非技术用户**的 AI 桌面客户端。核
   | `web_search` | 联网搜索补充信息 |
   | `clipboard` | 复制内容到剪贴板 |
 
-### 2.5 模式切换机制
+### 2.5 角色管理系统
+
+系统采用**动态角色（Role）架构**，替代原有的三模式硬编码设计。角色存储于 SQLite 数据库，可由用户在运行时创建、编辑和删除。
+
 | 切换方式 | 说明 |
 |---------|------|
-| **UI 切换栏** | 顶部 Tab 或 Segmented Control 手动切换 |
-| **斜杠命令** | `/copilot` `/builder` `/agent` |
-| **自动检测** | Agent 根据用户意图自动建议切换 |
+| **侧边栏角色列表** | 点击角色图标/名称一键切换 |
+| **设置面板** | 在「角色管理」Tab 中创建、编辑、删除角色 |
 
-**上下文策略**：
-- Copilot → Builder：保留上下文（可能正在讨论需求）
-- Builder → Agent：传递新建 Skill 信息，清空对话
-- Agent → Copilot：传递执行结果摘要
-- 手动切换：提示用户确认
+**角色数据模型**：
+- `id`：唯一标识符（字符串，如 `copilot`、`my-role-xyz`）
+- `name`：显示名称
+- `icon`：emoji 图标
+- `system_prompt`：该角色的系统提示词
+- `capabilities`：能力列表（如 `["rag"]` 表示启用 RAG 检索）
+- `is_builtin`：是否为内置角色（`1` = 内置，`0` = 用户创建）
+
+**前端状态**：`currentRoleId: string` 存储于 `appStore`，每次切换角色时同步更新；各对话通过 `Conversation.roleId` 与角色绑定，支持多角色并行对话上下文。
 
 ---
 
@@ -260,6 +266,16 @@ Meeting Assistant 是一款面向**非技术用户**的 AI 桌面客户端。核
 | 文字主色 | `#2D2D2D` | `#E8E8E8` |
 | 文字次色 | `#8E8E93` | `#A0A0A0` |
 | 分割线 | `#E5E5EA` | `#2A2A4A` |
+
+#### 可拖拽调节布局约束
+
+所有三处分隔手柄均支持鼠标拖拽实时调宽，拖拽期间禁用过渡动画以保持跟手精度：
+
+| 面板 | 最小宽度 | 最大宽度 | 默认宽度 | 说明 |
+|------|---------|---------|---------|------|
+| **侧边栏（展开态）** | `200px` | `450px` | `236px` | 收起时固定 `72px`，拖拽手柄自动隐藏 |
+| **设置弹窗** | `640px` | `96vw` | `920px` | 左右两侧各有 1.5px 手柄，弹窗始终水平居中 |
+| **上下文面板** | `220px` | `560px` | `300px` | 手柄位于 ChatArea 与 ContextPanel 之间 |
 
 #### 设计原则
 - **毛玻璃效果（Glassmorphism）**：侧边栏和弹窗使用 `backdrop-filter: blur(20px)` + 半透明背景
@@ -1315,41 +1331,46 @@ async def get_knowledge_stats() -> KnowledgeStats:
 ```
 
 ### 10.2 前端状态结构
+
+状态管理分为两个 Zustand store：
+
+**`appStore`**（`src/stores/appStore.ts`，持久化 LLM 配置和主题）：
 ```typescript
 interface AppState {
-  // 模式
-  currentMode: 'copilot' | 'builder' | 'agent';
+  // 角色系统（动态，替代旧的三模式硬编码）
+  roles: Role[];
+  currentRoleId: string;          // 当前激活角色 ID
+  setRoles: (roles: Role[]) => void;
+  setCurrentRoleId: (id: string) => void;
+  rolesLoaded: boolean;
 
-  // 对话
-  conversations: Conversation[];
-  activeConversationId: string | null;
+  // LLM 配置（持久化）
+  llmConfigs: LLMProfile[];
+  activeLLMConfigId: string;
 
-  // 消息
-  messages: Message[];
-  isStreaming: boolean;
-
-  // 技能
-  skills: SkillMeta[];
-  activeSkill: SkillMeta | null;
-
-  // 配置
-  apiConfig: {
-    baseUrl: string;
-    apiKey: string;
-    model: string;
-    temperature: number;
-    maxTokens: number;
-    stream: boolean;
-  };
-
-  // 附件
-  attachments: Attachment[];
-
-  // UI
-  theme: 'light' | 'dark';
+  // UI 状态
+  theme: 'light' | 'dark' | 'system';
+  accentColor: string;
   sidebarCollapsed: boolean;
-  detailPanelVisible: boolean;
+  contextPanelVisible: boolean;
+  activeView: 'chat' | 'knowhow';
+  settingsOpen: boolean;
 }
+```
+
+**`chatStore`**（`src/stores/chatStore.ts`，持久化对话与消息）：
+```typescript
+interface Conversation {
+  id: string;
+  workspaceId: string;
+  title: string;
+  roleId: string;          // 绑定的角色 ID（原 mode 字段，已重命名）
+  isTitleCustomized: boolean;
+  createdAt: string;
+}
+
+// localStorage 迁移：normalizeConversations() 在 rehydration 时
+// 自动将旧格式 { mode: 'copilot' } 映射为新格式 { roleId: 'copilot' }
 ```
 
 ---

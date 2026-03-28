@@ -64,7 +64,7 @@ export default function Sidebar() {
   const handleSetRole = (roleId: string) => {
     setCurrentRoleId(roleId);
     setActiveView('chat');
-    const firstMatch = conversations.find((c) => c.mode === roleId);
+    const firstMatch = conversations.find((c) => c.roleId === roleId);
     if (firstMatch) {
       cancelRename();
       setActiveConversation(firstMatch.id);
@@ -76,7 +76,7 @@ export default function Sidebar() {
     cancelRename();
     const conversation = conversations.find((item) => item.id === conversationId);
     if (conversation) {
-      setCurrentRoleId(conversation.mode);
+      setCurrentRoleId(conversation.roleId);
     }
     setActiveView('chat');
     setActiveConversation(conversationId);
@@ -121,7 +121,7 @@ export default function Sidebar() {
   return (
     <aside
       className={clsx(
-        'relative flex h-full flex-col border-r border-surface-divider dark:border-dark-divider bg-[#F5F7FA] dark:bg-dark-sidebar',
+        'relative flex h-full flex-col border-r border-surface-divider dark:border-dark-divider bg-surface-sidebar dark:bg-dark-sidebar',
         !isDragging && 'transition-[width] duration-200'
       )}
       style={{ width: currentWidth, minWidth: currentWidth, maxWidth: currentWidth }}
@@ -182,11 +182,11 @@ export default function Sidebar() {
                 onClick={() => handleSelectConversation(conv.id)}
                 className="flex min-h-[44px] w-full items-center justify-center text-left"
               >
-                <span>{getRoleIcon(conv.mode)}</span>
+                <span>{getRoleIcon(conv.roleId)}</span>
               </button>
             ) : (
               <div className="flex items-center gap-2 min-w-0 px-3 py-2.5">
-                <span className="flex-shrink-0">{getRoleIcon(conv.mode)}</span>
+                <span className="flex-shrink-0">{getRoleIcon(conv.roleId)}</span>
 
                 {editingId === conv.id ? (
                   <div className="flex items-center gap-1 flex-1 min-w-0">

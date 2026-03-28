@@ -47,7 +47,7 @@ export default function MainLayout() {
   }, [isDragging]);
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden bg-[#EFF2F6] dark:bg-dark">
+    <div className="h-screen flex flex-col overflow-hidden bg-surface-sidebar dark:bg-dark">
       {/* 主内容区 */}
       <div className="flex flex-1 overflow-hidden min-h-0">
         {/* 侧边栏 */}

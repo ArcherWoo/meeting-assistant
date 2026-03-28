@@ -54,9 +54,6 @@ interface AppState {
   currentRoleId: string;
   setRoles: (roles: Role[]) => void;
   setCurrentRoleId: (id: string) => void;
-  /** 向后兼容别名 */
-  currentMode: string;
-  setMode: (mode: string) => void;
   /** 角色列表初始加载是否完成（成功或失败均置为 true） */
   rolesLoaded: boolean;
   setRolesLoaded: (loaded: boolean) => void;
@@ -96,10 +93,7 @@ export const useAppStore = create<AppState>()(
       roles: [],
       currentRoleId: 'copilot',
       setRoles: (roles) => set({ roles }),
-      setCurrentRoleId: (id) => set({ currentRoleId: id, currentMode: id }),
-      // 向后兼容别名
-      currentMode: 'copilot',
-      setMode: (mode) => set({ currentMode: mode, currentRoleId: mode }),
+      setCurrentRoleId: (id) => set({ currentRoleId: id }),
       rolesLoaded: false,
       setRolesLoaded: (loaded) => set({ rolesLoaded: loaded }),
 

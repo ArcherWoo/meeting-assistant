@@ -609,7 +609,7 @@ export default function SettingsModal() {
           <div className="flex flex-col flex-1 min-h-0">
             <div className="flex flex-1 min-h-0 border-b border-surface-divider dark:border-dark-divider">
               {/* 左侧：角色列表 */}
-              <div className="w-[200px] flex-shrink-0 border-r border-surface-divider dark:border-dark-divider bg-[#F7F8FA] p-4 space-y-3 overflow-y-auto dark:bg-dark">
+              <div className="w-[240px] flex-shrink-0 border-r border-surface-divider dark:border-dark-divider bg-[#F7F8FA] p-4 space-y-3 overflow-y-auto dark:bg-dark">
                 <div className="flex items-center justify-between gap-2">
                   <SectionTitle>角色列表</SectionTitle>
                   <button onClick={handleNewRole} className="win-button-primary h-7 px-2.5 text-xs">
@@ -664,7 +664,7 @@ export default function SettingsModal() {
                 {(selectedRoleId || roleIsNew) ? (
                   <>
                     <SectionTitle>{roleIsNew ? '新建角色' : '编辑角色'}</SectionTitle>
-                    <div className="grid grid-cols-[1fr_120px] gap-3">
+                    <div className="grid grid-cols-[1fr_160px] gap-4">
                       <Field label="角色名称">
                         <input
                           type="text"
@@ -679,13 +679,13 @@ export default function SettingsModal() {
                           <button
                             type="button"
                             onClick={() => setEmojiPickerOpen((o) => !o)}
-                            className="win-input flex w-full items-center justify-between gap-2"
+                            className="win-input flex w-full items-center justify-between gap-3 px-3"
                           >
-                            <span className="text-xl leading-none">{roleDraft.icon || '🤖'}</span>
+                            <span className="text-2xl leading-none">{roleDraft.icon || '🤖'}</span>
                             <span className="text-xs text-text-secondary">▾</span>
                           </button>
                           {emojiPickerOpen && (
-                            <div className="absolute right-0 top-full z-20 mt-1 rounded-lg border border-surface-divider bg-white p-4 shadow-lg dark:border-dark-divider dark:bg-dark-card">
+                            <div className="absolute left-0 top-full z-20 mt-1 rounded-lg border border-surface-divider bg-white p-4 shadow-lg dark:border-dark-divider dark:bg-dark-card">
                               <div className="grid grid-cols-3 gap-3">
                                 {ROLE_EMOJIS.map((emoji) => (
                                   <button

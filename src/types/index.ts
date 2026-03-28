@@ -17,8 +17,6 @@ export interface Role {
   updated_at?: string;
 }
 
-// 向后兼容：AppMode 保留为字符串别名（数据库 mode 字段现在存储任意 Role ID）
-export type AppMode = string;
 export type PromptScope = string;  // 'global' | <any role id>
 
 // ===== 消息类型 =====
@@ -88,7 +86,7 @@ export interface Conversation {
   id: string;
   workspaceId: string;
   title: string;
-  mode: AppMode;
+  roleId: string;
   isPinned: boolean;
   isTitleCustomized: boolean; // true = 用户已手动命名，自动命名不覆盖
   createdAt: string;
