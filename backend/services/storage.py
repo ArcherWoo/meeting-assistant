@@ -243,7 +243,7 @@ class StorageService:
             await self.create_workspace("默认工作区", "系统自动创建的默认工作区", "📋")
 
     async def _ensure_default_roles(self) -> None:
-        """确保三个内置角色存在（copilot / builder / agent）"""
+        """确保三个默认角色存在（copilot / builder / agent），均为可编辑/可删除的普通角色"""
         import json as _json
         defaults = [
             {
@@ -256,7 +256,7 @@ class StorageService:
                     "回答时请保持简洁，优先给出结论，再补充细节。"
                 ),
                 "capabilities": _json.dumps(["rag"]),
-                "is_builtin": 1,
+                "is_builtin": 0,
                 "sort_order": 0,
             },
             {
@@ -270,7 +270,7 @@ class StorageService:
                     "生成的 Skill 应使用标准 Markdown 格式，包含描述、触发条件、执行步骤和输出格式。"
                 ),
                 "capabilities": _json.dumps(["skills"]),
-                "is_builtin": 1,
+                "is_builtin": 0,
                 "sort_order": 1,
             },
             {
@@ -284,7 +284,7 @@ class StorageService:
                     "执行过程中保持透明，让用户了解每一步的进展。"
                 ),
                 "capabilities": _json.dumps(["rag", "skills"]),
-                "is_builtin": 1,
+                "is_builtin": 0,
                 "sort_order": 2,
             },
         ]
@@ -298,6 +298,12 @@ class StorageService:
                     (role["id"], role["name"], role["icon"], role["description"],
                      role["system_prompt"], role["capabilities"], role["is_builtin"],
                      role["sort_order"], now, now),
+                )
+            else:
+                # 若旧记录 is_builtin=1，迁移为可编辑的普通角色
+                await self.db.execute(
+                    "UPDATE roles SET is_builtin=0 WHERE id=? AND is_builtin=1",
+                    (role["id"],),
                 )
         await self.db.commit()
 

@@ -116,7 +116,7 @@ function getMetadataMessage(messages: Message[]): Message | null {
   return null;
 }
 
-export default function ContextPanel() {
+export default function ContextPanel({ width }: { width?: number }) {
   const { toggleContextPanel, currentRoleId, roles } = useAppStore();
   const currentRole = roles.find((r) => r.id === currentRoleId);
   const {
@@ -133,6 +133,8 @@ export default function ContextPanel() {
   const [importing, setImporting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const kbFileInputRef = useRef<HTMLInputElement>(null);
+  /** 首次数据加载是否完成（避免 khStats 永远卡在"加载中..."） */
+  const [statsLoaded, setStatsLoaded] = useState(false);
 
   // Skill 编辑器状态
   // isNew=true 表示新建 Skill；originalIsBuiltin 记录原始的 is_builtin（便于提示）
@@ -182,7 +184,10 @@ export default function ContextPanel() {
       if (kb.status === 'fulfilled') setKbStats(kb.value);
       if (kh.status === 'fulfilled') setKhStats(kh.value);
       if (imp.status === 'fulfilled') setImports(imp.value.imports || []);
-    } catch { /* 静默处理 */ }
+    } catch { /* 静默处理 */ } finally {
+      // 无论成功/失败均标记首次加载完成，避免永远卡在"加载中..."
+      setStatsLoaded(true);
+    }
   }, []);
 
   /** 知识库导入文件 */
@@ -308,10 +313,13 @@ export default function ContextPanel() {
     }
   };
 
+  const panelStyle = width ? { width, minWidth: width, maxWidth: width } : undefined;
+  const panelCls = 'flex-shrink-0 border-l border-surface-divider dark:border-dark-divider bg-[#F7F8FA] dark:bg-dark flex flex-col';
+
   // ===== 编辑器视图 =====
   if (editingSkill) {
     return (
-      <aside className="w-[300px] flex-shrink-0 border-l border-surface-divider dark:border-dark-divider bg-[#F7F8FA] dark:bg-dark flex flex-col">
+      <aside className={panelCls} style={panelStyle ?? { width: 300, minWidth: 300, maxWidth: 300 }}>
         <div className="win-toolbar flex h-12 items-center justify-between px-3">
           <button onClick={() => setEditingSkill(null)} className="win-button-subtle h-8 px-2 text-xs">← 返回</button>
           <h3 className="text-sm font-medium truncate flex-1 mx-2">
@@ -353,7 +361,7 @@ export default function ContextPanel() {
 
   // ===== 正常列表视图 =====
   return (
-    <aside className="w-[300px] flex-shrink-0 border-l border-surface-divider dark:border-dark-divider bg-[#F7F8FA] dark:bg-dark flex flex-col">
+    <aside className={panelCls} style={panelStyle ?? { width: 300, minWidth: 300, maxWidth: 300 }}>
       <div className="win-toolbar flex h-12 items-center justify-between px-3">
         <h3 className="text-sm font-medium">上下文</h3>
         <button onClick={toggleContextPanel} className="win-icon-button h-8 w-8">✕</button>
@@ -717,12 +725,14 @@ export default function ContextPanel() {
           {/* Know-how 规则库概览 */}
           <section>
             <h4 className="win-section-title mb-2">Know-how 规则库</h4>
-            {khStats ? (
+            {!statsLoaded ? (
+              <div className="h-10 w-full rounded-md bg-surface-divider/40 animate-pulse dark:bg-dark-divider/40" />
+            ) : khStats ? (
               <div className="win-panel-muted px-3 py-3 text-xs text-text-secondary">
                 共 {khStats.total_rules} 条规则，{khStats.active_rules} 条启用
               </div>
             ) : (
-              <p className="text-xs text-text-secondary text-center py-3">加载中...</p>
+              <p className="text-xs text-text-secondary text-center py-3">暂无数据</p>
             )}
           </section>
         </div>

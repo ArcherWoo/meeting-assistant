@@ -27,6 +27,9 @@ async function initBackend(): Promise<void> {
   } catch (error) {
     console.warn('[Init] Backend connection failed:', error);
     useAppStore.getState().setBackend({ connected: false, port: 0 });
+  } finally {
+    // 无论成功或失败，标记加载完成，让 UI 离开等待态
+    useAppStore.getState().setRolesLoaded(true);
   }
 }
 

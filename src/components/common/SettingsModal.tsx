@@ -3,7 +3,7 @@
  * 配置多组 LLM 连接参数，并选择当前使用的模型
  * 支持 System Prompt 自定义（Copilot / Agent / Knowledge 模式）
  */
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import clsx from 'clsx';
 import { useAppStore } from '@/stores/appStore';
@@ -11,11 +11,20 @@ import {
   testLLMConnection,
   getEmbeddingConfig, updateEmbeddingConfig, testEmbeddingConnection,
   createRole, updateRole, deleteRole, listRoles,
+  listSystemPromptPresets, createSystemPromptPreset, deleteSystemPromptPreset,
+  resetSystemPrompt,
 } from '@/services/api';
-import type { LLMConnectionTestResult, LLMProfile, Role } from '@/types';
-import PromptManager from './PromptManager';
+import type { LLMConnectionTestResult, LLMProfile, Role, SystemPromptPreset } from '@/types';
 
-type SettingsTab = 'models' | 'prompts' | 'roles' | 'appearance';
+type SettingsTab = 'models' | 'roles' | 'appearance';
+
+/** 角色图标预设（12个，3列布局） */
+const ROLE_EMOJIS = [
+  '💬', '🤖', '🧑‍💻',
+  '🔍', '🛠️', '📚',
+  '🎯', '🎭', '👨‍💼',
+  '🌐', '🚀', '💡',
+];
 
 /** 主题色预设 */
 const ACCENT_COLORS = [
@@ -24,6 +33,13 @@ const ACCENT_COLORS = [
   { label: '翠绿', value: '#059669' },
   { label: '玫红', value: '#DB2777' },
 ] as const;
+
+function formatPresetTime(value: string): string {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
 
 function createDraftProfile(index: number): LLMProfile {
   return {
@@ -80,6 +96,15 @@ export default function SettingsModal() {
   const [roleSaving, setRoleSaving] = useState(false);
   const [roleSaved, setRoleSaved] = useState(false);
   const [roleError, setRoleError] = useState('');
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+
+  // Preset 状态（与角色绑定）
+  const [presets, setPresets] = useState<SystemPromptPreset[]>([]);
+  const [presetName, setPresetName] = useState('');
+  const [presetBusy, setPresetBusy] = useState(false);
+  const [presetDeleteId, setPresetDeleteId] = useState<string | null>(null);
+  const [presetNotice, setPresetNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  const [promptResetting, setPromptResetting] = useState(false);
 
   // Embedding 配置状态
   const [embCfg, setEmbCfg] = useState({ api_url: '', api_key: '', model: 'text-embedding-3-small' });
@@ -88,6 +113,50 @@ export default function SettingsModal() {
   const [embTesting, setEmbTesting] = useState(false);
   const [embTestResult, setEmbTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [embError, setEmbError] = useState('');
+
+  // Modal 宽度调整
+  const [modalWidth, setModalWidth] = useState(920);
+  const modalDragEdge = useRef<'left' | 'right' | null>(null);
+  const modalDragStartX = useRef(0);
+  const modalDragStartWidth = useRef(920);
+  const [modalDragging, setModalDragging] = useState(false);
+  /**
+   * Guards the backdrop onClick against accidental closure after a drag.
+   * Set synchronously on mousedown; cleared in a setTimeout so the
+   * browser's click event (which fires after mouseup as a separate macrotask)
+   * still sees it as true before we clear it.
+   */
+  const justDraggedRef = useRef(false);
+
+  const handleModalEdgeMouseDown = useCallback((e: React.MouseEvent, edge: 'left' | 'right') => {
+    e.preventDefault();
+    e.stopPropagation();
+    justDraggedRef.current = true;
+    modalDragEdge.current = edge;
+    modalDragStartX.current = e.clientX;
+    modalDragStartWidth.current = modalWidth;
+    setModalDragging(true);
+  }, [modalWidth]);
+
+  useEffect(() => {
+    if (!modalDragging) return;
+    const onMouseMove = (e: MouseEvent) => {
+      const delta = e.clientX - modalDragStartX.current;
+      const widthDelta = modalDragEdge.current === 'right' ? delta : -delta;
+      const newWidth = Math.min(Math.round(window.innerWidth * 0.96), Math.max(640, modalDragStartWidth.current + widthDelta));
+      setModalWidth(newWidth);
+    };
+    const onMouseUp = () => {
+      setModalDragging(false);
+      modalDragEdge.current = null;
+      // Defer the reset so the backdrop's click event (same event-loop turn as
+      // mouseup but fired as a separate task) still finds justDraggedRef = true.
+      setTimeout(() => { justDraggedRef.current = false; }, 0);
+    };
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return () => { window.removeEventListener('mousemove', onMouseMove); window.removeEventListener('mouseup', onMouseUp); };
+  }, [modalDragging]);
 
   const updateDraft = (updates: Partial<LLMProfile>, options?: { preserveTestFeedback?: boolean }) => {
     setDraft((current) => ({ ...current, ...updates }));
@@ -141,6 +210,9 @@ export default function SettingsModal() {
     setRoleIsNew(false);
     setRoleSaved(false);
     setRoleError('');
+    setEmojiPickerOpen(false);
+    setPresetName('');
+    setPresetNotice(null);
   };
 
   const handleNewRole = () => {
@@ -149,6 +221,10 @@ export default function SettingsModal() {
     setRoleIsNew(true);
     setRoleSaved(false);
     setRoleError('');
+    setEmojiPickerOpen(false);
+    setPresets([]);
+    setPresetName('');
+    setPresetNotice(null);
   };
 
   const handleSaveRole = async () => {
@@ -227,6 +303,76 @@ export default function SettingsModal() {
       capabilities: caps.includes(cap) ? caps.filter((c) => c !== cap) : [...caps, cap],
     }));
     setRoleSaved(false);
+  };
+
+  // 加载当前角色的预设列表
+  const loadPresets = useCallback(async (roleId: string) => {
+    if (!roleId || roleId === '__new__') { setPresets([]); return; }
+    try {
+      const all = await listSystemPromptPresets();
+      setPresets(all.filter((p) => p.mode === roleId));
+    } catch {
+      setPresets([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'roles' && selectedRoleId && selectedRoleId !== '__new__') {
+      void loadPresets(selectedRoleId);
+    }
+  }, [activeTab, selectedRoleId, loadPresets]);
+
+  const handleSavePreset = async () => {
+    if (!presetName.trim()) { setPresetNotice({ ok: false, text: '请输入预设名称' }); return; }
+    if (!(roleDraft.system_prompt ?? '').trim()) { setPresetNotice({ ok: false, text: '系统提示词不能为空' }); return; }
+    setPresetBusy(true);
+    setPresetNotice(null);
+    try {
+      const result = await createSystemPromptPreset(presetName.trim(), selectedRoleId, roleDraft.system_prompt ?? '');
+      setPresets((prev) => [result.preset, ...prev]);
+      setPresetName('');
+      setPresetNotice({ ok: true, text: result.message });
+    } catch (e) {
+      setPresetNotice({ ok: false, text: (e as Error).message || '保存预设失败' });
+    } finally {
+      setPresetBusy(false);
+    }
+  };
+
+  const handleImportPreset = (preset: SystemPromptPreset) => {
+    setRoleDraft((d) => ({ ...d, system_prompt: preset.prompt }));
+    setRoleSaved(false);
+    setPresetNotice({ ok: true, text: `已导入「${preset.name}」，点击保存生效` });
+  };
+
+  const handleDeletePreset = async (preset: SystemPromptPreset) => {
+    if (!window.confirm(`确定删除预设「${preset.name}」吗？`)) return;
+    setPresetDeleteId(preset.id);
+    try {
+      await deleteSystemPromptPreset(preset.id);
+      setPresets((prev) => prev.filter((p) => p.id !== preset.id));
+      setPresetNotice({ ok: true, text: '预设已删除' });
+    } catch (e) {
+      setPresetNotice({ ok: false, text: (e as Error).message || '删除失败' });
+    } finally {
+      setPresetDeleteId(null);
+    }
+  };
+
+  const handleResetPrompt = async () => {
+    if (!selectedRoleId || selectedRoleId === '__new__') return;
+    if (!window.confirm('确定将此角色的系统提示词恢复为默认值吗？')) return;
+    setPromptResetting(true);
+    try {
+      const result = await resetSystemPrompt(selectedRoleId);
+      const defaultPrompt = result.resolved_prompt ?? result.prompt ?? '';
+      setRoleDraft((d) => ({ ...d, system_prompt: defaultPrompt }));
+      setRoleSaved(false);
+    } catch {
+      // 静默失败
+    } finally {
+      setPromptResetting(false);
+    }
   };
 
   if (!settingsOpen) return null;
@@ -340,9 +486,22 @@ export default function SettingsModal() {
     // 遮罩层
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-sm"
-      onClick={(e) => { if (e.target === e.currentTarget) handleClose(); }}
+      onClick={(e) => { if (e.target === e.currentTarget && !justDraggedRef.current) handleClose(); }}
     >
-      <div className="win-modal flex max-h-[90vh] w-[920px] max-w-[96vw] flex-col overflow-hidden">
+      <div
+        className="win-modal relative flex max-h-[90vh] flex-col overflow-hidden"
+        style={{ width: modalWidth, maxWidth: '96vw', minWidth: 640 }}
+      >
+        {/* 左侧拖拽手柄 */}
+        <div
+          onMouseDown={(e) => handleModalEdgeMouseDown(e, 'left')}
+          className={clsx('absolute left-0 top-0 h-full w-1.5 cursor-col-resize z-10 hover:bg-primary/40 transition-colors', modalDragging && modalDragEdge.current === 'left' && 'bg-primary/60')}
+        />
+        {/* 右侧拖拽手柄 */}
+        <div
+          onMouseDown={(e) => handleModalEdgeMouseDown(e, 'right')}
+          className={clsx('absolute right-0 top-0 h-full w-1.5 cursor-col-resize z-10 hover:bg-primary/40 transition-colors', modalDragging && modalDragEdge.current === 'right' && 'bg-primary/60')}
+        />
         {/* 标题栏 */}
         <div className="win-toolbar flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-4">
@@ -361,17 +520,6 @@ export default function SettingsModal() {
                 )}
               >
                 🧩 模型管理
-              </button>
-              <button
-                onClick={() => setActiveTab('prompts')}
-                className={clsx(
-                  tabBtnCls,
-                  activeTab === 'prompts'
-                    ? tabBtnActiveCls
-                    : tabBtnIdleCls
-                )}
-              >
-                📝 System Prompts
               </button>
               <button
                 onClick={() => setActiveTab('roles')}
@@ -456,11 +604,6 @@ export default function SettingsModal() {
           </div>
         )}
 
-        {/* System Prompts Tab — 保持常驻挂载，避免切换 Tab 时重新 fetch */}
-        <div className={clsx('flex-1 overflow-y-auto px-4 py-4 space-y-5 bg-[#F7F8FA] dark:bg-dark', activeTab !== 'prompts' && 'hidden')}>
-          <PromptManager />
-        </div>
-
         {/* 角色管理 Tab */}
         {activeTab === 'roles' && (
           <div className="flex flex-col flex-1 min-h-0">
@@ -490,7 +633,7 @@ export default function SettingsModal() {
                           <span className="flex-shrink-0">{role.icon}</span>
                           <span className="truncate text-xs font-medium">{role.name}</span>
                         </div>
-                        {role.is_builtin && (
+                        {role.is_builtin === 1 && (
                           <span className="win-badge flex-shrink-0 text-[9px] border-blue-200 bg-blue-50 text-blue-600 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-400">
                             内置
                           </span>
@@ -532,13 +675,39 @@ export default function SettingsModal() {
                         />
                       </Field>
                       <Field label="图标（Emoji）">
-                        <input
-                          type="text"
-                          value={roleDraft.icon ?? ''}
-                          onChange={(e) => { setRoleDraft((d) => ({ ...d, icon: e.target.value })); setRoleSaved(false); }}
-                          placeholder="🤖"
-                          className={inputCls}
-                        />
+                        <div className="relative">
+                          <button
+                            type="button"
+                            onClick={() => setEmojiPickerOpen((o) => !o)}
+                            className="win-input flex w-full items-center justify-between gap-2"
+                          >
+                            <span className="text-xl leading-none">{roleDraft.icon || '🤖'}</span>
+                            <span className="text-xs text-text-secondary">▾</span>
+                          </button>
+                          {emojiPickerOpen && (
+                            <div className="absolute right-0 top-full z-20 mt-1 rounded-lg border border-surface-divider bg-white p-4 shadow-lg dark:border-dark-divider dark:bg-dark-card">
+                              <div className="grid grid-cols-3 gap-3">
+                                {ROLE_EMOJIS.map((emoji) => (
+                                  <button
+                                    key={emoji}
+                                    type="button"
+                                    onClick={() => {
+                                      setRoleDraft((d) => ({ ...d, icon: emoji }));
+                                      setRoleSaved(false);
+                                      setEmojiPickerOpen(false);
+                                    }}
+                                    className={clsx(
+                                      'flex h-10 w-10 items-center justify-center rounded-lg text-2xl transition-colors hover:bg-primary/5 dark:hover:bg-primary/10',
+                                      roleDraft.icon === emoji && 'bg-primary/10 ring-2 ring-inset ring-primary/30'
+                                    )}
+                                  >
+                                    {emoji}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       </Field>
                     </div>
                     <Field label="描述">
@@ -550,7 +719,20 @@ export default function SettingsModal() {
                         className={inputCls}
                       />
                     </Field>
-                    <Field label="System Prompt">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <label className="block text-sm font-medium">System Prompt</label>
+                        {!roleIsNew && selectedRoleId && (
+                          <button
+                            type="button"
+                            onClick={() => void handleResetPrompt()}
+                            disabled={promptResetting}
+                            className="win-button h-6 px-2 text-[11px] text-text-secondary hover:text-text-primary"
+                          >
+                            {promptResetting ? '恢复中...' : '恢复默认'}
+                          </button>
+                        )}
+                      </div>
                       <textarea
                         value={roleDraft.system_prompt ?? ''}
                         onChange={(e) => { setRoleDraft((d) => ({ ...d, system_prompt: e.target.value })); setRoleSaved(false); }}
@@ -558,7 +740,79 @@ export default function SettingsModal() {
                         rows={8}
                         className="win-input w-full resize-none"
                       />
-                    </Field>
+                    </div>
+
+                    {/* 提示词预设面板（新建角色时隐藏） */}
+                    {!roleIsNew && selectedRoleId && (
+                      <div className="rounded-lg border border-surface-divider bg-white px-4 py-3 space-y-3 dark:border-dark-divider dark:bg-dark-card">
+                        <p className="text-xs font-medium text-text-secondary">💾 提示词预设</p>
+
+                        {/* 保存当前为预设 */}
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={presetName}
+                            onChange={(e) => setPresetName(e.target.value)}
+                            placeholder="给这个预设起个名字"
+                            className="win-input flex-1 text-sm"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void handleSavePreset()}
+                            disabled={presetBusy}
+                            className="win-button-primary h-8 px-3 text-xs flex-shrink-0"
+                          >
+                            {presetBusy ? '保存中...' : '保存为预设'}
+                          </button>
+                        </div>
+
+                        {/* 操作反馈 */}
+                        {presetNotice && (
+                          <p className={clsx('text-xs', presetNotice.ok ? 'text-green-600 dark:text-green-400' : 'text-red-500')}>
+                            {presetNotice.text}
+                          </p>
+                        )}
+
+                        {/* 预设列表 */}
+                        {presets.length === 0 ? (
+                          <p className="text-xs text-text-secondary border border-dashed border-surface-divider rounded-md px-3 py-3 dark:border-dark-divider">
+                            还没有保存过预设
+                          </p>
+                        ) : (
+                          <div className="space-y-2">
+                            {presets.map((preset) => (
+                              <div key={preset.id} className="flex items-center justify-between gap-2 rounded-md border border-surface-divider bg-[#F7F8FA] px-3 py-2 dark:border-dark-divider dark:bg-dark">
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-xs font-medium truncate">{preset.name}</p>
+                                  <p className="text-[10px] text-text-secondary mt-0.5">
+                                    {formatPresetTime(preset.updated_at || preset.created_at) || '刚刚'}
+                                  </p>
+                                </div>
+                                <div className="flex items-center gap-1 flex-shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleImportPreset(preset)}
+                                    disabled={presetDeleteId === preset.id}
+                                    className="win-button h-7 px-2 text-[11px]"
+                                  >
+                                    导入
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleDeletePreset(preset)}
+                                    disabled={presetDeleteId === preset.id}
+                                    className="win-button h-7 px-2 text-[11px] text-red-500 hover:text-red-600"
+                                  >
+                                    {presetDeleteId === preset.id ? '…' : '删除'}
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <Field label="能力">
                       <div className="flex gap-4">
                         {[

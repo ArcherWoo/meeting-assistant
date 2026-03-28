@@ -2,16 +2,26 @@
  * 侧边栏组件
  * 包含：Logo、新建对话、对话列表、角色切换、设置入口
  */
-import { useState, type KeyboardEvent } from 'react';
+import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from 'react';
 import { useAppStore } from '@/stores/appStore';
 import { useChatStore } from '@/stores/chatStore';
 import clsx from 'clsx';
 
+const SIDEBAR_COLLAPSED_WIDTH = 72;
+const SIDEBAR_MIN_WIDTH = 200;
+const SIDEBAR_MAX_WIDTH = 450;
+const SIDEBAR_DEFAULT_WIDTH = 236;
+
 export default function Sidebar() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
+  const [expandedWidth, setExpandedWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStartX = useRef(0);
+  const dragStartWidth = useRef(SIDEBAR_DEFAULT_WIDTH);
   const {
     roles, currentRoleId, setCurrentRoleId,
+    rolesLoaded,
     sidebarCollapsed, toggleSidebar,
     activeView, setActiveView, toggleSettings,
   } = useAppStore();
@@ -82,12 +92,39 @@ export default function Sidebar() {
     setActiveView(activeView === 'knowhow' ? 'chat' : 'knowhow');
   };
 
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    if (sidebarCollapsed) return;
+    e.preventDefault();
+    dragStartX.current = e.clientX;
+    dragStartWidth.current = expandedWidth;
+    setIsDragging(true);
+  }, [sidebarCollapsed, expandedWidth]);
+
+  useEffect(() => {
+    if (!isDragging) return;
+    const onMouseMove = (e: MouseEvent) => {
+      const delta = e.clientX - dragStartX.current;
+      const newWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, dragStartWidth.current + delta));
+      setExpandedWidth(newWidth);
+    };
+    const onMouseUp = () => setIsDragging(false);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [isDragging]);
+
+  const currentWidth = sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : expandedWidth;
+
   return (
     <aside
       className={clsx(
-        'flex h-full flex-col border-r border-surface-divider dark:border-dark-divider bg-[#F5F7FA] dark:bg-dark-sidebar transition-all duration-200',
-        sidebarCollapsed ? 'w-[72px]' : 'w-[236px]'
+        'relative flex h-full flex-col border-r border-surface-divider dark:border-dark-divider bg-[#F5F7FA] dark:bg-dark-sidebar',
+        !isDragging && 'transition-[width] duration-200'
       )}
+      style={{ width: currentWidth, minWidth: currentWidth, maxWidth: currentWidth }}
     >
       {/* Logo 区域 */}
       <div className="flex items-center gap-2 border-b border-surface-divider dark:border-dark-divider px-3 py-2.5">
@@ -225,23 +262,31 @@ export default function Sidebar() {
         {sidebarCollapsed ? (
           <>
             <div className="flex flex-col gap-1">
-              {roles.map((role) => (
-                <button
-                  key={role.id}
-                  onClick={() => handleSetRole(role.id)}
-                  className={clsx(
-                  'flex min-h-[40px] w-full items-center justify-center rounded-md border text-sm transition-colors',
-                    currentRoleId === role.id
-                    ? 'border-primary/20 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
-                    : 'border-transparent text-text-secondary hover:border-surface-divider hover:bg-white dark:hover:border-dark-divider dark:hover:bg-dark-card'
-                  )}
-                  title={role.name}
-                  aria-label={role.name}
-                >
-                  <span>{role.icon}</span>
-                </button>
-              ))}
+              {!rolesLoaded && roles.length === 0 ? (
+                [0, 1, 2].map((i) => (
+                  <div key={i} className="min-h-[40px] w-full rounded-md border border-transparent bg-surface-divider/40 animate-pulse dark:bg-dark-divider/40" />
+                ))
+              ) : (
+                roles.map((role) => (
+                  <button
+                    key={role.id}
+                    onClick={() => handleSetRole(role.id)}
+                    className={clsx(
+                    'flex min-h-[40px] w-full items-center justify-center rounded-md border text-sm transition-colors',
+                      currentRoleId === role.id
+                      ? 'border-primary/20 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
+                      : 'border-transparent text-text-secondary hover:border-surface-divider hover:bg-white dark:hover:border-dark-divider dark:hover:bg-dark-card'
+                    )}
+                    title={role.name}
+                    aria-label={role.name}
+                  >
+                    <span>{role.icon}</span>
+                  </button>
+                ))
+              )}
             </div>
+
+            <hr className="border-t border-dashed border-gray-200 dark:border-gray-700 my-1" />
 
             <button
               onClick={handleToggleKnowhow}
@@ -269,23 +314,31 @@ export default function Sidebar() {
         ) : (
           <>
           <div className="space-y-1">
-            {roles.map((role) => (
-              <button
-                key={role.id}
-                onClick={() => handleSetRole(role.id)}
-                className={clsx(
-                  'flex w-full items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors',
-                  currentRoleId === role.id
-                    ? 'border-primary/20 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
-                    : 'border-transparent text-text-secondary hover:border-surface-divider hover:bg-white hover:text-text-primary dark:hover:border-dark-divider dark:hover:bg-dark-card dark:hover:text-text-dark-primary'
-                )}
-                title={role.name}
-              >
-                <span>{role.icon}</span>
-                <span>{role.name}</span>
-              </button>
-            ))}
+            {!rolesLoaded && roles.length === 0 ? (
+              [0, 1, 2].map((i) => (
+                <div key={i} className="h-9 w-full rounded-md border border-transparent bg-surface-divider/40 animate-pulse dark:bg-dark-divider/40" />
+              ))
+            ) : (
+              roles.map((role) => (
+                <button
+                  key={role.id}
+                  onClick={() => handleSetRole(role.id)}
+                  className={clsx(
+                    'flex w-full items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors',
+                    currentRoleId === role.id
+                      ? 'border-primary/20 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
+                      : 'border-transparent text-text-secondary hover:border-surface-divider hover:bg-white hover:text-text-primary dark:hover:border-dark-divider dark:hover:bg-dark-card dark:hover:text-text-dark-primary'
+                  )}
+                  title={role.name}
+                >
+                  <span>{role.icon}</span>
+                  <span>{role.name}</span>
+                </button>
+              ))
+            )}
           </div>
+
+          <hr className="border-t border-dashed border-gray-200 dark:border-gray-700 my-1" />
 
           {/* Know-how 规则库管理入口 */}
           <button
@@ -312,6 +365,19 @@ export default function Sidebar() {
           </>
         )}
       </div>
+
+      {/* 可拖拽调宽手柄 */}
+      {!sidebarCollapsed && (
+        <div
+          onMouseDown={handleResizeMouseDown}
+          className={clsx(
+            'absolute right-0 top-0 h-full w-1 cursor-col-resize group z-10',
+            'hover:bg-primary/40 transition-colors',
+            isDragging && 'bg-primary/60'
+          )}
+          title="拖拽调整宽度"
+        />
+      )}
     </aside>
   );
 }

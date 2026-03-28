@@ -57,6 +57,9 @@ interface AppState {
   /** 向后兼容别名 */
   currentMode: string;
   setMode: (mode: string) => void;
+  /** 角色列表初始加载是否完成（成功或失败均置为 true） */
+  rolesLoaded: boolean;
+  setRolesLoaded: (loaded: boolean) => void;
 
   // 后端连接状态
   backend: BackendStatus;
@@ -97,6 +100,8 @@ export const useAppStore = create<AppState>()(
       // 向后兼容别名
       currentMode: 'copilot',
       setMode: (mode) => set({ currentMode: mode, currentRoleId: mode }),
+      rolesLoaded: false,
+      setRolesLoaded: (loaded) => set({ rolesLoaded: loaded }),
 
       // 后端初始未连接
       backend: { connected: false, port: 0 },

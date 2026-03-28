@@ -25,7 +25,7 @@ function formatTime(value: string): string {
 }
 
 export default function PromptManager() {
-  const { roles } = useAppStore();
+  const { roles, rolesLoaded } = useAppStore();
   const [prompts, setPrompts] = useState<SystemPromptMap>({});
   const [presets, setPresets] = useState<SystemPromptPreset[]>([]);
   const [presetNames, setPresetNames] = useState<Record<string, string>>({});
@@ -167,6 +167,38 @@ export default function PromptManager() {
       setPresetBusyId(null);
     }
   };
+
+  // 角色列表尚未从后端加载完毕时，显示加载占位
+  if (!rolesLoaded) {
+    return (
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_340px]">
+        <section className="space-y-4">
+          <div className="win-panel space-y-4 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <h4 className="text-sm font-medium">系统提示词</h4>
+            </div>
+            <div className="space-y-4">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="rounded-lg border border-surface-divider bg-white px-4 py-4 shadow-sm dark:border-dark-divider dark:bg-dark-card">
+                  <div className="h-4 w-32 rounded bg-surface-divider/60 animate-pulse dark:bg-dark-divider/60 mb-3" />
+                  <div className="h-[168px] w-full rounded bg-surface-divider/40 animate-pulse dark:bg-dark-divider/40" />
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  // 后端已连接但无任何角色时，给出提示
+  if (rolesLoaded && roles.length === 0) {
+    return (
+      <div className="win-panel p-6 text-center text-sm text-text-secondary">
+        暂无角色配置。请先在「角色管理」页面创建角色。
+      </div>
+    );
+  }
 
   return (
     <div className={clsx('grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_340px]', loading && 'opacity-50 pointer-events-none')}>
