@@ -7,6 +7,8 @@ import App from './App';
 import './styles/index.css';
 import { checkHealth, listRoles } from './services/api';
 import { useAppStore } from './stores/appStore';
+import { useChatStore } from './stores/chatStore';
+import { getPreferredRoleForSurface } from './utils/roles';
 
 /** 初始化后端连接 + 加载角色列表 */
 async function initBackend(): Promise<void> {
@@ -16,13 +18,21 @@ async function initBackend(): Promise<void> {
     if (healthy) {
       const roles = await listRoles();
       if (roles.length > 0) {
-        useAppStore.getState().setRoles(roles);
-        // 如果当前 roleId 不在列表中，切换到第一个角色
-        const current = useAppStore.getState().currentRoleId;
-        if (!roles.find((r) => r.id === current)) {
-          useAppStore.getState().setCurrentRoleId(roles[0].id);
+        const appState = useAppStore.getState();
+        appState.setRoles(roles);
+        const chatRole = getPreferredRoleForSurface(roles, 'chat', appState.currentChatRoleId) ?? roles[0];
+        const agentRole = getPreferredRoleForSurface(roles, 'agent', appState.currentAgentRoleId);
+
+        appState.setCurrentChatRoleId(chatRole.id);
+        appState.setCurrentAgentRoleId((agentRole ?? chatRole).id);
+
+        if (appState.activeSurface === 'agent' && !agentRole) {
+          appState.setActiveSurface('chat');
+        } else {
+          appState.setActiveSurface(appState.activeSurface);
         }
       }
+      await useChatStore.getState().bootstrap();
     }
   } catch (error) {
     console.warn('[Init] Backend connection failed:', error);

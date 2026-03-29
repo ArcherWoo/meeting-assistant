@@ -13,6 +13,10 @@ interface PersistedAppState {
   llmConfig?: LLMConfig;
   llmConfigs?: Partial<LLMProfile>[];
   activeLLMConfigId?: string;
+  currentRoleId?: string;
+  currentChatRoleId?: string;
+  currentAgentRoleId?: string;
+  activeSurface?: 'chat' | 'agent';
 }
 
 const createLLMProfile = (overrides: Partial<LLMProfile> = {}): LLMProfile => ({
@@ -51,8 +55,14 @@ const initialLLMConfigs = normalizeLLMProfiles();
 interface AppState {
   // 角色系统
   roles: Role[];
+  activeSurface: 'chat' | 'agent';
+  currentChatRoleId: string;
+  currentAgentRoleId: string;
   currentRoleId: string;
   setRoles: (roles: Role[]) => void;
+  setActiveSurface: (surface: 'chat' | 'agent') => void;
+  setCurrentChatRoleId: (id: string) => void;
+  setCurrentAgentRoleId: (id: string) => void;
   setCurrentRoleId: (id: string) => void;
   /** 角色列表初始加载是否完成（成功或失败均置为 true） */
   rolesLoaded: boolean;
@@ -91,9 +101,28 @@ export const useAppStore = create<AppState>()(
     (set) => ({
       // 角色系统
       roles: [],
+      activeSurface: 'chat',
+      currentChatRoleId: 'copilot',
+      currentAgentRoleId: 'executor',
       currentRoleId: 'copilot',
       setRoles: (roles) => set({ roles }),
-      setCurrentRoleId: (id) => set({ currentRoleId: id }),
+      setActiveSurface: (surface) => set((state) => ({
+        activeSurface: surface,
+        currentRoleId: surface === 'chat' ? state.currentChatRoleId : state.currentAgentRoleId,
+      })),
+      setCurrentChatRoleId: (id) => set((state) => ({
+        currentChatRoleId: id,
+        currentRoleId: state.activeSurface === 'chat' ? id : state.currentRoleId,
+      })),
+      setCurrentAgentRoleId: (id) => set((state) => ({
+        currentAgentRoleId: id,
+        currentRoleId: state.activeSurface === 'agent' ? id : state.currentRoleId,
+      })),
+      setCurrentRoleId: (id) => set((state) => (
+        state.activeSurface === 'chat'
+          ? { currentChatRoleId: id, currentRoleId: id }
+          : { currentAgentRoleId: id, currentRoleId: id }
+      )),
       rolesLoaded: false,
       setRolesLoaded: (loaded) => set({ rolesLoaded: loaded }),
 
@@ -154,13 +183,22 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: 'meeting-assistant-app',
-      version: 2,
+      version: 4,
       migrate: (persistedState) => {
         const persisted = (persistedState ?? {}) as PersistedAppState;
         const llmConfigs = normalizeLLMProfiles(persisted.llmConfigs, persisted.llmConfig);
         const activeLLMConfigId = llmConfigs.some((config) => config.id === persisted.activeLLMConfigId)
           ? (persisted.activeLLMConfigId as string)
           : llmConfigs[0].id;
+        const normalizedCurrentRoleId = persisted.currentRoleId === 'agent'
+          ? 'executor'
+          : (persisted.currentRoleId ?? 'copilot');
+        const activeSurface = persisted.activeSurface
+          ?? (normalizedCurrentRoleId === 'executor' ? 'agent' : 'chat');
+        const currentChatRoleId = persisted.currentChatRoleId
+          ?? (activeSurface === 'chat' ? normalizedCurrentRoleId : 'copilot');
+        const currentAgentRoleId = persisted.currentAgentRoleId
+          ?? (activeSurface === 'agent' ? normalizedCurrentRoleId : 'executor');
 
         return {
           ...persisted,
@@ -168,6 +206,10 @@ export const useAppStore = create<AppState>()(
           accentColor: persisted.accentColor ?? '#2563EB',
           llmConfigs,
           activeLLMConfigId,
+          activeSurface,
+          currentChatRoleId,
+          currentAgentRoleId,
+          currentRoleId: activeSurface === 'chat' ? currentChatRoleId : currentAgentRoleId,
         };
       },
       // 仅持久化 LLM 配置和主题，不持久化运行时状态
@@ -176,8 +218,11 @@ export const useAppStore = create<AppState>()(
         activeLLMConfigId: state.activeLLMConfigId,
         theme: state.theme,
         accentColor: state.accentColor,
+        activeSurface: state.activeSurface,
+        currentRoleId: state.currentRoleId,
+        currentChatRoleId: state.currentChatRoleId,
+        currentAgentRoleId: state.currentAgentRoleId,
       }),
     }
   )
 );
-

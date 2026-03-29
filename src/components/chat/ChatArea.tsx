@@ -12,8 +12,14 @@ import MessageBubble from './MessageBubble';
 import ChatInput from './ChatInput';
 import AgentExecutionPanel from '../agent/AgentExecutionPanel';
 
+interface AgentExecutionRequest {
+  query: string;
+  conversationId: string;
+}
+
 export default function ChatArea() {
   const {
+    activeSurface,
     currentRoleId,
     roles,
     llmConfigs,
@@ -37,7 +43,7 @@ export default function ChatArea() {
   const welcomeFileRef = useRef<HTMLInputElement>(null);
   const activeLLMConfig = llmConfigs.find((config) => config.id === activeLLMConfigId) ?? llmConfigs[0];
   /** Agent 模式：当前正在执行的查询 */
-  const [agentQuery, setAgentQuery] = useState<string | null>(null);
+  const [agentExecution, setAgentExecution] = useState<AgentExecutionRequest | null>(null);
   const [welcomeUploading, setWelcomeUploading] = useState(false);
   /** 预填充到输入框的文本 */
   const [prefillText, setPrefillText] = useState('');
@@ -45,11 +51,13 @@ export default function ChatArea() {
 
   const modeConversation = useMemo(() => {
     const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
-    if (activeConversation?.roleId === currentRoleId) {
+    if (activeConversation?.surface === activeSurface && activeConversation?.roleId === currentRoleId) {
       return activeConversation;
     }
-    return conversations.find((conversation) => conversation.roleId === currentRoleId) ?? null;
-  }, [conversations, activeConversationId, currentRoleId]);
+    return conversations.find((conversation) => (
+      conversation.surface === activeSurface && conversation.roleId === currentRoleId
+    )) ?? null;
+  }, [conversations, activeConversationId, activeSurface, currentRoleId]);
 
   const visibleConversationId = modeConversation?.id ?? null;
   const visibleMessages = visibleConversationId ? (messagesByConversation[visibleConversationId] ?? []) : [];
@@ -62,6 +70,12 @@ export default function ChatArea() {
     }
   }, [visibleConversationId, activeConversationId, setActiveConversation]);
 
+  useEffect(() => {
+    if (activeSurface !== 'agent' && agentExecution) {
+      setAgentExecution(null);
+    }
+  }, [activeSurface, agentExecution]);
+
   // 消息列表自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -72,28 +86,36 @@ export default function ChatArea() {
     suggestion: SkillSuggestionEvent,
   ) => {
     setPrefillText(`请使用「${suggestion.skill_name}」技能帮我处理`);
-    updateMessageMetadata(message.id, { skillSuggestion: undefined }, message.conversationId);
+    void updateMessageMetadata(
+      message.id,
+      { skillSuggestion: undefined },
+      message.conversationId,
+    ).catch(() => {});
   }, [updateMessageMetadata]);
 
   const handleDismissSkillSuggestion = useCallback((message: Message) => {
-    updateMessageMetadata(message.id, { skillSuggestion: undefined }, message.conversationId);
+    void updateMessageMetadata(
+      message.id,
+      { skillSuggestion: undefined },
+      message.conversationId,
+    ).catch(() => {});
   }, [updateMessageMetadata]);
 
   /** 发送消息（支持附件上下文） */
   const handleSend = async (content: string, attachmentContext?: string) => {
     // Agent 模式：触发 Skill 匹配 → 执行工作流
-    if (currentRoleId === 'agent') {
+    if (activeSurface === 'agent') {
       let convId = visibleConversationId;
-      if (!convId) convId = createConversation(currentRoleId);
-      addMessage({ conversationId: convId, role: 'user', content });
-      setAgentQuery(content);
+      if (!convId) convId = await createConversation(currentRoleId, 'agent');
+      await addMessage({ conversationId: convId, role: 'user', content });
+      setAgentExecution({ query: content, conversationId: convId });
       return;
     }
 
     // 正常 LLM 对话
     let convId = visibleConversationId;
     if (!convId) {
-      convId = createConversation(currentRoleId);
+      convId = await createConversation(currentRoleId, 'chat');
     } else if (activeConversationId !== convId) {
       setActiveConversation(convId);
     }
@@ -102,7 +124,7 @@ export default function ChatArea() {
     const historyMessages = messagesByConversation[targetConvId] ?? [];
 
     // 用户消息只显示用户输入的文字（不含附件原文）
-    addMessage({ conversationId: targetConvId, role: 'user', content });
+    await addMessage({ conversationId: targetConvId, role: 'user', content });
 
     if (!activeLLMConfig) return;
 
@@ -122,7 +144,7 @@ export default function ChatArea() {
     const controller = new AbortController();
     abortMapRef.current[targetConvId] = controller;
 
-    const assistantMsgId = addMessage({
+    const assistantMsgId = await addMessage({
       conversationId: targetConvId,
       role: 'assistant',
       content: '',
@@ -136,32 +158,22 @@ export default function ChatArea() {
       (chunk) => {
         fullContent += chunk;
         appendStreamContent(chunk, targetConvId);
-        updateMessage(assistantMsgId, fullContent, targetConvId);
+        void updateMessage(assistantMsgId, fullContent, targetConvId, { persist: false }).catch(() => {});
       },
       () => {
         setStreaming(false, targetConvId);
         resetStreamContent(targetConvId);
         delete abortMapRef.current[targetConvId];
+        void updateMessage(assistantMsgId, fullContent, targetConvId).catch(() => {});
 
         // 自动命名：第 3 条 assistant 消息完成后（或之后），且用户未手动命名
         // 使用 setTimeout 确保 store 状态已完全同步
-        console.log('[AutoTitle] onDone fired, activeLLMConfig:', !!activeLLMConfig);
         if (activeLLMConfig) {
           setTimeout(() => {
             const state = useChatStore.getState();
             const conv = state.conversations.find((c) => c.id === targetConvId);
             const convMessages = state.messagesByConversation[targetConvId] ?? [];
             const assistantCount = convMessages.filter((m) => m.role === 'assistant').length;
-
-            console.log('[AutoTitle] check:', {
-              convId: targetConvId,
-              convFound: !!conv,
-              title: conv?.title,
-              isTitleCustomized: conv?.isTitleCustomized,
-              assistantCount,
-              defaultTitle: DEFAULT_CONVERSATION_TITLE,
-              titleMatchesDefault: conv?.title === DEFAULT_CONVERSATION_TITLE,
-            });
 
             // 条件：未手动命名 + 标题仍为默认 + 至少完成 3 轮
             if (
@@ -170,28 +182,16 @@ export default function ChatArea() {
               conv.title === DEFAULT_CONVERSATION_TITLE &&
               assistantCount >= 3
             ) {
-              console.log('[AutoTitle] triggering generateAutoTitle...');
               generateAutoTitle(
                 convMessages.map((m) => ({ role: m.role, content: m.content })),
                 activeLLMConfig
               )
                 .then((title) => {
-                  console.log('[AutoTitle] received title:', JSON.stringify(title));
                   if (title && title !== DEFAULT_CONVERSATION_TITLE) {
-                    useChatStore.getState().renameConversation(targetConvId, title, false);
-                    console.log('[AutoTitle] renameConversation called, new title:', title);
-                    // 验证更新是否生效
-                    const updated = useChatStore.getState().conversations.find((c) => c.id === targetConvId);
-                    console.log('[AutoTitle] after rename, conv title:', updated?.title);
-                  } else {
-                    console.log('[AutoTitle] title rejected (empty or default)');
+                    void useChatStore.getState().renameConversation(targetConvId, title, false).catch(() => {});
                   }
                 })
-                .catch((err) => {
-                  console.error('[AutoTitle] failed:', err);
-                });
-            } else {
-              console.log('[AutoTitle] conditions not met, skipping');
+                .catch(() => {});
             }
           }, 100);
         }
@@ -199,17 +199,17 @@ export default function ChatArea() {
       (error) => {
         setStreaming(false, targetConvId);
         resetStreamContent(targetConvId);
-        updateMessage(assistantMsgId, `⚠️ 错误: ${error}`, targetConvId);
+        void updateMessage(assistantMsgId, `⚠️ 错误: ${error}`, targetConvId).catch(() => {});
         delete abortMapRef.current[targetConvId];
       },
       controller.signal,
       currentRoleId,
       content,
       (metadata) => {
-        updateMessageMetadata(assistantMsgId, { context: metadata }, targetConvId);
+        void updateMessageMetadata(assistantMsgId, { context: metadata }, targetConvId).catch(() => {});
       },
       (suggestion) => {
-        updateMessageMetadata(assistantMsgId, { skillSuggestion: suggestion }, targetConvId);
+        void updateMessageMetadata(assistantMsgId, { skillSuggestion: suggestion }, targetConvId).catch(() => {});
       },
     );
   };
@@ -294,7 +294,7 @@ export default function ChatArea() {
       {/* 消息列表 */}
       <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-4 bg-[#F7F8FA] dark:bg-[#101726]">
         <div className="flex h-full w-full flex-col">
-        {visibleMessages.length === 0 && !agentQuery ? (
+        {visibleMessages.length === 0 && !agentExecution ? (
           <>
             {/* 隐藏的文件输入（欢迎屏使用） */}
             <input
@@ -307,6 +307,7 @@ export default function ChatArea() {
             />
             <WelcomeScreen
               mode={currentRoleId}
+              surface={activeSurface}
               onQuickMessage={handleSend}
               onUploadFile={() => welcomeFileRef.current?.click()}
               uploading={welcomeUploading}
@@ -323,15 +324,20 @@ export default function ChatArea() {
               />
             ))}
             {/* Agent 模式执行面板 */}
-            {agentQuery && (
+            {activeSurface === 'agent' && agentExecution && (
               <AgentExecutionPanel
-                query={agentQuery}
-                onComplete={(result) => {
-                  const convId = activeConversationId || createConversation('agent');
-                  addMessage({ conversationId: convId, role: 'assistant', content: result });
-                  setAgentQuery(null);
+                query={agentExecution.query}
+                conversationId={agentExecution.conversationId}
+                onComplete={async (payload) => {
+                  await addMessage({
+                    conversationId: agentExecution.conversationId,
+                    role: 'assistant',
+                    content: payload.content,
+                    metadata: payload.metadata,
+                  });
+                  setAgentExecution(null);
                 }}
-                onCancel={() => setAgentQuery(null)}
+                onCancel={() => setAgentExecution(null)}
               />
             )}
           </>
@@ -354,9 +360,10 @@ export default function ChatArea() {
 }
 
 /** 欢迎屏幕 - 无对话时显示 */
-function WelcomeScreen({ mode, onQuickMessage, onUploadFile, uploading }: {
+function WelcomeScreen({ mode, surface, onQuickMessage, onUploadFile, uploading }: {
   mode: string;
-  onQuickMessage: (msg: string) => void;
+  surface: 'chat' | 'agent';
+  onQuickMessage: (msg: string) => Promise<void> | void;
   onUploadFile: () => void;
   uploading: boolean;
 }) {
@@ -366,13 +373,16 @@ function WelcomeScreen({ mode, onQuickMessage, onUploadFile, uploading }: {
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl border border-surface-divider dark:border-dark-divider bg-white dark:bg-dark-sidebar text-3xl shadow-sm">🍒</div>
         <h2 className="text-[22px] font-semibold mb-2">Meeting Assistant</h2>
         <p className="text-text-secondary text-sm max-w-xl mx-auto leading-6">
-          {mode === 'copilot' && '你好！我是你的会议助手。使用下方 📎 按钮添加附件，或直接提问。'}
-          {mode === 'builder' && '在这里，你可以通过对话创建自定义 Skill，将重复工作自动化。'}
-          {mode === 'agent' && '选择一个 Skill，我将自动执行完整的工作流程。'}
+          {surface === 'agent' && '选择一个任务并输入目标，我会以当前 Agent 角色执行完整流程。'}
+          {surface === 'chat' && mode === 'copilot' && '你好！我是你的会议助手。使用下方 📎 按钮添加附件，或直接提问。'}
+          {surface === 'chat' && mode === 'builder' && '在这里，你可以通过对话创建自定义 Skill，将重复工作自动化。'}
+          {surface === 'chat' && mode === 'executor' && '你当前在聊天链路下使用执行助手角色，可以先讨论需求，再切到 Agent 执行。'}
         </p>
         <div className="mt-6 flex flex-wrap items-center justify-center gap-3 text-sm text-text-secondary">
           <button
-            onClick={() => onQuickMessage('你好，请介绍一下你能做什么')}
+            onClick={() => {
+              void Promise.resolve(onQuickMessage('你好，请介绍一下你能做什么')).catch(() => {});
+            }}
             className="win-button h-10 px-4 text-sm"
           >
             👋 &quot;你好&quot;

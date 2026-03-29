@@ -10,21 +10,24 @@ export interface Role {
   icon: string;
   description: string;
   system_prompt: string;
+  agent_prompt: string;
   capabilities: string[];   // e.g. ['rag', 'skills']
-  is_builtin: number;       // 1 = builtin, 0 = user-created
+  chat_capabilities: string[];
+  agent_preflight: string[];
+  allowed_surfaces: Array<'chat' | 'agent'>;
+  agent_allowed_tools: string[];
+  is_builtin: number;       // 1 = default seeded role, 0 = user-created
   sort_order: number;
   created_at?: string;
   updated_at?: string;
 }
-
-export type PromptScope = string;  // 'global' | <any role id>
 
 // ===== 消息类型 =====
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
 export interface ContextCitation {
   id: string;
-  source_type: 'knowledge' | 'knowhow' | 'skill';
+  source_type: 'knowledge' | 'knowhow' | 'skill' | 'file';
   label: string;
   title: string;
   snippet: string;
@@ -37,12 +40,29 @@ export interface ContextCitation {
   char_end?: number;
 }
 
+export interface RetrievalPlanAction {
+  surface: 'knowledge' | 'knowhow' | 'skill';
+  query: string;
+  limit: number;
+  required: boolean;
+  rationale?: string;
+}
+
+export interface RetrievalPlan {
+  strategy: 'llm' | 'fallback';
+  intent: string;
+  normalized_query: string;
+  actions: RetrievalPlanAction[];
+  notes: string[];
+}
+
 export interface ContextMetadata {
   knowledge_count: number;
   knowhow_count: number;
   skill_count: number;
   summary: string;
   citations: ContextCitation[];
+  retrieval_plan?: RetrievalPlan | null;
   schema_version?: number;
   truncated?: boolean;
   retrieved_summary?: string;
@@ -62,9 +82,26 @@ export interface SkillSuggestionEvent {
   matched_keywords?: string[];
 }
 
+export interface AgentResultSnapshot {
+  runId?: string;
+  summary: string;
+  raw_text: string;
+  used_tools: string[];
+  citations: ContextCitation[];
+  artifacts: Array<{
+    type: 'report' | 'table' | 'checklist' | 'json';
+    title: string;
+    content: string;
+    mime_type?: string;
+  }>;
+  next_actions: string[];
+  structured_payload?: Record<string, unknown>;
+}
+
 export interface MessageMetadata {
   context?: ContextMetadata;
   skillSuggestion?: SkillSuggestionEvent;
+  agentResult?: AgentResultSnapshot;
 }
 
 export interface Message {
@@ -86,6 +123,7 @@ export interface Conversation {
   id: string;
   workspaceId: string;
   title: string;
+  surface: 'chat' | 'agent';
   roleId: string;
   isPinned: boolean;
   isTitleCustomized: boolean; // true = 用户已手动命名，自动命名不覆盖
@@ -138,54 +176,13 @@ export interface LLMConnectionTestResult {
   fallback: boolean;
 }
 
-export interface PromptTemplate {
-  id: string;
-  name: string;
-  description: string;
-  scope: PromptScope;
-  content: string;
-  variables: Record<string, string>;
-  placeholders: string[];
-  is_builtin?: boolean;
-  source?: 'user' | 'builtin';
-  pack_id?: string | null;
-  pack_name?: string | null;
-  created_at?: string;
-  updated_at?: string;
-}
-
-export interface PromptPack {
-  id: string;
-  name: string;
-  icon: string;
-  description: string;
-  recommended_modes: string[];
-  tags: string[];
-  templates: PromptTemplate[];
-  template_count: number;
-  template_count_by_mode: Record<string, number>;
-}
-
-export type SystemPromptMap = Record<string, string>;
-
 export interface SystemPromptPreset {
   id: string;
   name: string;
-  mode: string;
+  role_id: string;
   prompt: string;
   created_at: string;
   updated_at: string;
-}
-
-export interface PromptModeConfig {
-  mode: string;
-  template_ids: string[];
-  variables: Record<string, string>;
-  extra_prompt: string;
-  dynamic_variables: Record<string, string>;
-  templates: Array<PromptTemplate & { rendered_content: string; missing_variables: string[] }>;
-  missing_variables: string[];
-  resolved_prompt: string;
 }
 
 // ===== PPT 解析结果 =====
@@ -228,6 +225,7 @@ export interface SkillMeta {
   steps: string[];
   dependencies: string[];
   output_template: string;
+  execution_profile: SkillExecutionProfile;
   is_builtin: boolean;
   source_path: string;
 }
@@ -238,6 +236,17 @@ export interface SkillParam {
   required: boolean;
   default?: string;
   description: string;
+  options?: string[];
+  source?: string;
+}
+
+export interface SkillExecutionProfile {
+  surface: string;
+  preferred_role_id: string;
+  allowed_tools: string[];
+  output_kind: string;
+  output_sections: string[];
+  notes: string[];
 }
 
 export interface SkillMatch {
@@ -312,27 +321,117 @@ export interface AgentMatchResult {
   confidence?: string;
   matched_keywords?: string[];
   parameters?: SkillParam[];
+  execution_profile?: SkillExecutionProfile;
+  role_id?: string;
+  surface?: 'agent';
   message?: string;
 }
 
+export interface AgentFinalResult {
+  summary: string;
+  raw_text: string;
+  used_tools: string[];
+  citations: Array<{
+    source_type: 'knowledge' | 'knowhow' | 'skill' | 'file';
+    label: string;
+    title?: string;
+    snippet: string;
+    location?: string;
+  }>;
+  artifacts: Array<{
+    type: 'report' | 'table' | 'checklist' | 'json';
+    title: string;
+    content: string;
+    mime_type?: string;
+  }>;
+  next_actions: string[];
+  structured_payload?: Record<string, unknown>;
+}
+
+export interface AgentRunStep {
+  id: string;
+  runId: string;
+  index: number;
+  step_key: string;
+  description: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled';
+  result?: string;
+  error?: string;
+  toolName?: string;
+  metadata?: Record<string, unknown>;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface AgentRunRecord {
+  id: string;
+  runId: string;
+  conversationId?: string;
+  surface: 'agent';
+  roleId: string;
+  continueFromRunId?: string;
+  continueMode?: 'continue' | 'retry' | '';
+  skillId?: string;
+  skillName?: string;
+  query: string;
+  params: Record<string, unknown>;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  model?: string;
+  llmProfileId?: string;
+  messageHistoryCount?: number;
+  finalResult?: AgentFinalResult;
+  error?: string;
+  steps: AgentRunStep[];
+  startedAt?: string;
+  completedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface AgentRunCancelResponse {
+  run: AgentRunRecord | null;
+  cancel_requested: boolean;
+  message: string;
+}
+
 export interface AgentExecutionEvent {
-  type: 'execution_start' | 'step_start' | 'step_complete' | 'step_error' | 'complete' | 'error';
+  type: 'execution_start' | 'step_start' | 'step_complete' | 'step_error' | 'complete' | 'error' | 'cancelled';
+  run_id?: string;
+  role_id?: string;
+  skill_id?: string;
+  skill_name?: string;
   step?: number;
+  step_key?: string;
   description?: string;
   result?: string;
   error?: string;
   message?: string;
+  final_result?: AgentFinalResult;
+  step_state?: {
+    index: number;
+    step_key: string;
+    description: string;
+    status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled';
+    tool_name?: string;
+    result?: string;
+    error?: string;
+    metadata?: Record<string, unknown>;
+    started_at?: string;
+    completed_at?: string;
+  };
   context?: {
-    skill_id: string;
-    skill_name: string;
-    params: Record<string, unknown>;
     status: string;
     steps: {
       index: number;
+      step_key?: string;
       description: string;
       status: string;
+      tool_name?: string;
       result?: string;
       error?: string;
+      metadata?: Record<string, unknown>;
+      started_at?: string;
+      completed_at?: string;
     }[];
     result?: string;
   };

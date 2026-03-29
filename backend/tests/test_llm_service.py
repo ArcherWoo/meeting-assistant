@@ -293,6 +293,28 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
             ["price-and-supplier-rule", "price-rule"],
         )
 
+    async def test_context_assembler_supports_any_role_once_rag_capability_is_gated_upstream(self):
+        assembler = ContextAssembler()
+
+        with patch.object(assembler, "_search_knowledge", AsyncMock(return_value=[{
+            "id": "chunk-1",
+            "content": "报价偏高，需要对比历史均价",
+            "source_file": "报价单.pdf",
+        }])):
+            with patch.object(assembler, "_get_knowhow_rules", AsyncMock(return_value=[{
+                "id": "rule-1",
+                "category": "采购预审",
+                "rule_text": "优先检查价格偏差",
+                "weight": 3,
+            }])):
+                with patch.object(assembler, "_match_skills", AsyncMock(return_value=[])):
+                    ctx = await assembler.assemble("帮我看看这次报价是否合理", role_id="custom-rag-role")
+
+        self.assertTrue(ctx.has_context)
+        self.assertEqual(len(ctx.knowledge_results), 1)
+        self.assertEqual(len(ctx.knowhow_rules), 1)
+        self.assertEqual(ctx.source_summary, "知识库(1条) + Know-how(1条)")
+
 
 if __name__ == "__main__":
     unittest.main()

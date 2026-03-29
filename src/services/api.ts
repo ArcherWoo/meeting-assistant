@@ -7,9 +7,10 @@ import type {
   Role, LLMConfig, LLMConnectionTestResult, PPTParseResult,
   SkillMeta, SkillMatch,
   KnowhowRule, KnowhowExportData, KnowhowImportResult, KnowhowImportStrategy, KnowledgeStats, IngestResult,
-  AgentMatchResult, AgentExecutionEvent,
+  AgentMatchResult, AgentExecutionEvent, AgentRunCancelResponse, AgentRunRecord,
   ContextMetadata, SkillSuggestionEvent,
-  PromptModeConfig, PromptPack, PromptTemplate, PromptScope, SystemPromptMap, SystemPromptPreset,
+  SystemPromptPreset,
+  Conversation, Message,
 } from '@/types';
 
 /** 获取后端 API 基础 URL */
@@ -30,6 +31,118 @@ export async function checkHealth(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export interface ChatStatePayload {
+  workspace_id: string;
+  conversations: Conversation[];
+  messages_by_conversation: Record<string, Message[]>;
+}
+
+export async function getChatState(): Promise<ChatStatePayload> {
+  const res = await fetch(`${getBaseUrl()}/chat/state`);
+  if (!res.ok) throw new Error('获取会话状态失败');
+  return res.json();
+}
+
+export async function createConversationRecord(
+  roleId: string,
+  surface: 'chat' | 'agent' = 'chat',
+  title = '新对话'
+): Promise<Conversation> {
+  const res = await fetch(`${getBaseUrl()}/conversations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role_id: roleId, surface, title }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '创建对话失败' }));
+    throw new Error(error.detail || '创建对话失败');
+  }
+  const data = await res.json();
+  return data.conversation as Conversation;
+}
+
+export async function updateConversationRecord(
+  conversationId: string,
+  payload: Partial<{
+    title: string;
+    surface: 'chat' | 'agent';
+    role_id: string;
+    is_pinned: boolean;
+    is_title_customized: boolean;
+  }>
+): Promise<Conversation> {
+  const res = await fetch(`${getBaseUrl()}/conversations/${encodeURIComponent(conversationId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '更新对话失败' }));
+    throw new Error(error.detail || '更新对话失败');
+  }
+  const data = await res.json();
+  return data.conversation as Conversation;
+}
+
+export async function deleteConversationRecord(conversationId: string): Promise<void> {
+  const res = await fetch(`${getBaseUrl()}/conversations/${encodeURIComponent(conversationId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '删除对话失败' }));
+    throw new Error(error.detail || '删除对话失败');
+  }
+}
+
+export async function createMessageRecord(
+  conversationId: string,
+  payload: Pick<Message, 'role' | 'content'> & Partial<Pick<Message, 'model' | 'tokenInput' | 'tokenOutput' | 'durationMs' | 'metadata'>>
+): Promise<Message> {
+  const res = await fetch(`${getBaseUrl()}/conversations/${encodeURIComponent(conversationId)}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      role: payload.role,
+      content: payload.content,
+      model: payload.model ?? '',
+      token_input: payload.tokenInput ?? 0,
+      token_output: payload.tokenOutput ?? 0,
+      duration_ms: payload.durationMs ?? 0,
+      metadata: payload.metadata ?? {},
+    }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '创建消息失败' }));
+    throw new Error(error.detail || '创建消息失败');
+  }
+  const data = await res.json();
+  return data.message as Message;
+}
+
+export async function updateMessageRecord(
+  messageId: string,
+  payload: Partial<Pick<Message, 'content' | 'model' | 'tokenInput' | 'tokenOutput' | 'durationMs' | 'metadata'>>
+): Promise<Message> {
+  const res = await fetch(`${getBaseUrl()}/messages/${encodeURIComponent(messageId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ...(payload.content !== undefined ? { content: payload.content } : {}),
+      ...(payload.model !== undefined ? { model: payload.model } : {}),
+      ...(payload.tokenInput !== undefined ? { token_input: payload.tokenInput } : {}),
+      ...(payload.tokenOutput !== undefined ? { token_output: payload.tokenOutput } : {}),
+      ...(payload.durationMs !== undefined ? { duration_ms: payload.durationMs } : {}),
+      ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
+    }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '更新消息失败' }));
+    throw new Error(error.detail || '更新消息失败');
+  }
+  const data = await res.json();
+  return data.message as Message;
 }
 
 // ===== 聊天接口 =====
@@ -58,7 +171,7 @@ export async function streamChat(
   onDone: () => void,
   onError: (error: string) => void,
   signal?: AbortSignal,
-  mode?: string,
+  roleId?: string,
   ragQuery?: string,
   onMetadata?: (metadata: ContextMetadata) => void,
   onSkillSuggestion?: (suggestion: SkillSuggestionEvent) => void,
@@ -137,7 +250,7 @@ export async function streamChat(
         stream: true,
         api_url: config.apiUrl,
         api_key: config.apiKey,
-        mode: mode ?? '',
+        role_id: roleId ?? '',
         rag_query: ragQuery ?? '',
       }),
       signal,
@@ -292,19 +405,19 @@ export async function deleteSkill(skillId: string): Promise<{ id: string; messag
 
 /** 获取指定模式的 System Prompt */
 export async function getSystemPrompt(
-  mode: string
-): Promise<{ mode: string; prompt: string; is_custom: boolean; resolved_prompt?: string; template_ids?: string[]; missing_variables?: string[] }> {
-  const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(mode)}`);
+  roleId: string
+): Promise<{ role_id: string; prompt: string; default_prompt?: string; is_custom: boolean; resolved_prompt?: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(roleId)}`);
   if (!res.ok) throw new Error('获取 System Prompt 失败');
   return res.json();
 }
 
 /** 保存指定模式的 System Prompt */
 export async function updateSystemPrompt(
-  mode: string,
+  roleId: string,
   prompt: string
-): Promise<{ mode: string; prompt: string; resolved_prompt?: string; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(mode)}`, {
+): Promise<{ role_id: string; prompt: string; default_prompt?: string; resolved_prompt?: string; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(roleId)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt }),
@@ -318,9 +431,9 @@ export async function updateSystemPrompt(
 
 /** 重置指定模式的 System Prompt 为默认值 */
 export async function resetSystemPrompt(
-  mode: string
-): Promise<{ mode: string; prompt: string; resolved_prompt?: string; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(mode)}`, {
+  roleId: string
+): Promise<{ role_id: string; prompt: string; default_prompt?: string; resolved_prompt?: string; message: string }> {
+  const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(roleId)}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -330,50 +443,25 @@ export async function resetSystemPrompt(
   return res.json();
 }
 
-export async function getSystemPrompts(): Promise<{
-  prompts: SystemPromptMap;
-  defaults: SystemPromptMap;
-  custom_modes: string[];
-}> {
-  const res = await fetch(`${getBaseUrl()}/settings/system-prompts`);
-  if (!res.ok) throw new Error('获取 System Prompts 失败');
-  return res.json();
-}
-
-export async function updateSystemPrompts(
-  prompts: SystemPromptMap
-): Promise<{ prompts: SystemPromptMap; defaults: SystemPromptMap; custom_modes: string[]; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/system-prompts`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompts }),
-  });
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '保存 System Prompts 失败' }));
-    throw new Error(error.detail);
-  }
-  return res.json();
-}
-
 export async function listSystemPromptPresets(): Promise<SystemPromptPreset[]> {
   const res = await fetch(`${getBaseUrl()}/settings/system-prompt-presets`);
-  if (!res.ok) throw new Error('获取 System Prompt 预设失败');
+  if (!res.ok) throw new Error('鑾峰彇 System Prompt 棰勮澶辫触');
   const data = await res.json();
   return Array.isArray(data) ? data : (data.presets ?? []);
 }
 
 export async function createSystemPromptPreset(
   name: string,
-  mode: string,
+  roleId: string,
   prompt: string
 ): Promise<{ preset: SystemPromptPreset; message: string }> {
   const res = await fetch(`${getBaseUrl()}/settings/system-prompt-presets`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, mode, prompt }),
+    body: JSON.stringify({ name, role_id: roleId, prompt }),
   });
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '保存预设失败' }));
+    const error = await res.json().catch(() => ({ detail: '淇濆瓨棰勮澶辫触' }));
     throw new Error(error.detail);
   }
   return res.json();
@@ -384,127 +472,7 @@ export async function deleteSystemPromptPreset(presetId: string): Promise<{ id: 
     method: 'DELETE',
   });
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '删除预设失败' }));
-    throw new Error(error.detail);
-  }
-  return res.json();
-}
-
-export async function listPromptTemplates(scope?: PromptScope): Promise<PromptTemplate[]> {
-  const query = scope ? `?scope=${encodeURIComponent(scope)}` : '';
-  const res = await fetch(`${getBaseUrl()}/settings/prompt-templates${query}`);
-  if (!res.ok) throw new Error('获取提示词模板失败');
-  const data = await res.json();
-  return Array.isArray(data) ? data : (data.templates ?? []);
-}
-
-export async function listPromptPacks(): Promise<PromptPack[]> {
-  const res = await fetch(`${getBaseUrl()}/settings/prompt-packs`);
-  if (!res.ok) throw new Error('获取官方模板包失败');
-  const data = await res.json();
-  return Array.isArray(data) ? data : (data.packs ?? []);
-}
-
-export async function createPromptTemplate(
-  payload: Pick<PromptTemplate, 'name' | 'description' | 'scope' | 'content' | 'variables'>
-): Promise<{ template: PromptTemplate; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/prompt-templates`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '创建提示词模板失败' }));
-    throw new Error(error.detail);
-  }
-  return res.json();
-}
-
-export async function updatePromptTemplate(
-  templateId: string,
-  payload: Partial<Pick<PromptTemplate, 'name' | 'description' | 'scope' | 'content' | 'variables'>>
-): Promise<{ template: PromptTemplate; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/prompt-templates/${encodeURIComponent(templateId)}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '更新提示词模板失败' }));
-    throw new Error(error.detail);
-  }
-  return res.json();
-}
-
-export async function deletePromptTemplate(templateId: string): Promise<{ id: string; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/prompt-templates/${encodeURIComponent(templateId)}`, {
-    method: 'DELETE',
-  });
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '删除提示词模板失败' }));
-    throw new Error(error.detail);
-  }
-  return res.json();
-}
-
-export async function getPromptConfig(mode: string): Promise<PromptModeConfig> {
-  const res = await fetch(`${getBaseUrl()}/settings/prompt-config/${encodeURIComponent(mode)}`);
-  if (!res.ok) throw new Error('获取提示词挂载配置失败');
-  return res.json();
-}
-
-export async function updatePromptConfig(
-  mode: string,
-  payload: Pick<PromptModeConfig, 'template_ids' | 'variables' | 'extra_prompt'>
-): Promise<PromptModeConfig & { message: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/prompt-config/${encodeURIComponent(mode)}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '保存提示词挂载配置失败' }));
-    throw new Error(error.detail);
-  }
-  return res.json();
-}
-
-export async function resetPromptConfig(
-  mode: string
-): Promise<PromptModeConfig & { message: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/prompt-config/${encodeURIComponent(mode)}`, {
-    method: 'DELETE',
-  });
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '重置提示词挂载配置失败' }));
-    throw new Error(error.detail);
-  }
-  return res.json();
-}
-
-/** 匹配用户输入到最佳 Skill，返回命中列表（后端返回 {matches: [...], total: N}） */
-export async function applyPromptPack(
-  packId: string,
-  payload: { modes: string[]; strategy?: 'append' | 'replace' }
-): Promise<{
-  pack: PromptPack;
-  strategy: 'append' | 'replace';
-  results: Array<{
-    mode: string;
-    status: 'applied' | 'skipped';
-    applied_template_ids: string[];
-    template_ids: string[];
-    missing_variables?: string[];
-  }>;
-  message: string;
-}> {
-  const res = await fetch(`${getBaseUrl()}/settings/prompt-packs/${encodeURIComponent(packId)}/apply`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '应用模板包失败' }));
+    const error = await res.json().catch(() => ({ detail: '鍒犻櫎棰勮澶辫触' }));
     throw new Error(error.detail);
   }
   return res.json();
@@ -769,12 +737,13 @@ export async function getKnowledgeStats(): Promise<KnowledgeStats> {
 
 /** Agent 模式 - 匹配 Skill */
 export async function agentMatch(
-  query: string
+  query: string,
+  roleId?: string
 ): Promise<AgentMatchResult> {
   const res = await fetch(`${getBaseUrl()}/agent/match`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, role_id: roleId }),
   });
   if (!res.ok) throw new Error('Agent 匹配失败');
   return res.json();
@@ -782,17 +751,44 @@ export async function agentMatch(
 
 /** Agent 模式 - 执行 Skill（SSE 流式） */
 export async function agentExecute(
-  skillId: string,
+  roleId: string,
+  query: string,
+  skillId: string | undefined,
   params: Record<string, unknown>,
+  config: Pick<LLMConfig, 'apiUrl' | 'apiKey' | 'model'>,
   onEvent: (event: AgentExecutionEvent) => void,
   onError: (error: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: {
+    conversationId?: string;
+    runId?: string;
+    continueFromRunId?: string;
+    continueMode?: 'continue' | 'retry';
+    continueNotes?: string;
+    llmProfileId?: string;
+    clientContext?: Record<string, unknown>;
+  }
 ): Promise<void> {
   try {
     const res = await fetch(`${getBaseUrl()}/agent/execute`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skill_id: skillId, params }),
+      body: JSON.stringify({
+        role_id: roleId,
+        query,
+        skill_id: skillId,
+        params,
+        conversation_id: options?.conversationId,
+        run_id: options?.runId,
+        continue_from_run_id: options?.continueFromRunId,
+        continue_mode: options?.continueMode,
+        continue_notes: options?.continueNotes,
+        llm_profile_id: options?.llmProfileId,
+        client_context: options?.clientContext ?? {},
+        api_url: config.apiUrl,
+        api_key: config.apiKey,
+        model: config.model,
+      }),
       signal,
     });
 
@@ -839,6 +835,17 @@ export async function agentExecute(
   }
 }
 
+export async function cancelAgentRun(runId: string): Promise<AgentRunCancelResponse> {
+  const res = await fetch(`${getBaseUrl()}/agent/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '取消 Agent 执行失败' }));
+    throw new Error(error.detail || '取消 Agent 执行失败');
+  }
+  return res.json();
+}
+
 // ===== 对话自动命名 =====
 
 /**
@@ -847,6 +854,16 @@ export async function agentExecute(
  * @param config LLM 配置
  * @returns 生成的标题字符串
  */
+export async function getAgentRun(runId: string): Promise<AgentRunRecord> {
+  const res = await fetch(`${getBaseUrl()}/agent/runs/${encodeURIComponent(runId)}`);
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '获取 Agent 执行记录失败' }));
+    throw new Error(error.detail || '获取 Agent 执行记录失败');
+  }
+  const data = await res.json();
+  return data.run as AgentRunRecord;
+}
+
 export async function generateAutoTitle(
   messages: ChatMessage[],
   config: LLMConfig
@@ -936,7 +953,12 @@ export async function createRole(payload: {
   icon?: string;
   description?: string;
   system_prompt?: string;
+  agent_prompt?: string;
   capabilities?: string[];
+  chat_capabilities?: string[];
+  agent_preflight?: string[];
+  allowed_surfaces?: Array<'chat' | 'agent'>;
+  agent_allowed_tools?: string[];
 }): Promise<Role> {
   const res = await fetch(`${getBaseUrl()}/settings/roles`, {
     method: 'POST',
@@ -956,7 +978,12 @@ export async function updateRole(
     icon: string;
     description: string;
     system_prompt: string;
+    agent_prompt: string;
     capabilities: string[];
+    chat_capabilities: string[];
+    agent_preflight: string[];
+    allowed_surfaces: Array<'chat' | 'agent'>;
+    agent_allowed_tools: string[];
     sort_order: number;
   }>
 ): Promise<Role> {

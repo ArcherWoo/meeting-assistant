@@ -22,7 +22,7 @@
 | React | 18 | UI 框架 |
 | TypeScript | 5 | 类型安全 |
 | Vite | 6 | 构建工具 / 开发服务器 |
-| Zustand | 最新 | 全局状态管理（含 localStorage 持久化） |
+| Zustand | 最新 | 全局状态管理（运行时缓存；聊天数据以后端 SQLite 为准） |
 | Tailwind CSS | 3 | 样式框架 |
 
 ### 后端
@@ -60,7 +60,7 @@
 ### 本次迭代：交互优化与工程完善
 - **📎 按钮重构**：从「直接导入知识库」改为「附件模式」——提取文本作为上下文随消息发送
 - **`/api/knowledge/extract-text`**：新增仅提取文本（不入库）的轻量端点
-- **对话历史持久化**：Zustand `persist` 中间件 + localStorage，刷新不丢数据
+- **对话历史持久化**：后端 SQLite 会话/消息存储 + 前端运行时缓存
 - **Context Panel 增强**：知识库管理 UI（导入文件、查看列表、删除记录）
 - **`start.py`**：一键启动脚本，含环境检测与依赖自动安装
 
@@ -84,7 +84,7 @@ Meeting Assistant/
 │   ├── main.tsx           # React 入口
 │   ├── services/api.ts    # 所有 HTTP/SSE 调用封装
 │   ├── stores/
-│   │   ├── chatStore.ts   # 多会话状态 + localStorage 持久化
+│   │   ├── chatStore.ts   # 多会话状态 + 后端数据库同步缓存
 │   │   └── appStore.ts    # 全局应用状态（后端连接状态等）
 │   └── components/
 │       ├── chat/
@@ -109,7 +109,7 @@ Meeting Assistant/
 | **数据库** | `backend/services/storage.py` → `roles` 表 | 角色持久化存储，支持 CRUD |
 | **后端 API** | `backend/routers/settings.py` `/settings/roles/*` | GET / POST / PUT / DELETE 角色端点 |
 | **前端 API** | `src/services/api.ts` `listRoles / createRole / updateRole / deleteRole` | HTTP 封装 |
-| **全局状态** | `src/stores/appStore.ts` `roles: Role[]` + `currentRoleId: string` | Zustand store，持久化到 localStorage |
+| **全局状态** | `src/stores/appStore.ts` `roles: Role[]` + `currentRoleId: string` | Zustand store，持久化 UI/LLM 配置 |
 | **初始化** | `src/main.tsx` `initBackend()` | 启动时调用 `listRoles()` 并写入 store，同步设置 `rolesLoaded = true` |
 
 **角色数据结构**（`src/types/index.ts`）：
@@ -121,7 +121,7 @@ interface Role {
   description: string;
   system_prompt: string; // 该角色的系统提示词
   capabilities: string[];// 能力列表（如 ["rag"]）
-  is_builtin: number;    // 0 = 用户创建，1 = 内置（当前三个默认角色均为 0）
+  is_builtin: number;    // 0 = 用户创建，1 = 默认内置角色（可编辑、可删除）
   sort_order: number;
 }
 ```
@@ -136,25 +136,13 @@ interface Role {
 **`chatStore`**（`src/stores/chatStore.ts`）管理：
 - 对话列表 `conversations`、活跃对话 `activeConversationId`
 - 消息列表 `messages`、流式状态 `isStreaming`
-- 两个 store 均通过 Zustand `persist` 中间件持久化到 **localStorage**
+- 通过 `/api/chat/state`、`/api/conversations/*`、`/api/messages/*` 与后端 SQLite 同步；不再把 localStorage 作为聊天真相源
 
-### 5.3 localStorage 向后兼容迁移
+### 5.3 会话持久化现状
 
-旧版数据使用 `Conversation.mode`（字符串），新版已重命名为 `Conversation.roleId`。
-`chatStore.ts` 的 `normalizeConversations()` 函数在 Zustand **rehydration** 阶段自动执行迁移：
-
-```typescript
-// chatStore.ts（简化）
-function normalizeConversations(convs: any[]): Conversation[] {
-  return convs.map((c) => ({
-    ...c,
-    roleId: c.roleId ?? c.mode ?? 'copilot', // 旧 mode 字段 → roleId
-    mode: undefined,                           // 清除旧字段
-  }));
-}
-```
-
-此迁移对用户透明，**零数据丢失**，无需手动清空 localStorage。
+- 当前聊天会话与消息统一持久化到后端 SQLite（`backend/services/storage.py`）。
+- 前端 `chatStore` 仅保存运行时状态、流式输出状态和当前已加载数据。
+- `localStorage` 不再承担会话历史真相源职责；保留持久化的是 `appStore` 中的 UI/LLM 配置。
 
 ---
 
@@ -164,7 +152,7 @@ function normalizeConversations(convs: any[]): Conversation[] {
 |------|------|
 | LanceDB 未安装 | 向量检索（RAG）不可用；知识库只存元数据，无法语义检索 |
 | PDF/Word/Excel 解析 | 依赖 PyMuPDF / python-docx / openpyxl，未安装则相应格式无法解析 |
-| 知识库向量搜索 | 当前 RAG 管道尚未完整接入对话（检索结果未自动注入 prompt） |
+| 知识库向量搜索 | 仅当当前角色 `capabilities` 包含 `rag` 时才会触发检索；若缺少 Embedding/LanceDB 能力则自动降级 |
 
 ---
 

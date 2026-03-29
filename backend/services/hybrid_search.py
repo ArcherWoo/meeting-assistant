@@ -20,7 +20,13 @@ logger = logging.getLogger(__name__)
 class HybridSearchService:
     """Hybrid retrieval for structured records and document chunks."""
 
+    MAX_QUERY_TERMS = 14
+    MAX_CHINESE_SUBTERM_LENGTH = 6
     QUERY_STOPWORDS = {
+        "请",
+        "请帮我",
+        "请帮忙",
+        "麻烦",
         "请问",
         "帮我",
         "帮忙",
@@ -56,6 +62,15 @@ class HybridSearchService:
         "看看",
         "一下",
         "一下吧",
+        "查看",
+        "查询",
+        "检索",
+        "查找",
+        "核对",
+        "评估",
+        "分析",
+        "判断",
+        "确认",
         "呢",
         "吗",
         "吧",
@@ -64,7 +79,25 @@ class HybridSearchService:
         "的",
         "了",
         "和",
+        "与",
+        "及",
+        "并",
+        "并且",
     }
+
+    def _expand_chinese_subterms(self, fragment: str) -> list[str]:
+        text = fragment.strip()
+        if len(text) < 2:
+            return []
+        if len(text) <= 3:
+            return [text]
+
+        terms = [text]
+        max_window = min(self.MAX_CHINESE_SUBTERM_LENGTH, len(text) - 1)
+        for window in range(max_window, 1, -1):
+            for start in range(0, len(text) - window + 1):
+                terms.append(text[start:start + window])
+        return terms
 
     def _extract_query_terms(self, query: str) -> List[str]:
         normalized = " ".join((query or "").lower().split())
@@ -83,7 +116,8 @@ class HybridSearchService:
             cleaned = segment
             for stopword in sorted(self.QUERY_STOPWORDS, key=len, reverse=True):
                 cleaned = cleaned.replace(stopword, " ")
-            candidates.extend(part.strip() for part in cleaned.split() if len(part.strip()) >= 2)
+            for part in [part.strip() for part in cleaned.split() if len(part.strip()) >= 2]:
+                candidates.extend(self._expand_chinese_subterms(part))
 
         deduped: list[str] = []
         seen: set[str] = set()
@@ -93,7 +127,7 @@ class HybridSearchService:
                 continue
             seen.add(candidate)
             deduped.append(candidate)
-            if len(deduped) >= 8:
+            if len(deduped) >= self.MAX_QUERY_TERMS:
                 break
         return deduped
 

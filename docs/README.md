@@ -12,7 +12,9 @@
 
 - 项目结构：[architecture/PROJECT_STRUCTURE.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/architecture/PROJECT_STRUCTURE.md)
 - 开发说明：[development/DEVELOPMENT.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/development/DEVELOPMENT.md)
+- 改造蓝图：[development/CHAT_AGENT_REFACTOR_BLUEPRINT.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/development/CHAT_AGENT_REFACTOR_BLUEPRINT.md)
 - 部署说明：[deployment/SERVER_DEPLOYMENT.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/deployment/SERVER_DEPLOYMENT.md)
 - 产品文档：[product/PRD.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/product/PRD.md)
+- 当前状态：[CURRENT_STATE.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/CURRENT_STATE.md)
 - SSE 元数据说明：[reference/SSE_CONTEXT_METADATA.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/reference/SSE_CONTEXT_METADATA.md)
 - SSE 示例：[reference/chat-completions-context-example.sse](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/reference/chat-completions-context-example.sse)

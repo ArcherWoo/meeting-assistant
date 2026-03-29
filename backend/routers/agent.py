@@ -1,77 +1,99 @@
-"""
-Agent 执行路由 - PRD §2.4
-POST /api/agent/match   - 匹配用户意图到 Skill
-POST /api/agent/execute - 执行 Skill（SSE 流式进度）
-"""
+"""Agent routes backed by Agent Runtime V2."""
+
 import json
-import logging
-from fastapi import APIRouter
+
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 
-from services.agent_executor import agent_executor
+from services.agent_runtime.errors import (
+    AgentConfigurationError,
+    AgentContinuationError,
+    RoleNotAllowedForSurfaceError,
+)
+from services.agent_runtime.history import load_agent_run
+from services.agent_runtime.models import (
+    AgentExecuteRequest,
+    AgentMatchRequest,
+    AgentMatchResponse,
+    AgentSkillExecutionProfile,
+)
+from services.agent_runtime.role_policy import (
+    load_agent_role_policy,
+    normalize_agent_role_id,
+)
+from services.agent_runtime.run_registry import run_registry
+from services.agent_runtime.runner import execute_agent_stream
+from services.skill_manager import skill_manager
+from services.skill_matcher import skill_matcher
+from services.storage import storage
 
-logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-class AgentMatchRequest(BaseModel):
-    """Agent 意图匹配请求"""
-    query: str
-
-
-class AgentExecuteRequest(BaseModel):
-    """Agent 执行请求"""
-    skill_id: str
-    params: dict = {}
-    # LLM 配置（前端传入）
-    api_url: str = ""
-    api_key: str = ""
-    model: str = "gpt-4o"
-
-
 @router.post("/agent/match")
-async def match_intent(request: AgentMatchRequest) -> dict:
-    """根据用户输入匹配最佳 Skill"""
-    result = await agent_executor.match_skill(request.query)
-    if not result:
-        return {"matched": False, "message": "未找到匹配的 Skill"}
-    return {"matched": True, **result}
+async def match_intent(request: AgentMatchRequest) -> AgentMatchResponse:
+    query = request.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+
+    normalized_role_id = normalize_agent_role_id(request.role_id or "executor")
+    try:
+        _, policy = await load_agent_role_policy(storage, normalized_role_id)
+    except RoleNotAllowedForSurfaceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if "pre_match_skill" not in policy.agent_preflight:
+        return AgentMatchResponse(
+            matched=False,
+            role_id=normalized_role_id,
+            message="当前角色未启用 Skill 预匹配",
+        )
+
+    if not skill_manager._loaded:
+        await skill_manager.initialize()
+
+    skills = skill_manager.list_skills()
+    if not skills:
+        return AgentMatchResponse(
+            matched=False,
+            role_id=normalized_role_id,
+            message="未找到可用的 Skill",
+        )
+
+    results = skill_matcher.match(query, skills)
+    if not results:
+        return AgentMatchResponse(
+            matched=False,
+            role_id=normalized_role_id,
+            message="未找到匹配的 Skill",
+        )
+
+    best = results[0]
+    return AgentMatchResponse(
+        matched=True,
+        skill_id=best.skill.id,
+        skill_name=best.skill.name,
+        score=best.score,
+        confidence=best.confidence,
+        matched_keywords=best.matched_keywords,
+        parameters=list(best.skill.parameters),
+        execution_profile=AgentSkillExecutionProfile(**best.skill.execution_profile.__dict__),
+        role_id=normalized_role_id,
+    )
 
 
 @router.post("/agent/execute")
 async def execute_skill(request: AgentExecuteRequest):
-    """
-    执行 Skill - SSE 流式返回执行进度
-    每个事件格式: data: {"type": "step_start|step_complete|complete|error", ...}
-    """
-    # 构建 LLM 调用函数（如果提供了配置）
-    llm_fn = None
-    if request.api_url and request.api_key:
-        from services.llm_service import LLMService
-        llm = LLMService()
-
-        async def _llm_call(prompt: str) -> str:
-            result = await llm.chat(
-                messages=[{"role": "user", "content": prompt}],
-                model=request.model,
-                temperature=0.3,
-                max_tokens=4096,
-                api_url=request.api_url,
-                api_key=request.api_key,
-            )
-            return result.get("choices", [{}])[0].get("message", {}).get("content", "")
-
-        llm_fn = _llm_call
-
     async def event_stream():
-        """SSE 事件流生成器"""
-        async for event in agent_executor.execute(
-            skill_id=request.skill_id,
-            params=request.params,
-            llm_fn=llm_fn,
-        ):
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        try:
+            async for event in execute_agent_stream(request):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except (RoleNotAllowedForSurfaceError, AgentContinuationError) as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+        except AgentConfigurationError as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+        except Exception as exc:  # pragma: no cover
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -84,3 +106,33 @@ async def execute_skill(request: AgentExecuteRequest):
         },
     )
 
+
+@router.get("/agent/runs/{run_id}")
+async def get_agent_run(run_id: str) -> dict:
+    run = await load_agent_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run 不存在")
+    return {"run": run}
+
+
+@router.post("/agent/runs/{run_id}/cancel")
+async def cancel_agent_run(run_id: str) -> dict:
+    run = await load_agent_run(run_id)
+    if run and run.get("status") in {"completed", "failed", "cancelled"}:
+        return {
+            "run": run,
+            "cancel_requested": False,
+            "message": f"当前 run 已处于 {run.get('status')} 状态",
+        }
+
+    registered_and_cancelled = await run_registry.request_cancel(run_id)
+    updated_run = await load_agent_run(run_id) or run
+    message = "取消请求已提交，等待后端停止"
+    if registered_and_cancelled or (updated_run and updated_run.get("status") == "cancelled"):
+        message = "执行已取消"
+
+    return {
+        "run": updated_run,
+        "cancel_requested": True,
+        "message": message,
+    }

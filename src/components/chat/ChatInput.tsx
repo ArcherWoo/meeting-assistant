@@ -19,7 +19,7 @@ interface Attachment {
 
 interface Props {
   /** 发送消息（content + 可选附件文本上下文） */
-  onSend: (content: string, attachmentContext?: string) => void;
+  onSend: (content: string, attachmentContext?: string) => Promise<void> | void;
   onStop: () => void;
   isStreaming: boolean;
   disabled?: boolean;
@@ -125,7 +125,9 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
         )).join('')
       : undefined;
 
-    onSend(userMessage, attachmentContext);
+    void Promise.resolve(onSend(userMessage, attachmentContext)).catch((error: unknown) => {
+      alert((error as Error).message || '发送失败');
+    });
     setInput('');
     setAttachments([]);
     if (textareaRef.current) {

@@ -5,6 +5,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type ChangeEvent } from 'react';
 import { useAppStore } from '@/stores/appStore';
 import { useChatStore } from '@/stores/chatStore';
+import RetrievalPlanCard from '@/components/common/RetrievalPlanCard';
 import {
   listSkills, getKnowledgeStats, getKnowhowStats,
   getSkillContent, saveSkill, updateSkill, deleteSkill,
@@ -117,7 +118,7 @@ function getMetadataMessage(messages: Message[]): Message | null {
 }
 
 export default function ContextPanel({ width }: { width?: number }) {
-  const { toggleContextPanel, currentRoleId, roles } = useAppStore();
+  const { toggleContextPanel, activeSurface, currentRoleId, roles } = useAppStore();
   const currentRole = roles.find((r) => r.id === currentRoleId);
   const {
     conversations,
@@ -148,11 +149,13 @@ export default function ContextPanel({ width }: { width?: number }) {
 
   const modeConversation = useMemo(() => {
     const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
-    if (activeConversation?.roleId === currentRoleId) {
+    if (activeConversation?.surface === activeSurface && activeConversation?.roleId === currentRoleId) {
       return activeConversation;
     }
-    return conversations.find((conversation) => conversation.roleId === currentRoleId) ?? null;
-  }, [conversations, activeConversationId, currentRoleId]);
+    return conversations.find((conversation) => (
+      conversation.surface === activeSurface && conversation.roleId === currentRoleId
+    )) ?? null;
+  }, [conversations, activeConversationId, activeSurface, currentRoleId]);
 
   const visibleConversationId = modeConversation?.id ?? null;
   const visibleMessages = visibleConversationId ? (messagesByConversation[visibleConversationId] ?? []) : [];
@@ -224,7 +227,7 @@ export default function ContextPanel({ width }: { width?: number }) {
   };
 
   // 初始加载 + 角色切换时刷新
-  useEffect(() => { refresh(); }, [currentRoleId, refresh]);
+  useEffect(() => { refresh(); }, [activeSurface, currentRoleId, refresh]);
 
   // 定时轮询刷新（每 10 秒）
   useEffect(() => {
@@ -299,7 +302,7 @@ export default function ContextPanel({ width }: { width?: number }) {
   const handleDeleteSkill = async (skill: SkillMeta, e: React.MouseEvent) => {
     e.stopPropagation();
     const builtinNote = skill.is_builtin
-      ? '\n（这是内置 Skill，删除后将不再出现，重启后依然生效）'
+      ? '\n（这是内置 Skill，删除后会立即从列表隐藏，不会修改内置源文件）'
       : '';
     if (!confirm(`确定要删除 Skill「${skill.name}」吗？${builtinNote}`)) return;
     setDeletingSkillId(skill.id);
@@ -363,7 +366,7 @@ export default function ContextPanel({ width }: { width?: number }) {
   return (
     <aside className={panelCls} style={panelStyle ?? { width: 300, minWidth: 300, maxWidth: 300 }}>
       <div className="win-toolbar flex h-12 items-center justify-between px-3">
-        <h3 className="text-sm font-medium">上下文</h3>
+        <h3 className="text-sm font-medium">上下文与资源</h3>
         <button onClick={toggleContextPanel} className="win-icon-button h-8 w-8">✕</button>
       </div>
 
@@ -379,16 +382,19 @@ export default function ContextPanel({ width }: { width?: number }) {
 
           <div className="border-t border-surface-divider dark:border-dark-divider" />
 
-          {/* 最近一次回答的上下文引用 */}
+          {/* 当前上下文 */}
           <section>
-            <div className="flex items-center justify-between mb-2 gap-2">
-              <h4 className="win-section-title">最近回答引用</h4>
+            <div className="flex items-center justify-between mb-1">
+              <h4 className="win-section-title">当前上下文</h4>
               {latestCitations.length > 0 && (
-                <span className="text-[10px] text-text-secondary">
+                <span className="text-[10px] text-text-secondary flex-shrink-0">
                   {latestCitations.length} 条来源
                 </span>
               )}
             </div>
+            <p className="mb-2 text-[11px] leading-5 text-text-secondary">
+              这里只展示最近一次回答或执行实际使用到的引用、检索计划和 Skill 建议。
+            </p>
 
             {latestContext || latestSkillSuggestion ? (
               <div className="space-y-2">
@@ -418,6 +424,14 @@ export default function ContextPanel({ width }: { width?: number }) {
                       </div>
                     )}
                   </div>
+                )}
+
+                {latestContext?.retrieval_plan && (
+                  <RetrievalPlanCard
+                    plan={latestContext.retrieval_plan}
+                    compact
+                    title="最近检索计划"
+                  />
                 )}
 
                 {latestSkillSuggestion && (
@@ -591,20 +605,32 @@ export default function ContextPanel({ width }: { width?: number }) {
               </div>
             ) : (
               <p className="rounded-lg border border-dashed border-surface-divider px-3 py-3 text-[11px] leading-5 text-text-secondary dark:border-dark-divider">
-                {currentRole?.capabilities?.includes('rag')
-                  ? `发送一条消息后，这里会展示最近一条回答引用的文件名、位置和摘要。`
-                  : '当前角色未启用 RAG；切换到支持 RAG 的角色并发起对话后，这里会展示上下文引用。'}
+                {(currentRole?.chat_capabilities?.includes('auto_knowledge') || currentRole?.capabilities?.includes('rag'))
+                  ? '发送一条消息后，这里会展示最近一次回答实际使用到的上下文与引用。'
+                  : '当前角色未启用 Chat 自动知识检索；切换到支持相关能力的角色并发起对话后，这里会展示当前上下文。'}
               </p>
             )}
           </section>
 
           <div className="border-t border-surface-divider dark:border-dark-divider" />
 
-          {/* Skill 列表 */}
+          <section>
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="win-section-title">资源库</h4>
+              <span className="text-[10px] text-text-secondary">全局资源</span>
+            </div>
+            <p className="mt-1 text-[11px] leading-5 text-text-secondary">
+              下面展示的是系统中已有的资源，不代表当前角色已经启用对应的 Chat 自动增强或 Agent 工具权限。
+            </p>
+          </section>
+
+          <div className="border-t border-surface-divider dark:border-dark-divider" />
+
+          {/* Skill 资源 */}
           <section>
             <div className="flex items-center justify-between mb-2">
               <h4 className="win-section-title">
-                可用 Skill ({skills.length})
+                Skill 库 ({skills.length})
               </h4>
               <div className="flex items-center gap-1.5">
                 <button onClick={refresh} className="win-icon-button h-7 w-7 text-[11px]" title="刷新">↻</button>
@@ -640,7 +666,7 @@ export default function ContextPanel({ width }: { width?: number }) {
                           onClick={(e) => handleDeleteSkill(skill, e)}
                           disabled={deletingSkillId === skill.id}
                           className="win-icon-button h-7 w-7 text-[11px] disabled:opacity-50"
-                          title={skill.is_builtin ? '删除（逻辑删除，重启后生效）' : '删除'}
+                          title={skill.is_builtin ? '删除（隐藏内置 Skill）' : '删除'}
                         >
                           {deletingSkillId === skill.id ? '⏳' : '🗑'}
                         </button>
@@ -663,11 +689,11 @@ export default function ContextPanel({ width }: { width?: number }) {
 
           <div className="border-t border-surface-divider dark:border-dark-divider" />
 
-          {/* 知识库管理 */}
+          {/* 知识库资源 */}
           <section>
-            <div className="flex items-center justify-between mb-2">
-              <h4 className="win-section-title">知识库</h4>
-              <div className="flex items-center gap-1">
+            <div className="flex items-center justify-between mb-1">
+              <h4 className="win-section-title">知识库资源</h4>
+              <div className="flex items-center gap-1 flex-shrink-0">
                 <input
                   ref={kbFileInputRef}
                   type="file"
@@ -685,6 +711,9 @@ export default function ContextPanel({ width }: { width?: number }) {
                 </button>
               </div>
             </div>
+            <p className="mb-2 text-[11px] leading-5 text-text-secondary">
+              导入与管理系统内的知识资源；是否被 Chat/Agent 使用由角色策略决定。
+            </p>
 
             {/* 统计卡片 */}
             {kbStats && (
@@ -724,7 +753,12 @@ export default function ContextPanel({ width }: { width?: number }) {
 
           {/* Know-how 规则库概览 */}
           <section>
-            <h4 className="win-section-title mb-2">Know-how 规则库</h4>
+            <div className="mb-2">
+              <h4 className="win-section-title">Know-how 规则库</h4>
+              <p className="mt-1 text-[11px] leading-5 text-text-secondary">
+                这里展示全局规则资源概况，不代表当前角色已经开启自动规则检索或主动查询规则库。
+              </p>
+            </div>
             {!statsLoaded ? (
               <div className="h-10 w-full rounded-md bg-surface-divider/40 animate-pulse dark:bg-dark-divider/40" />
             ) : khStats ? (

@@ -1,4 +1,4 @@
-"""
+﻿"""
 聊天路由 - 处理 LLM 对话请求
 支持流式 SSE 响应，兼容 OpenAI 协议
 """
@@ -8,13 +8,15 @@ import re
 from typing import AsyncGenerator, Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from services.llm_service import LLMService
 from services.storage import storage
 from services.context_assembler import context_assembler, AssembledContext
 from services.embedding_service import embedding_service
-from services.prompt_template_service import DEFAULT_SYSTEM_PROMPTS
+from services.role_config import resolve_chat_capabilities
+from services.retrieval_planner import RetrievalPlannerSettings
+from services.system_prompt_defaults import DEFAULT_SYSTEM_PROMPTS
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,11 @@ router = APIRouter()
 llm_service = LLMService()
 
 _ATTACHMENT_SEPARATOR = "\n\n---\n📎 附件"
+
+
+def _request_role_id(request: "ChatRequest") -> str:
+    role_id = (request.role_id or getattr(request, "mode", "") or "").strip()
+    return "executor" if role_id == "agent" else role_id
 
 
 def _strip_attachment_context(content: str) -> str:
@@ -112,17 +119,16 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     """聊天请求"""
+    model_config = ConfigDict(populate_by_name=True)
     messages: list[ChatMessage]
     model: str = "gpt-4o"
     temperature: float = 0.7
     max_tokens: int = 4096
     stream: bool = True
-    # LLM 配置（前端传入，避免后端存储敏感信息）
     api_url: str = "https://api.openai.com/v1"
     api_key: str = ""
-    # 当前交互模式（用于注入 System Prompt）
+    role_id: str = ""
     mode: str = ""
-    # 单独给 RAG 检索使用的纯净查询，避免附件全文污染召回
     rag_query: str = ""
 
 
@@ -144,22 +150,21 @@ class AutoTitleRequest(BaseModel):
 async def _build_messages(request: ChatRequest) -> list[dict]:
     """构建发送给 LLM 的消息列表（纯消息构建，不含 RAG 逻辑）"""
     messages = [m.model_dump() for m in request.messages]
+    role_id = _request_role_id(request)
 
-    # 若消息列表中已有 system 消息则不再注入
     has_system = any(m["role"] == "system" for m in messages)
-    if has_system or not request.mode:
+    if has_system or not role_id:
         return messages
 
-    # 从数据库获取自定义 System Prompt；未设置时回退到角色默认值或旧内置默认值
-    custom_prompt = await storage.get_setting(f"system_prompt_{request.mode}", default="")
+    custom_prompt = await storage.get_setting(f"system_prompt_{role_id}", default="")
     if custom_prompt.strip():
         base_prompt = custom_prompt.strip()
     else:
-        role = await storage.get_role(request.mode)
+        role = await storage.get_role(role_id)
         if role and role.get("system_prompt"):
             base_prompt = role["system_prompt"]
         else:
-            base_prompt = DEFAULT_SYSTEM_PROMPTS.get(request.mode, "")
+            base_prompt = DEFAULT_SYSTEM_PROMPTS.get(role_id, "")
 
     if base_prompt:
         messages = [{"role": "system", "content": base_prompt}] + messages
@@ -167,26 +172,28 @@ async def _build_messages(request: ChatRequest) -> list[dict]:
 
 
 async def _assemble_context(request: ChatRequest, messages: list[dict]) -> AssembledContext:
-    """独立的上下文组装步骤，仅拥有 'rag' 能力的角色才执行 RAG 检索。"""
-    if not request.mode:
+    """独立的上下文组装步骤，仅 Chat 自动增强开启时才执行检索。"""
+    role_id = _request_role_id(request)
+    if not role_id:
         return AssembledContext()
 
-    # 从数据库获取角色，检查是否具备 rag 能力
-    import json as _json
-    role = await storage.get_role(request.mode)
+    role = await storage.get_role(role_id)
     if role:
-        try:
-            caps = _json.loads(role.get("capabilities") or "[]")
-        except (ValueError, TypeError):
-            caps = []
-        if "rag" not in caps:
+        chat_capabilities = resolve_chat_capabilities(role)
+        enabled_surfaces = set()
+        if "auto_knowledge" in chat_capabilities:
+            enabled_surfaces.add("knowledge")
+        if "auto_knowhow" in chat_capabilities:
+            enabled_surfaces.add("knowhow")
+        if "auto_skill_suggestion" in chat_capabilities:
+            enabled_surfaces.add("skill")
+        if not enabled_surfaces:
             return AssembledContext()
     else:
-        # 角色不存在时降级：仅旧内置 copilot/agent 支持 RAG
-        if request.mode not in {"copilot", "agent"}:
+        if role_id not in {"copilot", "executor"}:
             return AssembledContext()
+        enabled_surfaces = {"knowledge", "knowhow"}
 
-    # 配置 embedding 服务：优先 DB 中独立 embedding 配置，回退到 LLM API 凭证
     emb_url = await storage.get_setting("embedding_api_url")
     emb_key = await storage.get_setting("embedding_api_key")
     emb_model = await storage.get_setting("embedding_model") or "text-embedding-3-small"
@@ -199,7 +206,6 @@ async def _assemble_context(request: ChatRequest, messages: list[dict]) -> Assem
             model="text-embedding-3-small",
         )
 
-    # 取最后一条 user 消息作为回退 query；优先使用前端显式传入的 rag_query
     user_query = ""
     for m in reversed(messages):
         if m["role"] == "user":
@@ -207,12 +213,20 @@ async def _assemble_context(request: ChatRequest, messages: list[dict]) -> Assem
             break
 
     rag_query = _strip_attachment_context(request.rag_query) or _strip_attachment_context(user_query)
-
     if not rag_query:
         return AssembledContext()
 
     try:
-        return await context_assembler.assemble(user_query=rag_query, mode=request.mode)
+        return await context_assembler.assemble(
+            user_query=rag_query,
+            role_id=role_id,
+            planner_settings=RetrievalPlannerSettings(
+                api_url=request.api_url,
+                api_key=request.api_key,
+                model=request.model,
+            ),
+            enabled_surfaces=enabled_surfaces,
+        )
     except Exception as e:
         logger.warning(f"[RAG] 上下文组装失败，降级为无增强回答: {e}")
         return AssembledContext()
@@ -400,3 +414,4 @@ async def test_connection(config: ConfigUpdateRequest):
         return {"success": True, "message": message, **result}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"连接失败: {str(e)}")
+

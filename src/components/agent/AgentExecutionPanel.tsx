@@ -1,245 +1,519 @@
 /**
- * Agent 执行面板
- * 展示 Skill 匹配结果和逐步执行进度（SSE 流式）
+ * AgentExecutionPanel — 端到端 Agent 执行面板
+ * 生命周期：matching → ready (参数表单) → executing (SSE步骤流) → completed / error / cancelled
  */
-import { useState, useRef, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import clsx from 'clsx';
-import { agentMatch, agentExecute } from '@/services/api';
-import type { AgentMatchResult, AgentExecutionEvent } from '@/types';
+import { useAppStore } from '@/stores/appStore';
+import { agentMatch, agentExecute, cancelAgentRun, getAgentRun, listKnowledgeImports } from '@/services/api';
+import type { AgentMatchResult, AgentFinalResult, AgentExecutionEvent, AgentRunRecord, AgentRunStep, SkillParam, MessageMetadata } from '@/types';
+import { buildAgentWriteBackPayload } from '@/utils/agentResult';
 
-/** 执行步骤状态 */
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+type Phase = 'matching' | 'ready' | 'executing' | 'completed' | 'error' | 'cancelled';
+
 interface StepState {
   index: number;
+  stepKey: string;
   description: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled';
+  toolName?: string;
   result?: string;
   error?: string;
 }
 
-type Phase = 'matching' | 'matched' | 'executing' | 'completed' | 'error';
+interface KnowledgeImport { id: string; file_name: string; import_status: string }
 
 interface Props {
   query: string;
-  onComplete?: (result: string) => void;
-  onCancel?: () => void;
+  conversationId: string;
+  onComplete: (payload: { content: string; metadata?: MessageMetadata }) => Promise<void> | void;
+  onCancel: () => void;
 }
 
-export default function AgentExecutionPanel({ query, onComplete, onCancel }: Props) {
+interface PanelUIProps {
+  phase: Phase;
+  matchResult: AgentMatchResult | null;
+  paramValues: Record<string, string>;
+  steps: StepState[];
+  finalResult: AgentFinalResult | null;
+  errorMsg: string | null;
+  knowledgeImports: KnowledgeImport[];
+  isStopping: boolean;
+  isFinalizing: boolean;
+  stepsEndRef: React.RefObject<HTMLDivElement>;
+  onParamChange: (name: string, val: string) => void;
+  onExecute: () => void;
+  onStop: () => void;
+  onCancel: () => void;
+  onFinalize: () => void;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function genRunId() { return `run-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
+
+function StepIcon({ status }: { status: StepState['status'] }) {
+  if (status === 'running') return <span className="animate-spin inline-block text-blue-500">⚙</span>;
+  if (status === 'completed') return <span className="text-emerald-500">✓</span>;
+  if (status === 'failed') return <span className="text-red-500">✕</span>;
+  return <span className="text-text-secondary">○</span>;
+}
+
+function mapRunStep(step: AgentRunStep): StepState {
+  return {
+    index: step.index,
+    stepKey: step.step_key,
+    description: step.description,
+    status: step.status === 'pending' ? 'running' : step.status,
+    toolName: step.toolName,
+    result: step.result,
+    error: step.error,
+  };
+}
+
+function upsertStep(previous: StepState[], next: StepState): StepState[] {
+  const index = previous.findIndex((item) => item.index === next.index);
+  if (index === -1) {
+    return [...previous, next].sort((a, b) => a.index - b.index);
+  }
+  return previous.map((item) => (item.index === next.index ? { ...item, ...next } : item));
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
+
+export default function AgentExecutionPanel({ query, conversationId, onComplete, onCancel }: Props) {
+  const { currentRoleId, llmConfigs, activeLLMConfigId } = useAppStore();
+  const activeLLMConfig = llmConfigs.find((c) => c.id === activeLLMConfigId) ?? llmConfigs[0];
+
   const [phase, setPhase] = useState<Phase>('matching');
   const [matchResult, setMatchResult] = useState<AgentMatchResult | null>(null);
+  const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [steps, setSteps] = useState<StepState[]>([]);
-  const [finalResult, setFinalResult] = useState('');
-  const [errorMsg, setErrorMsg] = useState('');
+  const [finalResult, setFinalResult] = useState<AgentFinalResult | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [knowledgeImports, setKnowledgeImports] = useState<KnowledgeImport[]>([]);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [finalRun, setFinalRun] = useState<AgentRunRecord | null>(null);
+  const [isStopping, setIsStopping] = useState(false);
+  const [isFinalizing, setIsFinalizing] = useState(false);
+
   const abortRef = useRef<AbortController | null>(null);
-  const matchStarted = useRef(false);
+  const stepsEndRef = useRef<HTMLDivElement>(null);
+  const finalizedRunKeyRef = useRef<string | null>(null);
+  const finalizingRunKeyRef = useRef<string | null>(null);
 
-  /** 开始匹配 */
-  const startMatch = async () => {
-    setPhase('matching');
-    try {
-      const result = await agentMatch(query);
-      setMatchResult(result);
-      setPhase(result.matched ? 'matched' : 'error');
-      if (!result.matched) setErrorMsg(result.message || '未找到匹配的 Skill');
-    } catch (e: unknown) {
+  useEffect(() => { stepsEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [steps]);
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
+
+  const applyRunSnapshot = useCallback((run: AgentRunRecord | null) => {
+    if (!run) return;
+    setFinalRun(run);
+    setRunId(run.runId);
+    setSteps(run.steps.map(mapRunStep));
+    setFinalResult(run.finalResult ?? null);
+    if (run.status === 'completed') {
+      setPhase('completed');
+      setErrorMsg(null);
+    } else if (run.status === 'cancelled') {
+      setPhase('cancelled');
+      setErrorMsg(run.error || '执行已取消');
+    } else if (run.status === 'failed') {
       setPhase('error');
-      setErrorMsg((e as Error).message);
+      setErrorMsg(run.error || 'Agent 执行失败');
     }
-  };
+  }, []);
 
-  // 自动开始匹配（仅一次）
+  const loadRunRecord = useCallback(async (nextRunId: string) => {
+    try {
+      const run = await getAgentRun(nextRunId);
+      applyRunSnapshot(run);
+      return run;
+    } catch {
+      return null;
+    }
+  }, [applyRunSnapshot]);
+
   useEffect(() => {
-    if (!matchStarted.current) {
-      matchStarted.current = true;
-      startMatch();
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    const params = matchResult?.parameters ?? [];
+    const needsImports = params.some((p) => p.source === 'knowledge_import' || p.type === 'file');
+    if (!needsImports) return;
+    let cancelled = false;
+    listKnowledgeImports()
+      .then((r) => { if (!cancelled) setKnowledgeImports(r.imports.filter((i) => i.import_status === 'completed')); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [matchResult]);
 
-  /** 确认执行 */
-  const startExecution = async () => {
-    if (!matchResult?.skill_id) return;
+  useEffect(() => {
+    let cancelled = false;
+    agentMatch(query, currentRoleId)
+      .then((result) => {
+        if (cancelled) return;
+        setMatchResult(result);
+        const defaults: Record<string, string> = {};
+        for (const p of result.parameters ?? []) {
+          if (p.default !== undefined) defaults[p.name] = String(p.default);
+        }
+        setParamValues(defaults);
+        setPhase('ready');
+      })
+      .catch((e: Error) => { if (!cancelled) { setErrorMsg(e.message); setPhase('error'); } });
+    return () => { cancelled = true; };
+  }, [query, currentRoleId]);
+
+  const handleExecute = useCallback(async () => {
+    if (!activeLLMConfig) { setErrorMsg('请先配置 LLM'); setPhase('error'); return; }
+    const rid = genRunId();
+    setRunId(rid);
+    setSteps([]);
+    setFinalResult(null);
+    setFinalRun(null);
+    setErrorMsg(null);
+    setIsStopping(false);
+    setIsFinalizing(false);
+    finalizedRunKeyRef.current = null;
+    finalizingRunKeyRef.current = null;
     setPhase('executing');
-    const controller = new AbortController();
-    abortRef.current = controller;
+    const abort = new AbortController();
+    abortRef.current = abort;
+
+    const normalizedParams: Record<string, unknown> = {};
+    for (const p of matchResult?.parameters ?? []) {
+      const raw = paramValues[p.name] ?? p.default ?? '';
+      normalizedParams[p.name] = p.type === 'boolean' ? raw === 'true' : raw;
+    }
 
     await agentExecute(
-      matchResult.skill_id,
-      { file: 'uploaded.pptx' },
+      currentRoleId, query, matchResult?.skill_id, normalizedParams,
+      { apiUrl: activeLLMConfig.apiUrl, apiKey: activeLLMConfig.apiKey, model: activeLLMConfig.model },
       (event: AgentExecutionEvent) => {
-        if (event.type === 'execution_start' && event.context?.steps) {
-          setSteps(event.context.steps.map((s) => ({
-            index: s.index, description: s.description, status: 'pending' as const,
+        if (event.run_id) {
+          setRunId(event.run_id);
+        }
+
+        if (event.type === 'execution_start' && event.context?.steps?.length) {
+          setSteps(event.context.steps.map((step) => ({
+            index: step.index,
+            stepKey: step.step_key ?? '',
+            description: step.description,
+            status: step.status === 'pending' ? 'running' : (step.status as StepState['status']),
+            toolName: step.tool_name,
+            result: step.result,
+            error: step.error,
           })));
-        } else if (event.type === 'step_start') {
-          setSteps((prev) => prev.map((s) =>
-            s.index === event.step ? { ...s, status: 'running' as const } : s));
-        } else if (event.type === 'step_complete') {
-          setSteps((prev) => prev.map((s) =>
-            s.index === event.step ? { ...s, status: 'completed' as const, result: event.result } : s));
-        } else if (event.type === 'step_error') {
-          setSteps((prev) => prev.map((s) =>
-            s.index === event.step ? { ...s, status: 'failed' as const, error: event.error } : s));
-        } else if (event.type === 'complete') {
-          setFinalResult(event.context?.result || event.result || '');
+          return;
+        }
+
+        if (event.type === 'step_start' && event.step_state) {
+          const s = event.step_state;
+          setSteps((prev) => upsertStep(prev, {
+            index: s.index,
+            stepKey: s.step_key,
+            description: s.description,
+            status: 'running',
+            toolName: s.tool_name,
+          }));
+        } else if (event.type === 'step_complete' && event.step_state) {
+          const s = event.step_state;
+          setSteps((prev) => upsertStep(prev, {
+            index: s.index,
+            stepKey: s.step_key,
+            description: s.description,
+            status: 'completed',
+            toolName: s.tool_name,
+            result: s.result,
+          }));
+        } else if (event.type === 'step_error' && event.step_state) {
+          const s = event.step_state;
+          setSteps((prev) => upsertStep(prev, {
+            index: s.index,
+            stepKey: s.step_key,
+            description: s.description,
+            status: 'failed',
+            toolName: s.tool_name,
+            error: s.error,
+          }));
+        } else if (event.type === 'complete' && event.final_result) {
+          setIsStopping(false);
+          setFinalResult(event.final_result);
           setPhase('completed');
+          if (event.run_id) {
+            void loadRunRecord(event.run_id);
+          }
         } else if (event.type === 'error') {
-          setErrorMsg(event.message || '执行失败');
+          setIsStopping(false);
+          setErrorMsg(event.error ?? event.message ?? 'Agent 执行失败');
           setPhase('error');
+          if (event.run_id) {
+            void loadRunRecord(event.run_id);
+          }
+        } else if (event.type === 'cancelled') {
+          setIsStopping(false);
+          setErrorMsg(event.message ?? '执行已取消');
+          setPhase('cancelled');
+          if (event.run_id) {
+            void loadRunRecord(event.run_id);
+          }
         }
       },
-      (error) => { setErrorMsg(error); setPhase('error'); },
-      controller.signal,
+      (err: string) => {
+        setIsStopping(false);
+        setErrorMsg(err);
+        setPhase('error');
+        void loadRunRecord(rid);
+      },
+      abort.signal,
+      { conversationId, runId: rid },
     );
-  };
+  }, [activeLLMConfig, currentRoleId, query, matchResult, paramValues, conversationId, loadRunRecord]);
 
-  const handleStop = () => { abortRef.current?.abort(); onCancel?.(); };
+  const handleCancel = useCallback(() => {
+    onCancel();
+  }, [onCancel]);
+
+  const handleStop = useCallback(() => {
+    if (!runId || isStopping) return;
+    setIsStopping(true);
+    cancelAgentRun(runId)
+      .catch((error: Error) => {
+        setIsStopping(false);
+        setErrorMsg(error.message || '取消 Agent 执行失败');
+        setPhase('error');
+      });
+  }, [isStopping, runId]);
+
+  const handleFinalize = useCallback(async () => {
+    const persistedRun = runId ? await loadRunRecord(runId) : null;
+    const resolvedRunId = persistedRun?.runId ?? finalRun?.runId ?? runId;
+    const resolvedResult = persistedRun?.finalResult ?? finalRun?.finalResult ?? finalResult;
+    if (!resolvedResult) return;
+
+    const writeBackKey = resolvedRunId ?? `${conversationId}:${resolvedResult.summary}:${resolvedResult.raw_text}`;
+    if (finalizedRunKeyRef.current === writeBackKey || finalizingRunKeyRef.current === writeBackKey) {
+      return;
+    }
+
+    finalizingRunKeyRef.current = writeBackKey;
+    setIsFinalizing(true);
+    setErrorMsg(null);
+
+    try {
+      await onComplete(buildAgentWriteBackPayload(resolvedResult, resolvedRunId ?? undefined));
+      finalizedRunKeyRef.current = writeBackKey;
+    } catch (error) {
+      finalizingRunKeyRef.current = null;
+      setErrorMsg((error as Error).message || '保存 Agent 结果失败');
+    } finally {
+      finalizingRunKeyRef.current = null;
+      setIsFinalizing(false);
+    }
+  }, [conversationId, finalResult, finalRun, loadRunRecord, onComplete, runId]);
+
+  useEffect(() => {
+    if (phase !== 'completed') return;
+    if (!(finalRun?.finalResult ?? finalResult)) return;
+    void handleFinalize();
+  }, [phase, finalResult, finalRun, handleFinalize]);
 
   return (
-    <div className="p-4 space-y-4 animate-fade-in">
-      {phase === 'matching' && (
-        <div className="flex items-center gap-3 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-card">
-          <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+    <PanelUI
+      phase={phase}
+      matchResult={matchResult}
+      paramValues={paramValues}
+      steps={steps}
+      finalResult={finalResult}
+      errorMsg={errorMsg}
+      knowledgeImports={knowledgeImports}
+      isStopping={isStopping}
+      isFinalizing={isFinalizing}
+      stepsEndRef={stepsEndRef}
+      onParamChange={(name, val) => setParamValues((prev) => ({ ...prev, [name]: val }))}
+      onExecute={() => { void handleExecute(); }}
+      onStop={handleStop}
+      onCancel={handleCancel}
+      onFinalize={() => { void handleFinalize(); }}
+    />
+  );
+}
+
+// ─── PanelUI ──────────────────────────────────────────────────────────────────
+
+function PanelUI({ phase, matchResult, paramValues, steps, finalResult, errorMsg, knowledgeImports, isStopping, isFinalizing, stepsEndRef, onParamChange, onExecute, onStop, onCancel, onFinalize }: PanelUIProps) {
+  const card = 'win-panel my-3 p-4 rounded-lg border border-surface-divider dark:border-dark-divider bg-white dark:bg-dark-sidebar';
+
+  if (phase === 'matching') return (
+    <div className={card}>
+      <div className="flex items-center gap-2 text-sm text-text-secondary">
+        <span className="animate-spin">⚙</span> 正在匹配任务技能...
+      </div>
+    </div>
+  );
+
+  if (phase === 'error') return (
+    <div className={clsx(card, 'border-red-200 dark:border-red-800')}>
+      <p className="text-sm font-semibold text-red-600 dark:text-red-400 mb-1">⚠ 执行失败</p>
+      <p className="text-xs text-text-secondary">{errorMsg}</p>
+      <button onClick={onCancel} className="win-button mt-3 text-xs h-7 px-3">关闭</button>
+    </div>
+  );
+
+  if (phase === 'cancelled') return (
+    <div className={card}>
+      <p className="text-sm text-text-secondary">已取消执行。</p>
+      <button onClick={onCancel} className="win-button mt-2 text-xs h-7 px-3">关闭</button>
+    </div>
+  );
+
+  if (phase === 'ready') {
+    const params = matchResult?.parameters ?? [];
+    return (
+      <div className={card}>
+        <div className="flex items-start gap-3 mb-4">
+          <span className="text-2xl mt-0.5">🎯</span>
           <div>
-            <p className="text-sm font-medium">正在匹配 Skill...</p>
-            <p className="text-xs text-text-secondary mt-0.5 truncate max-w-[300px]">"{query}"</p>
+            <p className="text-sm font-semibold">{matchResult?.matched ? matchResult.skill_name : '通用执行模式'}</p>
+            <p className="text-xs text-text-secondary mt-0.5">
+              {matchResult?.matched
+                ? `匹配置信度: ${matchResult.confidence ?? '—'} · 关键词: ${matchResult.matched_keywords?.join(', ') ?? '—'}`
+                : '未匹配到具体技能，将直接执行查询'}
+            </p>
           </div>
         </div>
-      )}
-
-      {phase === 'matched' && matchResult && (
-        <MatchedCard match={matchResult} onConfirm={startExecution} onCancel={onCancel} />
-      )}
-
-      {(phase === 'executing' || phase === 'completed') && (
-        <StepsProgress steps={steps} onStop={phase === 'executing' ? handleStop : undefined} />
-      )}
-
-      {phase === 'completed' && finalResult && (
-        <ResultCard result={finalResult} onDone={() => onComplete?.(finalResult)} />
-      )}
-
-      {phase === 'error' && (
-        <ErrorCard message={errorMsg} onRetry={startMatch} onCancel={onCancel} />
-      )}
-    </div>
-  );
-}
-
-/** 匹配成功卡片 */
-function MatchedCard({ match, onConfirm, onCancel }: {
-  match: AgentMatchResult; onConfirm: () => void; onCancel?: () => void;
-}) {
-  return (
-    <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-card border border-green-200 dark:border-green-800">
-      <p className="text-sm font-medium flex items-center gap-1.5">
-        <span>✅</span> 匹配到 Skill: {match.skill_name}
-      </p>
-      <div className="flex items-center gap-2 mt-1.5 text-xs text-text-secondary">
-        <span>置信度: {match.confidence}</span>
-        {match.matched_keywords && match.matched_keywords.length > 0 && (
-          <span>关键词: {match.matched_keywords.join(', ')}</span>
+        {params.length > 0 && (
+          <div className="space-y-3 mb-4">
+            {params.map((p) => (
+              <ParamField key={p.name} param={p} value={paramValues[p.name] ?? ''} imports={knowledgeImports} onChange={(v) => onParamChange(p.name, v)} />
+            ))}
+          </div>
         )}
+        <div className="flex gap-2">
+          <button onClick={onExecute} className="win-button-primary h-8 px-4 text-sm">▶ 开始执行</button>
+          <button onClick={onCancel} className="win-button h-8 px-3 text-sm">取消</button>
+        </div>
       </div>
-      <div className="flex gap-2 mt-3">
-        <button onClick={onConfirm}
-          className="px-4 py-1.5 bg-primary text-white text-sm rounded-button hover:bg-primary-600 transition-colors">
-          开始执行
-        </button>
-        <button onClick={onCancel}
-          className="px-4 py-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors">
-          取消
-        </button>
-      </div>
-    </div>
-  );
-}
+    );
+  }
 
-/** 步骤进度列表 */
-function StepsProgress({ steps, onStop }: { steps: StepState[]; onStop?: () => void }) {
-  const completed = steps.filter((s) => s.status === 'completed').length;
-  const total = steps.length;
-  const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
-
-  return (
-    <div className="p-4 bg-surface-card dark:bg-dark-card rounded-card shadow-light">
+  if (phase === 'executing') return (
+    <div className={card}>
       <div className="flex items-center justify-between mb-3">
-        <span className="text-sm font-medium">执行进度 {completed}/{total}</span>
-        {onStop && (
-          <button onClick={onStop} className="text-xs text-red-500 hover:text-red-600 transition-colors">
-            ⏹ 停止
-          </button>
-        )}
+        <span className="text-sm font-semibold flex items-center gap-2">
+          <span className="animate-spin">⚙</span> 执行中...
+        </span>
+        <button onClick={onStop} disabled={isStopping} className="win-button h-7 px-2 text-xs disabled:opacity-60 disabled:cursor-not-allowed">
+          {isStopping ? '停止中...' : '停止'}
+        </button>
       </div>
-      <div className="w-full h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full mb-4">
-        <div className="h-full bg-primary rounded-full transition-all duration-300" style={{ width: `${pct}%` }} />
-      </div>
-      <div className="space-y-2">
-        {steps.map((step) => (
-          <div key={step.index} className={clsx(
-            'flex items-start gap-2 p-2 rounded-lg text-sm transition-colors',
-            step.status === 'running' && 'bg-blue-50 dark:bg-blue-900/10',
-            step.status === 'completed' && 'opacity-80',
-            step.status === 'failed' && 'bg-red-50 dark:bg-red-900/10',
-          )}>
-            <span className="flex-shrink-0 mt-0.5">
-              {step.status === 'pending' && <span className="text-text-secondary">○</span>}
-              {step.status === 'running' && (
-                <span className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin inline-block" />
-              )}
-              {step.status === 'completed' && <span className="text-green-500">✓</span>}
-              {step.status === 'failed' && <span className="text-red-500">✗</span>}
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className={clsx(step.status === 'running' && 'font-medium')}>{step.description}</p>
-              {step.result && <p className="text-xs text-text-secondary mt-0.5 line-clamp-2">{step.result}</p>}
-              {step.error && <p className="text-xs text-red-500 mt-0.5">{step.error}</p>}
+      <div className="space-y-1.5 max-h-64 overflow-y-auto scrollbar-thin pr-1">
+        {steps.map((s) => (
+          <div key={s.index} className={clsx('flex items-start gap-2 text-xs rounded px-2 py-1.5', s.status === 'running' ? 'bg-blue-50 dark:bg-blue-900/20' : s.status === 'failed' ? 'bg-red-50 dark:bg-red-900/20' : 'bg-surface dark:bg-dark')}>
+            <span className="mt-0.5 shrink-0"><StepIcon status={s.status} /></span>
+            <div className="min-w-0">
+              <span className="font-medium">{s.description}</span>
+              {s.toolName && <span className="ml-1 text-text-secondary">({s.toolName})</span>}
+              {s.result && <p className="text-text-secondary mt-0.5 line-clamp-2">{s.result}</p>}
+              {s.error && <p className="text-red-500 mt-0.5">{s.error}</p>}
             </div>
           </div>
         ))}
+        <div ref={stepsEndRef} />
       </div>
     </div>
   );
-}
 
-/** 执行结果卡片 */
-function ResultCard({ result, onDone }: { result: string; onDone?: () => void }) {
-  return (
-    <div className="p-4 bg-surface-card dark:bg-dark-card rounded-card shadow-light border-l-4 border-green-500">
-      <h4 className="text-sm font-medium mb-2 flex items-center gap-1.5">
-        <span>📋</span> 执行结果
-      </h4>
-      <div className="text-sm whitespace-pre-wrap max-h-[300px] overflow-y-auto scrollbar-thin">{result}</div>
-      {onDone && (
-        <button onClick={onDone}
-          className="mt-3 px-4 py-1.5 bg-primary text-white text-sm rounded-button hover:bg-primary-600 transition-colors">
-          完成
-        </button>
-      )}
-    </div>
-  );
-}
-
-/** 错误卡片 */
-function ErrorCard({ message, onRetry, onCancel }: {
-  message: string; onRetry: () => void; onCancel?: () => void;
-}) {
-  return (
-    <div className="p-4 bg-red-50 dark:bg-red-900/20 rounded-card border border-red-200 dark:border-red-800">
-      <p className="text-sm font-medium text-red-600 dark:text-red-400 flex items-center gap-1.5">
-        <span>❌</span> {message}
-      </p>
-      <div className="flex gap-2 mt-3">
-        <button onClick={onRetry}
-          className="px-4 py-1.5 text-sm bg-red-100 dark:bg-red-900/40 text-red-600 rounded-button hover:bg-red-200 transition-colors">
-          重试
-        </button>
-        {onCancel && (
-          <button onClick={onCancel}
-            className="px-4 py-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors">
-            返回
-          </button>
+  if (phase === 'completed' && finalResult) return (
+    <div className={clsx(card, 'border-emerald-200 dark:border-emerald-800')}>
+      <div className="flex items-center gap-2 mb-3">
+        <span className="text-emerald-500 text-lg">✓</span>
+        <span className="text-sm font-semibold">执行完成</span>
+        {finalResult.used_tools.length > 0 && (
+          <span className="win-badge text-xs ml-auto">工具: {finalResult.used_tools.join(', ')}</span>
         )}
       </div>
+      <p className="text-sm leading-relaxed mb-3 whitespace-pre-wrap">{finalResult.summary || finalResult.raw_text}</p>
+      {finalResult.citations.length > 0 && (
+        <div className="mb-3">
+          <p className="text-xs font-semibold text-text-secondary mb-1.5">引用来源</p>
+          <div className="space-y-1">
+            {finalResult.citations.map((c, i) => (
+              <div key={i} className="text-xs flex items-start gap-1.5 text-text-secondary">
+                <span className="shrink-0 mt-0.5">{c.source_type === 'knowledge' ? '📄' : c.source_type === 'knowhow' ? '📋' : '🔧'}</span>
+                <span className="truncate">{c.title ?? c.label} — {c.snippet?.slice(0, 80)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {finalResult.next_actions.length > 0 && (
+        <div className="mb-3">
+          <p className="text-xs font-semibold text-text-secondary mb-1">后续建议</p>
+          <ul className="space-y-0.5 text-xs text-text-secondary list-disc list-inside">
+            {finalResult.next_actions.map((a, i) => <li key={i}>{a}</li>)}
+          </ul>
+        </div>
+      )}
+      {errorMsg && (
+        <p className="mb-3 text-xs text-red-500">自动保存失败：{errorMsg}</p>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        {isFinalizing ? (
+          <span className="text-xs text-text-secondary">正在自动保存到对话...</span>
+        ) : errorMsg ? (
+          <button onClick={onFinalize} className="win-button-primary h-8 px-4 text-sm">重试保存</button>
+        ) : (
+          <span className="text-xs text-emerald-600 dark:text-emerald-400">已完成，正在写回对话...</span>
+        )}
+        <button onClick={onCancel} disabled={isFinalizing} className="win-button h-8 px-3 text-sm disabled:opacity-60 disabled:cursor-not-allowed">关闭</button>
+      </div>
+    </div>
+  );
+
+  return null;
+}
+
+// ─── ParamField ───────────────────────────────────────────────────────────────
+
+function ParamField({ param, value, imports, onChange }: { param: SkillParam; value: string; imports: KnowledgeImport[]; onChange: (v: string) => void }) {
+  const cls = 'w-full rounded border border-surface-divider dark:border-dark-divider bg-white dark:bg-dark px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary';
+  const label = (
+    <label className="block text-xs font-medium mb-1">
+      {param.name}{param.required && <span className="text-red-500 ml-0.5">*</span>}
+      {param.description && <span className="ml-1 font-normal text-text-secondary">— {param.description}</span>}
+    </label>
+  );
+
+  if (param.type === 'boolean') return (
+    <div>{label}
+      <select value={value} onChange={(e) => onChange(e.target.value)} className={cls}>
+        <option value="true">是</option>
+        <option value="false">否</option>
+      </select>
+    </div>
+  );
+
+  if (param.options?.length) return (
+    <div>{label}
+      <select value={value} onChange={(e) => onChange(e.target.value)} className={cls}>
+        {!param.required && <option value="">（不选择）</option>}
+        {param.options.map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </div>
+  );
+
+  if (param.source === 'knowledge_import' || param.type === 'file') return (
+    <div>{label}
+      <select value={value} onChange={(e) => onChange(e.target.value)} className={cls}>
+        <option value="">（请选择已导入文件）</option>
+        {imports.map((imp) => <option key={imp.id} value={imp.id}>{imp.file_name}</option>)}
+      </select>
+    </div>
+  );
+
+  return (
+    <div>{label}
+      <input type="text" value={value} onChange={(e) => onChange(e.target.value)} placeholder={param.default ?? ''} className={cls} />
     </div>
   );
 }

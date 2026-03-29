@@ -6,6 +6,7 @@ import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from 're
 import { useAppStore } from '@/stores/appStore';
 import { useChatStore } from '@/stores/chatStore';
 import clsx from 'clsx';
+import { filterRolesBySurface, getPreferredRoleForSurface } from '@/utils/roles';
 
 const SIDEBAR_COLLAPSED_WIDTH = 72;
 const SIDEBAR_MIN_WIDTH = 200;
@@ -20,7 +21,9 @@ export default function Sidebar() {
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(SIDEBAR_DEFAULT_WIDTH);
   const {
-    roles, currentRoleId, setCurrentRoleId,
+    roles, activeSurface, setActiveSurface,
+    currentChatRoleId, currentAgentRoleId,
+    setCurrentChatRoleId, setCurrentAgentRoleId,
     rolesLoaded,
     sidebarCollapsed, toggleSidebar,
     activeView, setActiveView, toggleSettings,
@@ -34,6 +37,25 @@ export default function Sidebar() {
   /** 根据 role id 查找图标，找不到时回退到 💬 */
   const getRoleIcon = (roleId: string) =>
     roles.find((r) => r.id === roleId)?.icon ?? '💬';
+  const currentSurfaceRoleId = activeSurface === 'chat' ? currentChatRoleId : currentAgentRoleId;
+  const surfaceRoles = filterRolesBySurface(roles, activeSurface);
+
+  useEffect(() => {
+    const preferredRole = getPreferredRoleForSurface(roles, activeSurface, currentSurfaceRoleId);
+    if (!preferredRole) {
+      if (activeSurface === 'agent') {
+        setActiveSurface('chat');
+      }
+      return;
+    }
+
+    if (activeSurface === 'chat' && preferredRole.id !== currentChatRoleId) {
+      setCurrentChatRoleId(preferredRole.id);
+    }
+    if (activeSurface === 'agent' && preferredRole.id !== currentAgentRoleId) {
+      setCurrentAgentRoleId(preferredRole.id);
+    }
+  }, [activeSurface, currentAgentRoleId, currentChatRoleId, currentSurfaceRoleId, roles, setActiveSurface, setCurrentAgentRoleId, setCurrentChatRoleId]);
 
   const startRename = (id: string, title: string) => {
     setEditingId(id);
@@ -45,26 +67,44 @@ export default function Sidebar() {
     setEditingTitle('');
   };
 
-  const submitRename = () => {
+  const submitRename = async () => {
     if (!editingId) return;
-    renameConversation(editingId, editingTitle);
-    cancelRename();
+    try {
+      await renameConversation(editingId, editingTitle);
+      cancelRename();
+    } catch (error) {
+      alert((error as Error).message || '重命名失败');
+    }
   };
 
-  /** 新建对话：同时切换回聊天视图 */
-  const handleNewChat = () => {
+  /** 新建对话：保持当前 surface / role，不强制切回 chat */
+  const handleNewChat = async () => {
     setActiveView('chat');
-    const id = createConversation(currentRoleId);
-    if (!sidebarCollapsed) {
-      startRename(id, '新对话');
+    const preferredRole = getPreferredRoleForSurface(roles, activeSurface, currentSurfaceRoleId);
+    if (!preferredRole) {
+      alert(`当前 ${activeSurface} 模式下没有可用角色`);
+      return;
+    }
+
+    try {
+      const id = await createConversation(preferredRole.id, activeSurface);
+      if (!sidebarCollapsed) {
+        startRename(id, '新对话');
+      }
+    } catch (error) {
+      alert((error as Error).message || '创建对话失败');
     }
   };
 
   /** 切换角色：同时切换回聊天视图 */
   const handleSetRole = (roleId: string) => {
-    setCurrentRoleId(roleId);
     setActiveView('chat');
-    const firstMatch = conversations.find((c) => c.roleId === roleId);
+    if (activeSurface === 'chat') {
+      setCurrentChatRoleId(roleId);
+    } else {
+      setCurrentAgentRoleId(roleId);
+    }
+    const firstMatch = conversations.find((c) => c.surface === activeSurface && c.roleId === roleId);
     if (firstMatch) {
       cancelRename();
       setActiveConversation(firstMatch.id);
@@ -76,14 +116,41 @@ export default function Sidebar() {
     cancelRename();
     const conversation = conversations.find((item) => item.id === conversationId);
     if (conversation) {
-      setCurrentRoleId(conversation.roleId);
+      setActiveSurface(conversation.surface);
+      if (conversation.surface === 'chat') {
+        setCurrentChatRoleId(conversation.roleId);
+      } else {
+        setCurrentAgentRoleId(conversation.roleId);
+      }
     }
     setActiveView('chat');
     setActiveConversation(conversationId);
   };
 
+  const handleSelectSurface = (surface: 'chat' | 'agent') => {
+    cancelRename();
+    setActiveView('chat');
+    const preferredRole = getPreferredRoleForSurface(
+      roles,
+      surface,
+      surface === 'chat' ? currentChatRoleId : currentAgentRoleId,
+    );
+    if (!preferredRole) {
+      return;
+    }
+    if (surface === 'chat') {
+      setCurrentChatRoleId(preferredRole.id);
+    } else {
+      setCurrentAgentRoleId(preferredRole.id);
+    }
+    setActiveSurface(surface);
+    const targetRoleId = preferredRole.id;
+    const firstMatch = conversations.find((c) => c.surface === surface && c.roleId === targetRoleId);
+    setActiveConversation(firstMatch?.id ?? null);
+  };
+
   const handleRenameKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') submitRename();
+    if (e.key === 'Enter') void submitRename();
     if (e.key === 'Escape') cancelRename();
   };
 
@@ -147,7 +214,7 @@ export default function Sidebar() {
       {/* 新建对话按钮 */}
       <div className={clsx(sidebarCollapsed ? 'px-2 mb-2' : 'px-3 mb-2')}>
         <button
-          onClick={handleNewChat}
+          onClick={() => void handleNewChat()}
           className={clsx(
             'win-button-primary w-full',
             sidebarCollapsed ? 'justify-center px-0 py-2.5' : 'justify-start gap-2 px-3 py-2.5'
@@ -162,12 +229,12 @@ export default function Sidebar() {
 
       {/* 对话列表 */}
       <div className="flex-1 overflow-y-auto scrollbar-thin px-2 py-1.5">
-        {conversations.length === 0 && !sidebarCollapsed && (
+        {conversations.filter((conv) => conv.surface === activeSurface).length === 0 && !sidebarCollapsed && (
           <p className="text-xs text-text-secondary text-center mt-8 px-2">
             点击上方按钮开始新对话
           </p>
         )}
-        {conversations.map((conv) => (
+        {conversations.filter((conv) => conv.surface === activeSurface).map((conv) => (
           <div
             key={conv.id}
             className={clsx(
@@ -196,12 +263,12 @@ export default function Sidebar() {
                       onChange={(e) => setEditingTitle(e.target.value)}
                       onKeyDown={handleRenameKeyDown}
                       onClick={(e) => e.stopPropagation()}
-                      onBlur={submitRename}
+                      onBlur={() => void submitRename()}
                       className="flex-1 min-w-0 rounded-md border border-primary/30 bg-white px-2 py-1 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/20 dark:bg-dark-card"
                     />
                     <button
                       onMouseDown={(e) => e.preventDefault()}
-                      onClick={submitRename}
+                      onClick={() => void submitRename()}
                       className="win-icon-button h-7 w-7 text-xs"
                       title="保存名称"
                     >
@@ -239,7 +306,11 @@ export default function Sidebar() {
                         ✏️
                       </button>
                       <button
-                        onClick={() => deleteConversation(conv.id)}
+                        onClick={() => {
+                          void deleteConversation(conv.id).catch((error) => {
+                            alert((error as Error).message || '删除对话失败');
+                          });
+                        }}
                         className="win-icon-button h-7 w-7 text-xs"
                         title="删除对话"
                       >
@@ -262,18 +333,37 @@ export default function Sidebar() {
         {sidebarCollapsed ? (
           <>
             <div className="flex flex-col gap-1">
+              {[
+                { key: 'chat', label: '聊天', icon: '💬' },
+                { key: 'agent', label: 'Agent', icon: '🤖' },
+              ].map((item) => (
+                <button
+                  key={item.key}
+                  onClick={() => handleSelectSurface(item.key as 'chat' | 'agent')}
+                  className={clsx(
+                    'flex min-h-[40px] w-full items-center justify-center rounded-md border text-sm transition-colors',
+                    activeSurface === item.key
+                      ? 'border-primary/20 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
+                      : 'border-transparent text-text-secondary hover:border-surface-divider hover:bg-white dark:hover:border-dark-divider dark:hover:bg-dark-card'
+                  )}
+                  title={item.label}
+                  aria-label={item.label}
+                >
+                  <span>{item.icon}</span>
+                </button>
+              ))}
               {!rolesLoaded && roles.length === 0 ? (
                 [0, 1, 2].map((i) => (
                   <div key={i} className="min-h-[40px] w-full rounded-md border border-transparent bg-surface-divider/40 animate-pulse dark:bg-dark-divider/40" />
                 ))
               ) : (
-                roles.map((role) => (
+                surfaceRoles.map((role) => (
                   <button
                     key={role.id}
                     onClick={() => handleSetRole(role.id)}
                     className={clsx(
                     'flex min-h-[40px] w-full items-center justify-center rounded-md border text-sm transition-colors',
-                      currentRoleId === role.id
+                      currentSurfaceRoleId === role.id
                       ? 'border-primary/20 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
                       : 'border-transparent text-text-secondary hover:border-surface-divider hover:bg-white dark:hover:border-dark-divider dark:hover:bg-dark-card'
                     )}
@@ -313,19 +403,39 @@ export default function Sidebar() {
           </>
         ) : (
           <>
+          <div className="flex gap-1 rounded-md border border-surface-divider bg-surface p-1 dark:border-dark-divider dark:bg-dark-sidebar">
+            {[
+              { key: 'chat', label: '聊天', icon: '💬' },
+              { key: 'agent', label: 'Agent', icon: '🤖' },
+            ].map((item) => (
+              <button
+                key={item.key}
+                onClick={() => handleSelectSurface(item.key as 'chat' | 'agent')}
+                className={clsx(
+                  'flex-1 rounded-md px-3 py-2 text-sm transition-colors',
+                  activeSurface === item.key
+                    ? 'bg-white text-primary shadow-sm dark:bg-dark-card'
+                    : 'text-text-secondary hover:bg-white hover:text-text-primary dark:hover:bg-dark-card dark:hover:text-text-dark-primary'
+                )}
+              >
+                <span className="mr-1">{item.icon}</span>
+                <span>{item.label}</span>
+              </button>
+            ))}
+          </div>
           <div className="space-y-1">
             {!rolesLoaded && roles.length === 0 ? (
               [0, 1, 2].map((i) => (
                 <div key={i} className="h-9 w-full rounded-md border border-transparent bg-surface-divider/40 animate-pulse dark:bg-dark-divider/40" />
               ))
             ) : (
-              roles.map((role) => (
+              surfaceRoles.map((role) => (
                 <button
                   key={role.id}
                   onClick={() => handleSetRole(role.id)}
                   className={clsx(
                     'flex w-full items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors',
-                    currentRoleId === role.id
+                    currentSurfaceRoleId === role.id
                       ? 'border-primary/20 bg-white font-medium text-primary shadow-sm dark:bg-dark-card'
                       : 'border-transparent text-text-secondary hover:border-surface-divider hover:bg-white hover:text-text-primary dark:hover:border-dark-divider dark:hover:bg-dark-card dark:hover:text-text-dark-primary'
                   )}

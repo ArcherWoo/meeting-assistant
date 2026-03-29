@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import clsx from 'clsx';
 import { useAppStore } from '@/stores/appStore';
+import { getPreferredRoleForSurface } from '@/utils/roles';
 import {
   testLLMConnection,
   getEmbeddingConfig, updateEmbeddingConfig, testEmbeddingConnection,
@@ -33,6 +34,65 @@ const ACCENT_COLORS = [
   { label: '翠绿', value: '#059669' },
   { label: '玫红', value: '#DB2777' },
 ] as const;
+
+const CHAT_CAPABILITY_OPTIONS = [
+  { key: 'rag', label: '自动知识检索', hint: '允许 Chat 在回答前自动检索知识库内容' },
+  { key: 'skills', label: '自动 Skill 建议', hint: '允许 Chat 根据当前问题自动推荐合适的 Skill' },
+];
+
+void CHAT_CAPABILITY_OPTIONS;
+
+const AGENT_TOOL_OPTIONS = [
+  { key: 'get_skill_definition', label: '读取 Skill 定义', hint: '允许 Agent 在运行时读取某个 Skill 的详细定义' },
+  { key: 'extract_file_text', label: '读取导入文件', hint: '允许 Agent 在运行时读取已导入文件的文本内容' },
+  { key: 'query_knowledge', label: '主动查询知识库', hint: '允许 Agent 在运行时主动查询知识库内容' },
+  { key: 'search_knowhow_rules', label: '主动查询规则库', hint: '允许 Agent 在运行时主动查询 Know-how 规则库' },
+];
+
+const CHAT_POLICY_OPTIONS = [
+  { key: 'auto_knowledge', label: '自动知识检索', hint: '允许 Chat 在回答前自动检索知识库内容' },
+  { key: 'auto_knowhow', label: '自动规则检索', hint: '允许 Chat 在回答前自动检索 Know-how 规则库' },
+  { key: 'auto_skill_suggestion', label: '自动 Skill 建议', hint: '允许 Chat 根据当前问题自动推荐合适的 Skill' },
+];
+
+const AGENT_PREFLIGHT_OPTIONS = [
+  { key: 'pre_match_skill', label: '预匹配 Skill', hint: '允许 Agent 在启动前先判断任务是否适合匹配现有 Skill' },
+  { key: 'auto_knowledge', label: '执行前自动知识检索', hint: '允许 Agent 在执行前从知识库补充上下文' },
+  { key: 'auto_knowhow', label: '执行前自动规则检索', hint: '允许 Agent 在执行前从 Know-how 规则库补充上下文' },
+];
+
+function createEmptyRoleDraft(): Partial<Role> {
+  return {
+    name: '',
+    icon: '🤖',
+    description: '',
+    system_prompt: '',
+    agent_prompt: '',
+    capabilities: [],
+    chat_capabilities: [],
+    agent_preflight: [],
+    allowed_surfaces: ['chat'],
+    agent_allowed_tools: [],
+  };
+}
+
+function normalizeRoleDraft(role?: Partial<Role> | null): Partial<Role> {
+  const base = createEmptyRoleDraft();
+  return {
+    ...base,
+    ...role,
+    name: role?.name ?? base.name,
+    icon: role?.icon || base.icon,
+    description: role?.description ?? base.description,
+    system_prompt: role?.system_prompt ?? base.system_prompt,
+    agent_prompt: role?.agent_prompt ?? base.agent_prompt,
+    capabilities: Array.isArray(role?.capabilities) ? role.capabilities : base.capabilities,
+    chat_capabilities: Array.isArray(role?.chat_capabilities) ? role.chat_capabilities : base.chat_capabilities,
+    agent_preflight: Array.isArray(role?.agent_preflight) ? role.agent_preflight : base.agent_preflight,
+    allowed_surfaces: Array.isArray(role?.allowed_surfaces) && role.allowed_surfaces.length > 0 ? role.allowed_surfaces : base.allowed_surfaces,
+    agent_allowed_tools: Array.isArray(role?.agent_allowed_tools) ? role.agent_allowed_tools : base.agent_allowed_tools,
+  };
+}
 
 function formatPresetTime(value: string): string {
   if (!value) return '';
@@ -69,8 +129,10 @@ export default function SettingsModal() {
     setAccentColor,
     roles,
     setRoles,
-    currentRoleId,
-    setCurrentRoleId,
+    currentChatRoleId,
+    currentAgentRoleId,
+    setCurrentChatRoleId,
+    setCurrentAgentRoleId,
   } = useAppStore();
   const activeProfile = useMemo(
     () => llmConfigs.find((config) => config.id === activeLLMConfigId) ?? llmConfigs[0],
@@ -91,7 +153,7 @@ export default function SettingsModal() {
 
   // Roles tab state
   const [selectedRoleId, setSelectedRoleId] = useState<string>('');
-  const [roleDraft, setRoleDraft] = useState<Partial<Role>>({});
+  const [roleDraft, setRoleDraft] = useState<Partial<Role>>(createEmptyRoleDraft());
   const [roleIsNew, setRoleIsNew] = useState(false);
   const [roleSaving, setRoleSaving] = useState(false);
   const [roleSaved, setRoleSaved] = useState(false);
@@ -105,6 +167,43 @@ export default function SettingsModal() {
   const [presetDeleteId, setPresetDeleteId] = useState<string | null>(null);
   const [presetNotice, setPresetNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const [promptResetting, setPromptResetting] = useState(false);
+
+  const syncSurfaceRoleSelections = useCallback((nextRoles: Role[], preferred?: { chat?: string | null; agent?: string | null }) => {
+    const nextChat = getPreferredRoleForSurface(nextRoles, 'chat', preferred?.chat ?? currentChatRoleId);
+    const nextAgent = getPreferredRoleForSurface(nextRoles, 'agent', preferred?.agent ?? currentAgentRoleId);
+    if ((nextChat?.id ?? '') !== currentChatRoleId) setCurrentChatRoleId(nextChat?.id ?? '');
+    if ((nextAgent?.id ?? '') !== currentAgentRoleId) setCurrentAgentRoleId(nextAgent?.id ?? '');
+  }, [currentAgentRoleId, currentChatRoleId, setCurrentAgentRoleId, setCurrentChatRoleId]);
+
+  const toggleRoleArrayField = useCallback((field: 'capabilities' | 'chat_capabilities' | 'agent_preflight' | 'agent_allowed_tools', value: string) => {
+    setRoleDraft((draftState) => {
+      const currentValues = Array.isArray(draftState[field]) ? [...(draftState[field] as string[])] : [];
+      return {
+        ...draftState,
+        [field]: currentValues.includes(value)
+          ? currentValues.filter((item) => item !== value)
+          : [...currentValues, value],
+      };
+    });
+    setRoleSaved(false);
+  }, []);
+
+  const toggleSurface = useCallback((surface: 'chat' | 'agent') => {
+    setRoleDraft((draftState) => {
+      const currentValues: Array<'chat' | 'agent'> = Array.isArray(draftState.allowed_surfaces) && draftState.allowed_surfaces.length > 0
+        ? [...draftState.allowed_surfaces]
+        : ['chat'];
+      if (currentValues.includes(surface)) {
+        const nextValues = currentValues.filter((item) => item !== surface);
+        return {
+          ...draftState,
+          allowed_surfaces: nextValues.length > 0 ? nextValues : currentValues,
+        };
+      }
+      return { ...draftState, allowed_surfaces: [...currentValues, surface] };
+    });
+    setRoleSaved(false);
+  }, []);
 
   // Embedding 配置状态
   const [embCfg, setEmbCfg] = useState({ api_url: '', api_key: '', model: 'text-embedding-3-small' });
@@ -199,14 +298,14 @@ export default function SettingsModal() {
       const found = roles.find((r) => r.id === selectedRoleId);
       if (!found) {
         setSelectedRoleId(roles[0].id);
-        setRoleDraft({ ...roles[0] });
+        setRoleDraft(normalizeRoleDraft(roles[0]));
       }
     }
   }, [activeTab, roles, selectedRoleId, roleIsNew]);
 
   const handleSelectRole = (role: Role) => {
     setSelectedRoleId(role.id);
-    setRoleDraft({ ...role });
+    setRoleDraft(normalizeRoleDraft(role));
     setRoleIsNew(false);
     setRoleSaved(false);
     setRoleError('');
@@ -217,7 +316,7 @@ export default function SettingsModal() {
 
   const handleNewRole = () => {
     setSelectedRoleId('__new__');
-    setRoleDraft({ name: '', icon: '🤖', description: '', system_prompt: '', capabilities: [] });
+    setRoleDraft(createEmptyRoleDraft());
     setRoleIsNew(true);
     setRoleSaved(false);
     setRoleError('');
@@ -232,6 +331,10 @@ export default function SettingsModal() {
       setRoleError('角色名称不能为空');
       return;
     }
+    if (!(roleDraft.allowed_surfaces ?? []).length) {
+      setRoleError('请至少启用一个 surface');
+      return;
+    }
     setRoleSaving(true);
     setRoleError('');
     try {
@@ -242,7 +345,11 @@ export default function SettingsModal() {
           icon: roleDraft.icon || '🤖',
           description: roleDraft.description || '',
           system_prompt: roleDraft.system_prompt || '',
-          capabilities: roleDraft.capabilities || [],
+          agent_prompt: roleDraft.agent_prompt || '',
+          chat_capabilities: roleDraft.chat_capabilities || [],
+          agent_preflight: roleDraft.agent_preflight || [],
+          allowed_surfaces: roleDraft.allowed_surfaces || ['chat'],
+          agent_allowed_tools: roleDraft.agent_allowed_tools || [],
         });
       } else {
         savedRole = await updateRole(selectedRoleId, {
@@ -250,13 +357,21 @@ export default function SettingsModal() {
           icon: roleDraft.icon,
           description: roleDraft.description,
           system_prompt: roleDraft.system_prompt,
-          capabilities: roleDraft.capabilities,
+          agent_prompt: roleDraft.agent_prompt,
+          chat_capabilities: roleDraft.chat_capabilities,
+          agent_preflight: roleDraft.agent_preflight,
+          allowed_surfaces: roleDraft.allowed_surfaces,
+          agent_allowed_tools: roleDraft.agent_allowed_tools,
         });
       }
       const updatedRoles = await listRoles();
       setRoles(updatedRoles);
+      syncSurfaceRoleSelections(updatedRoles, {
+        chat: currentChatRoleId === selectedRoleId ? savedRole.id : currentChatRoleId,
+        agent: currentAgentRoleId === selectedRoleId ? savedRole.id : currentAgentRoleId,
+      });
       setSelectedRoleId(savedRole.id);
-      setRoleDraft({ ...savedRole });
+      setRoleDraft(normalizeRoleDraft(savedRole));
       setRoleIsNew(false);
       setRoleSaved(true);
       setTimeout(() => setRoleSaved(false), 2000);
@@ -278,16 +393,14 @@ export default function SettingsModal() {
       await deleteRole(selectedRoleId);
       const updatedRoles = await listRoles();
       setRoles(updatedRoles);
-      if (currentRoleId === selectedRoleId && updatedRoles.length > 0) {
-        setCurrentRoleId(updatedRoles[0].id);
-      }
+      syncSurfaceRoleSelections(updatedRoles);
       if (updatedRoles.length > 0) {
         setSelectedRoleId(updatedRoles[0].id);
-        setRoleDraft({ ...updatedRoles[0] });
+        setRoleDraft(normalizeRoleDraft(updatedRoles[0]));
         setRoleIsNew(false);
       } else {
         setSelectedRoleId('');
-        setRoleDraft({});
+        setRoleDraft(createEmptyRoleDraft());
       }
     } catch (e) {
       setRoleError((e as Error).message || '删除失败');
@@ -296,13 +409,12 @@ export default function SettingsModal() {
     }
   };
 
-  const toggleCapability = (cap: string) => {
-    const caps = roleDraft.capabilities ?? [];
-    setRoleDraft((d) => ({
-      ...d,
-      capabilities: caps.includes(cap) ? caps.filter((c) => c !== cap) : [...caps, cap],
-    }));
-    setRoleSaved(false);
+  const toggleChatCapability = (capability: string) => {
+    toggleRoleArrayField('chat_capabilities', capability);
+  };
+
+  const toggleAgentPreflight = (capability: string) => {
+    toggleRoleArrayField('agent_preflight', capability);
   };
 
   // 加载当前角色的预设列表
@@ -310,7 +422,7 @@ export default function SettingsModal() {
     if (!roleId || roleId === '__new__') { setPresets([]); return; }
     try {
       const all = await listSystemPromptPresets();
-      setPresets(all.filter((p) => p.mode === roleId));
+      setPresets(all.filter((p) => p.role_id === roleId));
     } catch {
       setPresets([]);
     }
@@ -365,7 +477,7 @@ export default function SettingsModal() {
     setPromptResetting(true);
     try {
       const result = await resetSystemPrompt(selectedRoleId);
-      const defaultPrompt = result.resolved_prompt ?? result.prompt ?? '';
+      const defaultPrompt = result.default_prompt ?? result.resolved_prompt ?? result.prompt ?? '';
       setRoleDraft((d) => ({ ...d, system_prompt: defaultPrompt }));
       setRoleSaved(false);
     } catch {
@@ -374,6 +486,8 @@ export default function SettingsModal() {
       setPromptResetting(false);
     }
   };
+
+  const agentSurfaceEnabled = (roleDraft.allowed_surfaces ?? []).includes('agent');
 
   if (!settingsOpen) return null;
 
@@ -482,9 +596,9 @@ export default function SettingsModal() {
     toggleSettings();
   };
 
-  return (
+  return (/*
     // 遮罩层
-    <div
+    */<div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget && !justDraggedRef.current) handleClose(); }}
     >
@@ -813,22 +927,122 @@ export default function SettingsModal() {
                       </div>
                     )}
 
-                    <Field label="能力">
-                      <div className="flex gap-4">
-                        {[
-                          { key: 'rag', label: '📚 RAG 知识检索' },
-                          { key: 'skills', label: '🔧 技能匹配' },
-                        ].map(({ key, label }) => (
-                          <label key={key} className="flex items-center gap-2 cursor-pointer text-sm">
-                            <input
-                              type="checkbox"
-                              checked={(roleDraft.capabilities ?? []).includes(key)}
-                              onChange={() => toggleCapability(key)}
-                              className="w-4 h-4 accent-primary"
-                            />
-                            <span>{label}</span>
-                          </label>
-                        ))}
+                    <Field label="Chat 模式">
+                      <div className="rounded-lg border border-surface-divider bg-white px-4 py-4 space-y-3 dark:border-dark-divider dark:bg-dark-card">
+                        <label className="flex items-start gap-3 rounded-lg border border-surface-divider bg-[#F7F8FA] px-3 py-3 text-sm dark:border-dark-divider dark:bg-dark">
+                          <input
+                            type="checkbox"
+                            checked={(roleDraft.allowed_surfaces ?? []).includes('chat')}
+                            onChange={() => toggleSurface('chat')}
+                            className="mt-0.5 h-4 w-4 accent-primary"
+                          />
+                          <span className="min-w-0">
+                            <span className="block font-medium text-text-primary">可用于 Chat</span>
+                            <span className="mt-1 block text-xs text-text-secondary">作为普通对话角色使用，只影响 Chat surface。</span>
+                          </span>
+                        </label>
+                        <div className="rounded-md border border-dashed border-surface-divider px-3 py-3 text-xs leading-5 text-text-secondary dark:border-dark-divider">
+                          下面这些开关只控制 Chat 的自动增强，不等于 Agent 的执行前能力或运行时工具权限。
+                        </div>
+                        <div className="space-y-2">
+                          <p className="text-xs font-medium uppercase tracking-[0.12em] text-text-secondary">自动增强</p>
+                          {CHAT_POLICY_OPTIONS.map((capability) => (
+                            <label key={capability.key} className="flex items-start gap-3 rounded-lg border border-surface-divider bg-[#F7F8FA] px-3 py-3 text-sm dark:border-dark-divider dark:bg-dark">
+                              <input
+                                type="checkbox"
+                                checked={(roleDraft.chat_capabilities ?? []).includes(capability.key)}
+                                onChange={() => toggleChatCapability(capability.key)}
+                                className="mt-0.5 h-4 w-4 accent-primary"
+                              />
+                              <span className="min-w-0">
+                                <span className="block font-medium text-text-primary">{capability.label}</span>
+                                <span className="mt-1 block text-xs text-text-secondary">{capability.hint}</span>
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    </Field>
+                    <Field label="Agent 模式">
+                      <div className="rounded-lg border border-surface-divider bg-white px-4 py-4 space-y-3 dark:border-dark-divider dark:bg-dark-card">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-text-primary">Agent 策略</p>
+                            <p className="mt-1 text-xs text-text-secondary">Agent 可以在不启用任何运行时工具的情况下执行；工具开关只控制运行中是否允许调用专用工具。</p>
+                          </div>
+                          <span className={clsx('win-badge text-[10px]', agentSurfaceEnabled ? 'border-green-200 bg-green-50 text-green-600 dark:border-green-800 dark:bg-green-900/20 dark:text-green-400' : 'border-amber-200 bg-amber-50 text-amber-600 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300')}>
+                            {agentSurfaceEnabled ? 'Agent 已启用' : 'Agent 未启用'}
+                          </span>
+                        </div>
+                        <label className="flex items-start gap-3 rounded-lg border border-surface-divider bg-[#F7F8FA] px-3 py-3 text-sm dark:border-dark-divider dark:bg-dark">
+                          <input
+                            type="checkbox"
+                            checked={(roleDraft.allowed_surfaces ?? []).includes('agent')}
+                            onChange={() => toggleSurface('agent')}
+                            className="mt-0.5 h-4 w-4 accent-primary"
+                          />
+                          <span className="min-w-0">
+                            <span className="block font-medium text-text-primary">可用于 Agent</span>
+                            <span className="mt-1 block text-xs text-text-secondary">作为任务执行型 Agent 使用，单独拥有 Agent 专用 Prompt 和运行时工具权限。</span>
+                          </span>
+                        </label>
+                        <Field label="执行前能力">
+                          <div className="space-y-2">
+                            {AGENT_PREFLIGHT_OPTIONS.map((capability) => (
+                              <label key={capability.key} className="flex items-start gap-3 rounded-lg border border-surface-divider bg-[#F7F8FA] px-3 py-3 text-sm dark:border-dark-divider dark:bg-dark">
+                                <input
+                                  type="checkbox"
+                                  checked={(roleDraft.agent_preflight ?? []).includes(capability.key)}
+                                  onChange={() => toggleAgentPreflight(capability.key)}
+                                  disabled={!agentSurfaceEnabled}
+                                  className="mt-0.5 h-4 w-4 accent-primary"
+                                />
+                                <span className="min-w-0">
+                                  <span className="block font-medium text-text-primary">{capability.label}</span>
+                                  <span className="mt-1 block text-xs text-text-secondary">{capability.hint}</span>
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                        </Field>
+                        {agentSurfaceEnabled ? (
+                          <>
+                            <div className="rounded-md border border-dashed border-surface-divider px-3 py-3 text-xs leading-5 text-text-secondary dark:border-dark-divider">
+                              本阶段先整理信息架构。这里展示的是 Agent 运行时工具；执行前匹配与执行前检索会在下一阶段单独拆分为预处理能力。
+                            </div>
+                            <Field label="Agent 专用 Prompt">
+                              <textarea
+                                value={roleDraft.agent_prompt ?? ''}
+                                onChange={(e) => { setRoleDraft((d) => ({ ...d, agent_prompt: e.target.value })); setRoleSaved(false); }}
+                                placeholder="补充仅在 Agent surface 下生效的执行策略、边界或格式要求"
+                                rows={5}
+                                className="win-input w-full resize-none"
+                              />
+                            </Field>
+                            <Field label="运行时工具">
+                              <div className="space-y-2">
+                                {AGENT_TOOL_OPTIONS.map((tool) => (
+                                  <label key={tool.key} className="flex items-start gap-3 rounded-lg border border-surface-divider bg-[#F7F8FA] px-3 py-3 text-sm dark:border-dark-divider dark:bg-dark">
+                                    <input
+                                      type="checkbox"
+                                      checked={(roleDraft.agent_allowed_tools ?? []).includes(tool.key)}
+                                      onChange={() => toggleRoleArrayField('agent_allowed_tools', tool.key)}
+                                      className="mt-0.5 h-4 w-4 accent-primary"
+                                    />
+                                    <span className="min-w-0">
+                                      <span className="block font-medium text-text-primary">{tool.label}</span>
+                                      <span className="mt-1 block text-xs text-text-secondary">{tool.hint}</span>
+                                    </span>
+                                  </label>
+                                ))}
+                              </div>
+                            </Field>
+                          </>
+                        ) : (
+                          <p className="rounded-md border border-dashed border-surface-divider px-3 py-3 text-xs text-text-secondary dark:border-dark-divider">
+                            先启用 Agent 模式，再配置 Agent 专用 Prompt 和运行时工具。
+                          </p>
+                        )}
                       </div>
                     </Field>
                     {roleError && (
@@ -847,7 +1061,7 @@ export default function SettingsModal() {
             <div className="win-toolbar flex items-center justify-between gap-3 px-4 py-3">
               <button
                 onClick={handleDeleteRole}
-                disabled={!!(roleSaving || (!roleIsNew && (!selectedRoleId || (roles.find((r) => r.id === selectedRoleId)?.is_builtin ?? true))))}
+                disabled={!!(roleSaving || (!roleIsNew && !selectedRoleId))}
                 className="win-button-subtle h-8 px-3 text-sm text-red-500 hover:text-red-600 disabled:opacity-40"
               >
                 {roleIsNew ? '放弃新增' : '删除角色'}

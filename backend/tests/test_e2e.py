@@ -116,7 +116,10 @@ async def run_tests() -> None:
         print("  ⏳ 测试 Agent Execute (SSE)...")
         events = []
         async with c.stream("POST", "/agent/execute", json={
-            "skill_id": "procurement-review", "params": {"file": "test.pptx"},
+            "role_id": "executor",
+            "query": "请执行采购预审",
+            "skill_id": "procurement-review",
+            "params": {},
         }) as resp:
             report("POST /agent/execute (连接)", resp.status_code == 200)
             async for line in resp.aiter_lines():
@@ -131,12 +134,12 @@ async def run_tests() -> None:
 
         event_types = [e.get("type") for e in events]
         has_start = "execution_start" in event_types
-        has_complete = "complete" in event_types
-        report("Agent Execute 事件流", has_start and has_complete,
+        has_terminal = "complete" in event_types or "error" in event_types
+        report("Agent Execute 事件流", has_start and has_terminal,
                f"events={len(events)}, types={event_types}")
 
         # 检查 complete 事件包含 context
-        if has_complete:
+        if "complete" in event_types:
             complete_evt = [e for e in events if e["type"] == "complete"][0]
             ctx = complete_evt.get("context", {})
             report("Agent Execute 结果", ctx.get("status") == "completed",

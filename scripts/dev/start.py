@@ -91,6 +91,7 @@ def _python_import_name(package_name: str) -> str:
     overrides = {
         "python-pptx": "pptx",
         "python-multipart": "multipart",
+        "pydantic-ai-slim": "pydantic_ai",
     }
     return overrides.get(package_name, package_name.replace("-", "_").lower())
 

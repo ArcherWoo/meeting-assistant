@@ -1,59 +1,64 @@
 /**
- * 聊天状态管理 (Zustand + persist)
- * 管理：对话列表、消息（按对话分组）、流式状态、附件
- * 对话和消息通过 localStorage 持久化
+ * 聊天状态管理 (Zustand)
+ * 管理：后端数据库中的对话/消息 + 前端运行时流式状态
  */
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
-import { v4 as uuidv4 } from 'uuid';
-import type { Conversation, Message, Attachment, MessageMetadata } from '@/types';
+
+import {
+  createConversationRecord,
+  createMessageRecord,
+  deleteConversationRecord,
+  getChatState,
+  updateConversationRecord,
+  updateMessageRecord,
+} from '@/services/api';
+import { useAppStore } from '@/stores/appStore';
+import type { Attachment, Conversation, Message, MessageMetadata } from '@/types';
 
 export const DEFAULT_CONVERSATION_TITLE = '新对话';
 
-const normalizeConversations = (conversations: Conversation[] = []) => (
-  conversations.map((raw) => {
-    // Migrate old localStorage data: { mode: '...' } → { roleId: '...' }
-    const c = raw as Conversation & { mode?: string };
-    const conversation: Conversation = c.roleId
-      ? c
-      : { ...c, roleId: c.mode ?? 'copilot' };
-    return conversation.title === DEFAULT_CONVERSATION_TITLE && conversation.isTitleCustomized
-      ? { ...conversation, isTitleCustomized: false }
-      : conversation;
-  })
-);
+function deriveMessages(
+  activeConversationId: string | null,
+  messagesByConversation: Record<string, Message[]>,
+): Message[] {
+  return activeConversationId ? (messagesByConversation[activeConversationId] ?? []) : [];
+}
+
+interface MessageUpdateOptions {
+  persist?: boolean;
+}
 
 interface ChatState {
-  // 对话列表
   conversations: Conversation[];
   activeConversationId: string | null;
-
-  // 按对话 ID 分组的消息（持久化）
   messagesByConversation: Record<string, Message[]>;
-
-  // 当前对话的消息（派生，便于组件使用）
   messages: Message[];
-
-  // 流式响应状态 — 按 conversationId 隔离（不持久化）
   streamingByConversation: Record<string, boolean>;
   streamingContentByConversation: Record<string, string>;
-
-  // 当前活跃对话的派生便捷属性
   isStreaming: boolean;
   streamingContent: string;
-
-  // 待发送的附件（不持久化）
   pendingAttachments: Attachment[];
+  hydrated: boolean;
 
-  // Actions
-  createConversation: (roleId: string) => string;
-  setActiveConversation: (id: string) => void;
-  renameConversation: (id: string, title: string, isManual?: boolean) => void;
-  deleteConversation: (id: string) => void;
+  bootstrap: () => Promise<void>;
+  createConversation: (roleId?: string, surface?: 'chat' | 'agent') => Promise<string>;
+  setActiveConversation: (id: string | null) => void;
+  renameConversation: (id: string, title: string, isManual?: boolean) => Promise<void>;
+  deleteConversation: (id: string) => Promise<void>;
 
-  addMessage: (message: Omit<Message, 'id' | 'createdAt'>) => string;
-  updateMessage: (id: string, content: string, conversationId?: string) => void;
-  updateMessageMetadata: (id: string, metadata: Partial<MessageMetadata>, conversationId?: string) => void;
+  addMessage: (message: Omit<Message, 'id' | 'createdAt'>) => Promise<string>;
+  updateMessage: (
+    id: string,
+    content: string,
+    conversationId?: string,
+    options?: MessageUpdateOptions,
+  ) => Promise<void>;
+  updateMessageMetadata: (
+    id: string,
+    metadata: Partial<MessageMetadata>,
+    conversationId?: string,
+    options?: MessageUpdateOptions,
+  ) => Promise<void>;
 
   setStreaming: (streaming: boolean, conversationId?: string) => void;
   appendStreamContent: (chunk: string, conversationId?: string) => void;
@@ -64,222 +69,242 @@ interface ChatState {
   clearAttachments: () => void;
 }
 
-export const useChatStore = create<ChatState>()(
-  persist(
-    (set, get) => ({
-      conversations: [],
-      activeConversationId: null,
-      messagesByConversation: {},
-      messages: [],
-      streamingByConversation: {},
-      streamingContentByConversation: {},
-      isStreaming: false,
-      streamingContent: '',
-      pendingAttachments: [],
+export const useChatStore = create<ChatState>()((set, get) => ({
+  conversations: [],
+  activeConversationId: null,
+  messagesByConversation: {},
+  messages: [],
+  streamingByConversation: {},
+  streamingContentByConversation: {},
+  isStreaming: false,
+  streamingContent: '',
+  pendingAttachments: [],
+  hydrated: false,
 
-      createConversation: (roleId) => {
-        const id = uuidv4();
-        const conversation: Conversation = {
-          id,
-          workspaceId: 'default',
-          title: DEFAULT_CONVERSATION_TITLE,
-          roleId,
-          isPinned: false,
-          isTitleCustomized: false,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        set((state) => ({
-          conversations: [conversation, ...state.conversations],
-          activeConversationId: id,
-          messagesByConversation: { ...state.messagesByConversation, [id]: [] },
-          messages: [], // 新对话，消息为空
-        }));
-        return id;
-      },
+  bootstrap: async () => {
+    const state = await getChatState();
+    set((current) => {
+      const nextActiveId = state.conversations.some((conversation) => conversation.id === current.activeConversationId)
+        ? current.activeConversationId
+        : (state.conversations[0]?.id ?? null);
 
-      setActiveConversation: (id) => {
-        const { messagesByConversation, streamingByConversation, streamingContentByConversation } = get();
-        set({
-          activeConversationId: id,
-          messages: messagesByConversation[id] ?? [],
-          // 切换对话时同步该对话的流式状态
-          isStreaming: streamingByConversation[id] ?? false,
-          streamingContent: streamingContentByConversation[id] ?? '',
-        });
-      },
-
-      renameConversation: (id, title, isManual = true) => {
-        const nextTitle = title.trim() || DEFAULT_CONVERSATION_TITLE;
-        set((state) => ({
-          conversations: state.conversations.map((conversation) =>
-            conversation.id === id
-              ? (conversation.title === nextTitle
-                  ? conversation
-                  : {
-                      ...conversation,
-                      title: nextTitle,
-                      updatedAt: new Date().toISOString(),
-                      ...(isManual ? { isTitleCustomized: true } : {}),
-                    })
-              : conversation
-          ),
-        }));
-      },
-
-      deleteConversation: (id) => {
-        set((state) => {
-          const filtered = state.conversations.filter((c) => c.id !== id);
-          const { [id]: _removed, ...restMessages } = state.messagesByConversation;
-          const newActiveId = state.activeConversationId === id
-            ? (filtered[0]?.id ?? null)
-            : state.activeConversationId;
-          return {
-            conversations: filtered,
-            messagesByConversation: restMessages,
-            activeConversationId: newActiveId,
-            messages: newActiveId ? (restMessages[newActiveId] ?? []) : [],
-          };
-        });
-      },
-
-      addMessage: (msg) => {
-        const id = uuidv4();
-        const message: Message = {
-          ...msg,
-          id,
-          createdAt: new Date().toISOString(),
-        };
-        const { activeConversationId } = get();
-        const convId = msg.conversationId || activeConversationId;
-
-        set((state) => {
-          const convMessages = [...(state.messagesByConversation[convId ?? ''] ?? []), message];
-          const updatedMap = { ...state.messagesByConversation, ...(convId ? { [convId]: convMessages } : {}) };
-          // 如果消息属于当前活跃对话，也更新 messages
-          const updatedMessages = convId === state.activeConversationId
-            ? convMessages
-            : state.messages;
-
-          return {
-            messagesByConversation: updatedMap,
-            messages: updatedMessages,
-            conversations: state.conversations.map((c) =>
-              c.id === convId
-                ? { ...c, lastMessage: msg.content.slice(0, 50), updatedAt: new Date().toISOString() }
-                : c
-            ),
-          };
-        });
-        return id;
-      },
-
-      updateMessage: (id, content, conversationId) => {
-        const { activeConversationId } = get();
-        // 优先使用调用方明确传入的 conversationId，避免多对话并发时更新错对话
-        const convId = conversationId ?? activeConversationId;
-        set((state) => {
-          const targetMessages = state.messagesByConversation[convId ?? ''] ?? state.messages;
-          const updatedMessages = targetMessages.map((m) => (m.id === id ? { ...m, content } : m));
-          const updatedMap = convId
-            ? { ...state.messagesByConversation, [convId]: updatedMessages }
-            : state.messagesByConversation;
-          return {
-            // 只有当目标对话是当前活跃对话时才更新 messages 派生字段
-            messages: convId === state.activeConversationId ? updatedMessages : state.messages,
-            messagesByConversation: updatedMap,
-          };
-        });
-      },
-      updateMessageMetadata: (id, metadata, conversationId) => {
-        const { activeConversationId } = get();
-        const convId = conversationId ?? activeConversationId;
-        set((state) => {
-          const targetMessages = state.messagesByConversation[convId ?? ''] ?? state.messages;
-          const updatedMessages = targetMessages.map((message) => (
-            message.id === id
-              ? {
-                  ...message,
-                  metadata: {
-                    ...message.metadata,
-                    ...metadata,
-                  },
-                }
-              : message
-          ));
-          const updatedMap = convId
-            ? { ...state.messagesByConversation, [convId]: updatedMessages }
-            : state.messagesByConversation;
-          return {
-            messages: convId === state.activeConversationId ? updatedMessages : state.messages,
-            messagesByConversation: updatedMap,
-          };
-        });
-      },
-
-      setStreaming: (streaming, conversationId) => {
-        const { activeConversationId } = get();
-        const convId = conversationId ?? activeConversationId ?? '';
-        set((state) => {
-          const updated = { ...state.streamingByConversation, [convId]: streaming };
-          return {
-            streamingByConversation: updated,
-            isStreaming: updated[state.activeConversationId ?? ''] ?? false,
-          };
-        });
-      },
-      appendStreamContent: (chunk, conversationId) => {
-        const { activeConversationId } = get();
-        const convId = conversationId ?? activeConversationId ?? '';
-        set((state) => {
-          const prev = state.streamingContentByConversation[convId] ?? '';
-          const updated = { ...state.streamingContentByConversation, [convId]: prev + chunk };
-          return {
-            streamingContentByConversation: updated,
-            streamingContent: convId === state.activeConversationId ? updated[convId] ?? '' : state.streamingContent,
-          };
-        });
-      },
-      resetStreamContent: (conversationId) => {
-        const { activeConversationId } = get();
-        const convId = conversationId ?? activeConversationId ?? '';
-        set((state) => {
-          const updated = { ...state.streamingContentByConversation, [convId]: '' };
-          return {
-            streamingContentByConversation: updated,
-            streamingContent: convId === state.activeConversationId ? '' : state.streamingContent,
-          };
-        });
-      },
-
-      addAttachment: (attachment) =>
-        set((state) => ({ pendingAttachments: [...state.pendingAttachments, attachment] })),
-      removeAttachment: (id) =>
-        set((state) => ({ pendingAttachments: state.pendingAttachments.filter((a) => a.id !== id) })),
-      clearAttachments: () => set({ pendingAttachments: [] }),
-    }),
-    {
-      name: 'meeting-assistant-chat',
-      version: 1,
-      // 仅持久化对话列表、消息和活跃对话ID，不持久化运行时状态
-      partialize: (state) => ({
+      return {
         conversations: state.conversations,
-        activeConversationId: state.activeConversationId,
-        messagesByConversation: state.messagesByConversation,
-      }),
-      // 恢复时重建 messages 派生字段
-      merge: (persistedState, currentState) => {
-        const persisted = (persistedState ?? {}) as Partial<ChatState>;
-        const activeId = persisted.activeConversationId ?? null;
-        const msgMap = persisted.messagesByConversation ?? {};
-        const conversations = normalizeConversations(persisted.conversations ?? []);
-        return {
-          ...currentState,
-          ...persisted,
-          conversations,
-          messages: activeId ? (msgMap[activeId] ?? []) : [],
-        };
-      },
+        activeConversationId: nextActiveId,
+        messagesByConversation: state.messages_by_conversation,
+        messages: deriveMessages(nextActiveId, state.messages_by_conversation),
+        hydrated: true,
+      };
+    });
+  },
+
+  createConversation: async (roleId, surface) => {
+    const appState = useAppStore.getState();
+    const resolvedSurface = surface ?? appState.activeSurface;
+    const resolvedRoleId = roleId
+      ?? (resolvedSurface === 'chat' ? appState.currentChatRoleId : appState.currentAgentRoleId);
+
+    if (!resolvedRoleId) {
+      throw new Error('当前 surface 没有可用角色，无法创建对话');
     }
-  )
-);
+
+    const conversation = await createConversationRecord(
+      resolvedRoleId,
+      resolvedSurface,
+      DEFAULT_CONVERSATION_TITLE,
+    );
+    set((state) => ({
+      conversations: [conversation, ...state.conversations.filter((item) => item.id !== conversation.id)],
+      activeConversationId: conversation.id,
+      messagesByConversation: { ...state.messagesByConversation, [conversation.id]: [] },
+      messages: [],
+    }));
+    return conversation.id;
+  },
+
+  setActiveConversation: (id) => {
+    const { messagesByConversation, streamingByConversation, streamingContentByConversation } = get();
+    set({
+      activeConversationId: id,
+      messages: deriveMessages(id, messagesByConversation),
+      isStreaming: id ? (streamingByConversation[id] ?? false) : false,
+      streamingContent: id ? (streamingContentByConversation[id] ?? '') : '',
+    });
+  },
+
+  renameConversation: async (id, title, isManual = true) => {
+    const nextTitle = title.trim() || DEFAULT_CONVERSATION_TITLE;
+    const updatedConversation = await updateConversationRecord(id, {
+      title: nextTitle,
+      is_title_customized: isManual,
+    });
+
+    set((state) => ({
+      conversations: state.conversations.map((conversation) => (
+        conversation.id === id ? updatedConversation : conversation
+      )),
+    }));
+  },
+
+  deleteConversation: async (id) => {
+    await deleteConversationRecord(id);
+
+    set((state) => {
+      const filtered = state.conversations.filter((conversation) => conversation.id !== id);
+      const { [id]: _removed, ...restMessages } = state.messagesByConversation;
+      const nextActiveId = state.activeConversationId === id
+        ? (filtered[0]?.id ?? null)
+        : state.activeConversationId;
+
+      return {
+        conversations: filtered,
+        messagesByConversation: restMessages,
+        activeConversationId: nextActiveId,
+        messages: deriveMessages(nextActiveId, restMessages),
+      };
+    });
+  },
+
+  addMessage: async (msg) => {
+    const { activeConversationId } = get();
+    const conversationId = msg.conversationId || activeConversationId;
+    if (!conversationId) {
+      throw new Error('当前没有可写入的对话');
+    }
+
+    const message = await createMessageRecord(conversationId, msg);
+    set((state) => {
+      const nextMessages = [...(state.messagesByConversation[conversationId] ?? []), message];
+      const nextMessagesByConversation = {
+        ...state.messagesByConversation,
+        [conversationId]: nextMessages,
+      };
+
+      return {
+        messagesByConversation: nextMessagesByConversation,
+        messages: conversationId === state.activeConversationId
+          ? nextMessages
+          : state.messages,
+        conversations: state.conversations.map((conversation) => (
+          conversation.id === conversationId
+            ? {
+                ...conversation,
+                lastMessage: message.content.slice(0, 50),
+                updatedAt: message.createdAt,
+              }
+            : conversation
+        )),
+      };
+    });
+    return message.id;
+  },
+
+  updateMessage: async (id, content, conversationId, options) => {
+    const convId = conversationId ?? get().activeConversationId;
+    if (!convId) return;
+
+    set((state) => {
+      const targetMessages = state.messagesByConversation[convId] ?? [];
+      const updatedMessages = targetMessages.map((message) => (
+        message.id === id ? { ...message, content } : message
+      ));
+
+      return {
+        messagesByConversation: {
+          ...state.messagesByConversation,
+          [convId]: updatedMessages,
+        },
+        messages: convId === state.activeConversationId ? updatedMessages : state.messages,
+      };
+    });
+
+    if (options?.persist === false) return;
+    await updateMessageRecord(id, { content });
+  },
+
+  updateMessageMetadata: async (id, metadata, conversationId, options) => {
+    const convId = conversationId ?? get().activeConversationId;
+    if (!convId) return;
+
+    let nextMetadata: MessageMetadata | undefined;
+    set((state) => {
+      const targetMessages = state.messagesByConversation[convId] ?? [];
+      const updatedMessages = targetMessages.map((message) => {
+        if (message.id !== id) return message;
+        nextMetadata = {
+          ...message.metadata,
+          ...metadata,
+        };
+        return {
+          ...message,
+          metadata: nextMetadata,
+        };
+      });
+
+      return {
+        messagesByConversation: {
+          ...state.messagesByConversation,
+          [convId]: updatedMessages,
+        },
+        messages: convId === state.activeConversationId ? updatedMessages : state.messages,
+      };
+    });
+
+    if (options?.persist === false) return;
+    await updateMessageRecord(id, { metadata: nextMetadata ?? metadata });
+  },
+
+  setStreaming: (streaming, conversationId) => {
+    const convId = conversationId ?? get().activeConversationId ?? '';
+    set((state) => {
+      const nextStreamingByConversation = {
+        ...state.streamingByConversation,
+        [convId]: streaming,
+      };
+      return {
+        streamingByConversation: nextStreamingByConversation,
+        isStreaming: state.activeConversationId
+          ? (nextStreamingByConversation[state.activeConversationId] ?? false)
+          : false,
+      };
+    });
+  },
+
+  appendStreamContent: (chunk, conversationId) => {
+    const convId = conversationId ?? get().activeConversationId ?? '';
+    set((state) => {
+      const previous = state.streamingContentByConversation[convId] ?? '';
+      const nextStreamingContentByConversation = {
+        ...state.streamingContentByConversation,
+        [convId]: previous + chunk,
+      };
+
+      return {
+        streamingContentByConversation: nextStreamingContentByConversation,
+        streamingContent: convId === state.activeConversationId
+          ? (nextStreamingContentByConversation[convId] ?? '')
+          : state.streamingContent,
+      };
+    });
+  },
+
+  resetStreamContent: (conversationId) => {
+    const convId = conversationId ?? get().activeConversationId ?? '';
+    set((state) => {
+      const nextStreamingContentByConversation = {
+        ...state.streamingContentByConversation,
+        [convId]: '',
+      };
+      return {
+        streamingContentByConversation: nextStreamingContentByConversation,
+        streamingContent: convId === state.activeConversationId ? '' : state.streamingContent,
+      };
+    });
+  },
+
+  addAttachment: (attachment) =>
+    set((state) => ({ pendingAttachments: [...state.pendingAttachments, attachment] })),
+  removeAttachment: (id) =>
+    set((state) => ({ pendingAttachments: state.pendingAttachments.filter((attachment) => attachment.id !== id) })),
+  clearAttachments: () => set({ pendingAttachments: [] }),
+}));

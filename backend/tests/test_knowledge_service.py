@@ -2,9 +2,9 @@ import hashlib
 import os
 import sys
 import unittest
+import uuid
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 
 BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -100,6 +100,21 @@ class KnowledgeServiceTests(unittest.TestCase):
         )
 
 
+class KnowledgeServiceAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delete_vectors_for_file_escapes_lancedb_literal(self):
+        service = KnowledgeService()
+        table = Mock()
+        lance_db = Mock()
+        lance_db.table_names.return_value = ["doc_chunks"]
+        lance_db.open_table.return_value = table
+        service._lance_db = lance_db
+
+        deleted = await service._delete_vectors_for_file("quote's.txt")
+
+        self.assertTrue(deleted)
+        table.delete.assert_called_once_with("source_file = 'quote''s.txt'")
+
+
 class HybridSearchServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.original_config = (
@@ -131,23 +146,36 @@ class HybridSearchServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, [])
         embed_mock.assert_not_awaited()
 
+    async def test_extract_query_terms_from_natural_language_keeps_core_chinese_phrases(self):
+        terms = hybrid_search._extract_query_terms("请帮我核对付款方式是否合理，并评估单一来源风险是否可接受")
+
+        self.assertIn("付款方式", terms)
+        self.assertIn("单一来源风险", terms)
+
 
 class KnowledgeServiceIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.service = KnowledgeService()
-        self.temp_dir = TemporaryDirectory()
+        self.temp_root = Path(BACKEND_ROOT) / ".tmp-test-data"
+        self.temp_root.mkdir(parents=True, exist_ok=True)
+        self.db_path = self.temp_root / f"knowledge-{uuid.uuid4().hex}.db"
         self.original_db_path = storage._db_path
 
         if storage._db is not None:
             await storage.close()
 
-        storage._db_path = Path(self.temp_dir.name) / "test.db"
+        storage._db_path = self.db_path
         await storage.initialize()
 
     async def asyncTearDown(self):
         await storage.close()
         storage._db_path = self.original_db_path
-        self.temp_dir.cleanup()
+        self.db_path.unlink(missing_ok=True)
+        temp_root = Path(BACKEND_ROOT) / ".tmp-test-data"
+        try:
+            temp_root.rmdir()
+        except OSError:
+            pass
 
     async def test_generic_ingest_persists_and_searches_chunks_without_embeddings(self):
         content = (
@@ -170,6 +198,22 @@ class KnowledgeServiceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         stats = await self.service.get_stats()
         self.assertEqual(stats["total_ppt_imports"], 1)
         self.assertGreater(stats["total_text_chunks"], 0)
+
+    async def test_natural_language_query_without_spaces_recalls_relevant_chunk(self):
+        content = (
+            "供应商需补充单一来源风险说明。"
+            "付款方式为30%预付款，70%验收后支付。"
+            "若价格高于历史均价，需要补充偏差解释。"
+        ).encode("utf-8")
+
+        result = await self.service.ingest_file(content, "natural_query.txt")
+
+        self.assertEqual(result["status"], "completed")
+        results = await hybrid_search.search("请帮我核对付款方式是否合理，并评估单一来源风险是否可接受", limit=5)
+
+        self.assertTrue(results["structured"])
+        self.assertEqual(results["structured"][0]["source_file"], "natural_query.txt")
+        self.assertIn("付款方式", results["structured"][0]["content"])
 
     async def test_reupload_completed_legacy_import_backfills_missing_chunks(self):
         content = "阿尔法项目在4月15日完成上线验收。".encode("utf-8")
@@ -207,6 +251,23 @@ class KnowledgeServiceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(results["structured"])
         self.assertEqual(results["structured"][0]["source_file"], "legacy-only.txt")
         self.assertIn("重新导入一次即可补建索引", results["structured"][0]["content"])
+
+    async def test_delete_import_reuses_safe_vector_delete_helper(self):
+        content = b"quoted file"
+        file_hash = hashlib.md5(content).hexdigest()
+        import_id = await storage.record_ppt_import(
+            file_name="quote's.txt",
+            file_hash=file_hash,
+            file_size=len(content),
+            slide_count=0,
+        )
+
+        with patch.object(self.service, "_delete_vectors_for_file", AsyncMock(return_value=True)) as delete_mock:
+            result = await self.service.delete_import(import_id)
+
+        delete_mock.assert_awaited_once_with("quote's.txt")
+        self.assertTrue(result["deleted"])
+        self.assertTrue(result["deleted_vectors"])
 
 
 if __name__ == "__main__":

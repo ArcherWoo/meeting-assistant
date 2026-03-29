@@ -288,17 +288,12 @@ class KnowledgeService:
 
         # 旧版本重复导入时可能只有导入记录，没有可检索正文；这里统一重建索引。
         await self._reset_import_index(import_id, filename, clear_procurement=True)
-
-        # 更新 slide_count
-        await self._reset_import_index(import_id, filename, clear_procurement=True)
-
         await storage.db.execute(
             "UPDATE ppt_imports SET slide_count=? WHERE id=?", (slide_count, import_id)
         )
         await storage.db.commit()
 
         # 3. LLM 结构化提取（如果提供了 LLM 函数）
-        extracted_count = 0
         extracted_count = 0
         if llm_fn and full_markdown:
             extracted_count = await self._extract_procurement_fields(
@@ -314,15 +309,6 @@ class KnowledgeService:
             vector_chunks_count = await self._vectorize_chunks(
                 text_chunks, import_id, embedding_fn
             )
-
-        # 5. 即使没有 embedding，也统计文本分块数
-        text_chunks = self._split_into_chunks(ppt_data, filename)
-        chunks_parsed = len(text_chunks)
-
-        # 6. 更新导入状态
-        await storage.update_ppt_import_status(import_id, "completed", extracted_count)
-
-        logger.info(f"PPT 导入完成: {filename}, {slide_count} 页, {text_length} 字符, {chunks_parsed} 个文本块")
 
         await storage.update_ppt_import_status(import_id, "completed", extracted_count)
 
@@ -520,7 +506,7 @@ class KnowledgeService:
             return []
 
     def _split_text_into_chunks(self, text: str, filename: str, chunk_size: int = 500) -> List[dict]:
-        """将纯文本按固定大小分块（步长 400，重叠 100）"""
+        """将纯文本按固定大小分块，步长 400，重叠 100。"""
         chunks: List[dict] = []
         step = chunk_size - 100
         for index, i in enumerate(range(0, len(text), step), 1):
@@ -546,64 +532,35 @@ class KnowledgeService:
     async def _vectorize_text_chunks(
         self, chunks: List[dict], import_id: str, embedding_fn: Any,
     ) -> int:
-        """将文本块向量化写入 LanceDB"""
+        """将文本块向量化写入 LanceDB。"""
         return await self._vectorize_chunks(chunks, import_id, embedding_fn)
-        batch_size = 32
-        all_records: List[dict] = []
-        texts = [c["content"] for c in chunks]
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            try:
-                vectors = await embedding_fn(batch)
-                for j, vec in enumerate(vectors):
-                    chunk = chunks[i + j]
-                    all_records.append({
-                        "id": chunk["id"],
-                        "source_file": chunk["source_file"],
-                        "slide_index": chunk["slide_index"],
-                        "chunk_type": chunk["chunk_type"],
-                        "content": chunk["content"],
-                        "vector": vec,
-                        "metadata": self._build_chunk_metadata(import_id, chunk),
-                        "created_at": datetime.now(timezone.utc).isoformat(),
-                    })
-            except Exception as e:
-                logger.warning(f"Embedding 批次失败 (batch {i}): {e}")
-        if not all_records:
-            return 0
-        try:
-            table_name = "doc_chunks"
-            if table_name in self._lance_db.table_names():
-                table = self._lance_db.open_table(table_name)
-                table.add(all_records)
-            else:
-                table = self._lance_db.create_table(table_name, data=all_records)
-            self._chunks_table = table
-            logger.info(f"写入 {len(all_records)} 条向量到 LanceDB")
-        except Exception as e:
-            logger.error(f"LanceDB 写入失败: {e}")
-            return 0
-        return len(all_records)
 
     async def _ingest_generic(
         self, file_content: bytes, filename: str, text: str, file_type: str,
         embedding_fn: Optional[Any] = None,
     ) -> dict:
-        """通用文件导入：记录到 ppt_imports 表 + 分块向量化写入 LanceDB"""
+        """通用文件导入：记录到 ppt_imports，并把文本块写入 SQLite / LanceDB。"""
         import hashlib
+
         file_hash = hashlib.md5(file_content).hexdigest()
         import_id = await storage.record_ppt_import(
-            file_name=filename, file_hash=file_hash,
-            file_size=len(file_content), slide_count=0,
+            file_name=filename,
+            file_hash=file_hash,
+            file_size=len(file_content),
+            slide_count=0,
         )
         existing = await storage._fetchone(
-            "SELECT import_status FROM ppt_imports WHERE id=?", (import_id,)
+            "SELECT import_status FROM ppt_imports WHERE id=?",
+            (import_id,),
         )
         existing_chunk_count = await storage.count_knowledge_chunks(import_id=import_id)
         if existing and existing["import_status"] == "completed" and existing_chunk_count > 0:
             return {
-                "import_id": import_id, "status": "duplicate",
-                "file_type": file_type, "extracted_count": 0, "chunks_count": existing_chunk_count,
+                "import_id": import_id,
+                "status": "duplicate",
+                "file_type": file_type,
+                "extracted_count": 0,
+                "chunks_count": existing_chunk_count,
                 "char_count": len(text),
             }
 
@@ -623,13 +580,13 @@ class KnowledgeService:
 
         chunks_count = vector_chunks_count if vector_chunks_count else stored_chunks_count
         char_count = len(text)
-        logger.info(f"{file_type} 文件已导入: {filename} ({char_count} 字符, {chunks_count} 向量块)")
+        logger.info(f"{file_type} 文件已导入: {filename} ({char_count} 字符, {chunks_count} 个块)")
         return {
             "import_id": import_id,
             "status": "completed",
             "file_type": file_type,
             "extracted_count": 0,
-            "chunks_count": vector_chunks_count if vector_chunks_count else stored_chunks_count,
+            "chunks_count": chunks_count,
             "char_count": char_count,
         }
 
@@ -800,18 +757,10 @@ class KnowledgeService:
         )
         await storage.db.commit()
 
-        # 删除 LanceDB 向量
-        deleted_vectors = 0
-        if self._lance_db and "doc_chunks" in (self._lance_db.table_names() or []):
-            try:
-                table = self._lance_db.open_table("doc_chunks")
-                table.delete(f"source_file = '{filename}'")
-                deleted_vectors = 1
-            except Exception as e:
-                logger.warning(f"删除向量失败: {e}")
+        deleted_vectors = await self._delete_vectors_for_file(filename)
 
         logger.info(f"已删除知识库记录: {filename} (id={import_id})")
-        return {"deleted": True, "filename": filename, "deleted_vectors": deleted_vectors > 0}
+        return {"deleted": True, "filename": filename, "deleted_vectors": deleted_vectors}
 
     async def get_stats(self) -> dict:
         """获取知识库统计信息"""
@@ -849,17 +798,9 @@ class KnowledgeService:
         )
         await storage.db.commit()
 
-        # 删除 LanceDB 向量
-        deleted_vectors = 0
-        if self._lance_db and "doc_chunks" in (self._lance_db.table_names() or []):
-            try:
-                table = self._lance_db.open_table("doc_chunks")
-                table.delete(f"source_file = '{filename}'")
-                deleted_vectors = 1  # LanceDB 不返回删除数量
-            except Exception as e:
-                logger.warning(f"删除向量失败: {e}")
+        deleted_vectors = await self._delete_vectors_for_file(filename)
 
-        return {"deleted_records": True, "deleted_vectors": deleted_vectors > 0}
+        return {"deleted_records": True, "deleted_vectors": deleted_vectors}
 
 
 # 全局单例

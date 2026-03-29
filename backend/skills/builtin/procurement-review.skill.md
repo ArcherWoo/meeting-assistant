@@ -1,67 +1,43 @@
 # Skill: 采购会前材料预审
 
 ## 描述
-对采购 PPT 进行全面预审，包括价格合理性分析、老板关注点检查、历史案例关联，
-输出结构化预审报告，帮助采购人员在会前做好充分准备。
+针对采购方案、报价材料或立项说明进行会前预审，优先核查价格合理性、规则风险、材料缺口和待补充事项，输出结构化预审结论。
 
 ## 触发条件
 - 关键词: "采购预审", "会前审查", "采购分析", "预审报告", "审查采购材料", "采购审核"
-- 输入类型: .pptx 文件
+- 输入类型: .pptx .pdf .docx
 
 ## 输入参数
-- file: 采购 PPT 文件路径（必需）
-- check_history: 是否对比历史价格（默认: true）
-- check_knowhow: 是否检查老板关注点（默认: true）
-- output_format: 输出格式 [markdown | html]（默认: markdown）
+- import_id: 已导入采购文件 [type=file] [source=knowledge_import]
+- check_history: 是否对比历史知识库 [type=boolean] [default=true]
+- check_knowhow: 是否检查规则库 [type=boolean] [default=true]
+- output_format: 输出格式 [type=enum] [options=markdown|checklist|report] [default=report]
+
+## 执行配置
+- surface: agent
+- preferred_role: executor
+- allowed_tools: get_skill_definition, extract_file_text, query_knowledge, search_knowhow_rules
+- output_kind: report
+- output_sections: 执行摘要 | 风险点 | 证据引用 | 下一步建议
+- notes: 优先抽取文件原文后再判断 | 涉及价格或风险结论时优先引用知识库或规则库
 
 ## 执行步骤
-1. 调用 `pptx_parser` 解析 PPT 全部内容
-2. 调用 `procurement_extractor` 提取结构化采购字段：
-   - 供应商信息（名称、资质、联系方式）
-   - 采购品类与规格参数
-   - 报价明细（单价、数量、总价、税率）
-   - 合同条款（交付周期、付款方式、违约条款）
-   - 技术要求与验收标准
-3. 若 check_history=true：
-   - 调用 `knowledge_query` 查询同品类历史采购均价
-   - 计算本次报价与历史均价的偏差百分比
-   - 标记偏差超过 ±15% 的异常项
-4. 若 check_knowhow=true：
-   - 加载 KNOWHOW 规则库（老板关注点清单）
-   - 逐项检查 PPT 内容是否覆盖每个关注点
-   - 对未覆盖的关注点标记为 ❌ 并给出补充建议
-5. 调用 `knowledge_query` 语义检索历史类似采购案例（Top 3）
-6. 综合以上分析，使用 LLM 生成预审报告
+1. 读取并提取采购文件的核心内容
+2. 如果 check_history=true，则检索知识库中的历史案例、报价或相关文档
+3. 如果 check_knowhow=true，则检索 Know-how 规则库中的审批、合规和风险要求
+4. 综合材料内容、知识证据与规则依据，形成预审结论
 
 ## 依赖工具
-- pptx_parser
-- procurement_extractor
-- knowledge_query
-- llm_summarizer
+- extract_file_text
+- query_knowledge
+- search_knowhow_rules
 
 ## 输出格式
-### 📋 采购会前预审报告
+### 采购会前预审报告
 **文件**: {filename}
-**预审时间**: {datetime}
-**预审结论**: ✅ 建议通过 / ⚠️ 需关注 / ❌ 建议驳回
+**预审结论**: 通过 / 需关注 / 建议补充
 
-#### 一、基本信息摘要
-| 字段 | 内容 |
-|------|------|
-| 供应商 | xxx |
-| 采购品类 | xxx |
-| 总金额 | xxx |
-
-#### 二、价格合理性分析
-| 品类 | 本次单价 | 历史均价 | 偏差 | 判定 |
-|------|---------|---------|------|------|
-
-#### 三、老板关注点检查
-| 关注点 | 是否覆盖 | 说明 |
-|--------|---------|------|
-
-#### 四、历史类似案例
-（语义检索 Top 3 相似案例）
-
-#### 五、风险提示与建议
-
+#### 一、执行摘要
+#### 二、核心风险点
+#### 三、证据引用
+#### 四、建议补充动作

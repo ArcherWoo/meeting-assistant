@@ -1,10 +1,12 @@
 /**
  * 消息气泡组件
- * 用户消息右对齐，AI 消息左对齐
- * AI 消息支持 Markdown、代码块渲染、上下文来源徽标和 Skill 推荐卡
+ * 用户消息右对齐，AI 消息左对齐。
+ * AI 消息支持 Markdown、上下文引用、Skill 推荐和 Agent 结构化结果。
  */
 import clsx from 'clsx';
 import ReactMarkdown, { type Components } from 'react-markdown';
+import RetrievalPlanCard from '@/components/common/RetrievalPlanCard';
+import StructuredPayloadView from '@/components/common/StructuredPayloadView';
 import type { ContextCitation, ContextMetadata, Message, SkillSuggestionEvent } from '@/types';
 
 interface Props {
@@ -79,14 +81,16 @@ function renderContextBadge(label: string, value: number, tone: 'blue' | 'emeral
 }
 
 function renderCitationIcon(sourceType: ContextCitation['source_type']): string {
-  if (sourceType === 'knowledge') return '📄';
+  if (sourceType === 'knowledge') return '📚';
   if (sourceType === 'knowhow') return '📋';
+  if (sourceType === 'file') return '📎';
   return '🛠️';
 }
 
 function renderCitationTypeBadge(sourceType: ContextCitation['source_type']): string {
   if (sourceType === 'knowledge') return '知识库';
   if (sourceType === 'knowhow') return 'Know-how';
+  if (sourceType === 'file') return '文件';
   return 'Skill';
 }
 
@@ -116,6 +120,7 @@ function buildCitationGroups(citations: ContextCitation[]) {
     { key: 'knowledge', label: '知识库引用', items: citations.filter((citation) => citation.source_type === 'knowledge') },
     { key: 'knowhow', label: 'Know-how 引用', items: citations.filter((citation) => citation.source_type === 'knowhow') },
     { key: 'skill', label: 'Skill 引用', items: citations.filter((citation) => citation.source_type === 'skill') },
+    { key: 'file', label: '文件引用', items: citations.filter((citation) => citation.source_type === 'file') },
   ] as Array<{ key: ContextCitation['source_type']; label: string; items: ContextCitation[] }>)
     .filter((group) => group.items.length > 0);
 }
@@ -154,6 +159,7 @@ export default function MessageBubble({
   const isError = message.content.startsWith('⚠️');
   const senderLabel = isUser ? '你' : 'Meeting Assistant';
   const context = message.metadata?.context;
+  const agentResult = message.metadata?.agentResult;
   const skillSuggestion = message.metadata?.skillSuggestion;
   const citations = context?.citations ?? [];
   const retrievedCitations = context?.retrieved_citations?.length
@@ -172,6 +178,7 @@ export default function MessageBubble({
       || context.knowhow_count
       || context.skill_count
       || context.summary
+      || context.retrieval_plan
       || citations.length
     ),
   );
@@ -227,6 +234,13 @@ export default function MessageBubble({
                   原始召回：{context.retrieved_summary || getContextCountSummary(context, 'retrieved')}
                 </p>
               </div>
+            )}
+            {context?.retrieval_plan && (
+              <RetrievalPlanCard
+                plan={context.retrieval_plan}
+                compact
+                title="检索规划"
+              />
             )}
             {groupedCitations.length > 0 && (
               <details className="group overflow-hidden rounded-lg border border-surface-divider/80 bg-white/80 shadow-sm dark:border-dark-divider dark:bg-dark-card/70">
@@ -413,7 +427,7 @@ export default function MessageBubble({
             </span>
           )}
 
-          {!isUser && skillSuggestion && !isError && (
+          {!isUser && !isError && skillSuggestion && (
             <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50/80 p-3 dark:border-blue-800 dark:bg-blue-900/20">
               <div className="flex items-start gap-3">
                 <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md border border-blue-200 bg-white text-base shadow-sm dark:border-blue-800 dark:bg-blue-950/40">
@@ -458,6 +472,92 @@ export default function MessageBubble({
                   忽略
                 </button>
               </div>
+            </div>
+          )}
+
+          {!isUser && !isError && agentResult && (
+            <div className="mt-4 space-y-3 rounded-lg border border-emerald-200 bg-emerald-50/70 p-3 dark:border-emerald-800 dark:bg-emerald-900/10">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="win-badge border-emerald-200 bg-white/90 px-2 py-1 text-[10px] text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300">
+                  Agent 结果
+                </span>
+                {agentResult.used_tools.map((tool) => (
+                  <span
+                    key={tool}
+                    className="win-chip border-emerald-200 bg-white/90 text-[10px] text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300"
+                  >
+                    {tool}
+                  </span>
+                ))}
+              </div>
+
+              {agentResult.summary && (
+                <div className="rounded-lg border border-emerald-200/70 bg-white/80 px-3 py-2 dark:border-emerald-800/70 dark:bg-emerald-950/20">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary dark:text-text-dark-secondary">
+                    执行摘要
+                  </p>
+                  <p className="mt-1 whitespace-pre-wrap text-[12px] leading-5 text-text-primary dark:text-text-dark-primary">
+                    {agentResult.summary}
+                  </p>
+                </div>
+              )}
+
+              {agentResult.structured_payload && Object.keys(agentResult.structured_payload).length > 0 && (
+                <div className="rounded-lg border border-emerald-200/70 bg-white/80 px-3 py-2 dark:border-emerald-800/70 dark:bg-emerald-950/20">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary dark:text-text-dark-secondary">
+                    结构化结果
+                  </p>
+                  <div className="mt-2">
+                    <StructuredPayloadView data={agentResult.structured_payload} />
+                  </div>
+                </div>
+              )}
+
+              {agentResult.artifacts.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary dark:text-text-dark-secondary">
+                    产物
+                  </p>
+                  {agentResult.artifacts.map((artifact, index) => (
+                    <div
+                      key={`${artifact.type}-${artifact.title}-${index}`}
+                      className="rounded-lg border border-emerald-200/70 bg-white/80 px-3 py-2 dark:border-emerald-800/70 dark:bg-emerald-950/20"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="win-badge border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300">
+                          {artifact.type}
+                        </span>
+                        <span className="text-[12px] font-medium text-text-primary dark:text-text-dark-primary">
+                          {artifact.title}
+                        </span>
+                        {artifact.mime_type && (
+                          <span className="text-[10px] text-text-secondary dark:text-text-dark-secondary">
+                            {artifact.mime_type}
+                          </span>
+                        )}
+                      </div>
+                      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-lg bg-black/5 p-3 text-[11px] leading-5 dark:bg-white/5">
+                        {artifact.content}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {agentResult.next_actions.length > 0 && (
+                <div className="rounded-lg border border-emerald-200/70 bg-white/80 px-3 py-2 dark:border-emerald-800/70 dark:bg-emerald-950/20">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary dark:text-text-dark-secondary">
+                    下一步建议
+                  </p>
+                  <div className="mt-2 space-y-1.5">
+                    {agentResult.next_actions.map((action, index) => (
+                      <p key={`${action}-${index}`} className="text-[12px] leading-5 text-text-primary dark:text-text-dark-primary">
+                        {index + 1}. {action}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

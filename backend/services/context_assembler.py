@@ -1,78 +1,107 @@
 """
-上下文组装器 - Context Assembler
-在 Copilot 模式下，自动检索知识库、匹配 Skill 和注入 Know-how 规则，
-将相关上下文注入 System Prompt，实现 RAG 增强回答。
-
-设计原则：
-  - 零阻塞：任何检索失败都静默降级，不影响正常对话
-  - 低延迟：并行执行各路检索，总体 <200ms
-  - 最小侵入：仅修改 system prompt 尾部，不改变用户消息
+Context assembler for planner-driven retrieval and prompt injection.
 """
+from __future__ import annotations
+
 import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional, Protocol
 
 from services.hybrid_search import hybrid_search
 from services.knowhow_service import knowhow_service
+from services.retrieval_planner import (
+    RetrievalPlan,
+    RetrievalPlanAction,
+    RetrievalPlannerSettings,
+    RetrievalSurface,
+    retrieval_planner,
+)
 from services.skill_manager import skill_manager
 from services.skill_matcher import skill_matcher
 
 logger = logging.getLogger(__name__)
 
 
+class RetrievalTraceHandler(Protocol):
+    async def on_stage_start(
+        self,
+        step_key: str,
+        *,
+        description: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> int: ...
+
+    async def on_stage_complete(
+        self,
+        step_index: int,
+        step_key: str,
+        result: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None: ...
+
+    async def on_stage_error(
+        self,
+        step_index: int,
+        step_key: str,
+        error: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None: ...
+
+
 @dataclass
 class AssembledContext:
-    """组装后的上下文结果"""
     knowledge_results: List[dict] = field(default_factory=list)
     knowhow_rules: List[dict] = field(default_factory=list)
-    matched_skills: List[dict] = field(default_factory=list)   # ✅ Issue 2: 新增 Skill 匹配结果
+    matched_skills: List[dict] = field(default_factory=list)
     source_summary: str = ""
+    retrieval_plan: RetrievalPlan | None = None
 
     @property
     def has_context(self) -> bool:
         return bool(self.knowledge_results or self.knowhow_rules or self.matched_skills)
 
     def _build_source_summary(self) -> str:
-        sources = []
+        parts: list[str] = []
         if self.knowledge_results:
-            sources.append(f"知识库({len(self.knowledge_results)}条)")
+            parts.append(f"知识库({len(self.knowledge_results)}条)")
         if self.knowhow_rules:
-            sources.append(f"Know-how({len(self.knowhow_rules)}条)")
+            parts.append(f"Know-how({len(self.knowhow_rules)}条)")
         if self.matched_skills:
-            sources.append(f"Skill({len(self.matched_skills)}个)")
-        return " + ".join(sources) if sources else ""
+            parts.append(f"Skill({len(self.matched_skills)}个)")
+        return " + ".join(parts) if parts else ""
 
     @staticmethod
     def _format_knowhow_rule(rule: dict, index: int) -> str:
-        weight_icon = "⚠️" if rule.get("weight", 0) >= 3 else "ℹ️"
-        return f"{weight_icon} [{index}] {rule['rule_text']}"
+        weight_icon = "⚠️" if int(rule.get("weight", 0) or 0) >= 3 else "ℹ️"
+        return f"{weight_icon} [{index}] {rule.get('rule_text', '')}"
 
     @staticmethod
     def _format_knowledge_result(result: dict, index: int) -> str:
         if "item_name" in result:
-            line = f"[{index}] {result.get('category', '')} - {result['item_name']}"
+            line = f"[{index}] {result.get('category', '')} - {result.get('item_name', '')}".strip(" -")
             if result.get("supplier"):
                 line += f"（供应商: {result['supplier']}）"
             if result.get("unit_price"):
                 line += f" 单价: {result['unit_price']}"
             if result.get("raw_text"):
-                line += f"\n    原文: {result['raw_text'][:200]}"
+                line += f"\n    原文: {str(result['raw_text'])[:200]}"
             return line
-
         if "content" in result:
             source = result.get("source_file", "未知来源")
-            return f"[{index}] 来源: {source}\n    {result['content'][:300]}"
-
+            return f"[{index}] 来源: {source}\n    {str(result.get('content', ''))[:300]}"
         return ""
 
     @staticmethod
     def _format_skill_match(skill: dict) -> str:
-        confidence_icon = "✅" if skill["confidence"] == "high" else "💡"
+        confidence_icon = "✅" if skill.get("confidence") == "high" else "🧩"
         return (
-            f"{confidence_icon} 【{skill['skill_name']}】（匹配度: {skill['score']:.0%}）"
-            f" - {skill['description']}"
+            f"{confidence_icon} 《{skill.get('skill_name', '')}》"
+            f"（匹配度 {float(skill.get('score', 0.0)):.0%}）"
+            f" - {skill.get('description', '')}"
         )
 
     @staticmethod
@@ -107,7 +136,8 @@ class AssembledContext:
             snippet = cls._normalize_text_snippet(
                 result.get("raw_text")
                 or "；".join(
-                    part for part in [
+                    part
+                    for part in [
                         f"供应商: {result['supplier']}" if result.get("supplier") else "",
                         f"单价: {result['unit_price']}" if result.get("unit_price") else "",
                         f"总价: {result['total_price']}" if result.get("total_price") else "",
@@ -123,11 +153,7 @@ class AssembledContext:
                 location_parts.append(f"单价: {result['unit_price']}")
             location = " · ".join(location_parts)
         else:
-            chunk_type_map = {
-                "text": "正文片段",
-                "table": "表格片段",
-                "note": "备注片段",
-            }
+            chunk_type_map = {"text": "正文片段", "table": "表格片段", "note": "备注片段"}
             slide_index = cls._coerce_int(result.get("slide_index"))
             if slide_index is not None and slide_index <= 0:
                 slide_index = None
@@ -151,11 +177,7 @@ class AssembledContext:
             location_parts = []
             if chunk_index is not None:
                 location_parts.append(f"片段 #{chunk_index}")
-            if (
-                char_start is not None
-                and char_end is not None
-                and char_end >= char_start
-            ):
+            if char_start is not None and char_end is not None and char_end >= char_start:
                 location_parts.append(f"字符 {char_start}-{char_end}")
             if not location_parts and title_parts:
                 location_parts = title_parts.copy()
@@ -172,11 +194,7 @@ class AssembledContext:
             if char_end is not None:
                 citation["char_end"] = char_end
 
-        citation.update({
-            "title": title,
-            "snippet": snippet,
-            "location": location,
-        })
+        citation.update({"title": title, "snippet": snippet, "location": location})
         return citation
 
     @classmethod
@@ -198,7 +216,7 @@ class AssembledContext:
             "label": str(skill.get("skill_name") or f"Skill {index}"),
             "title": "技能匹配",
             "snippet": cls._normalize_text_snippet(skill.get("description") or ""),
-            "location": f"匹配度 {skill.get('score', 0):.0%} · {skill.get('confidence', 'low')}",
+            "location": f"匹配度 {float(skill.get('score', 0.0)):.0%} · {skill.get('confidence', 'low')}",
         }
 
     def to_metadata_payload(self) -> dict:
@@ -216,72 +234,64 @@ class AssembledContext:
                 for index, skill in enumerate(self.matched_skills[:3], 1)
             ],
         ]
-
         return {
             "knowledge_count": len(self.knowledge_results),
             "knowhow_count": len(self.knowhow_rules),
             "skill_count": len(self.matched_skills),
             "summary": self.source_summary,
             "citations": citations,
+            "retrieval_plan": (
+                self.retrieval_plan.model_dump(mode="json")
+                if self.retrieval_plan is not None
+                else None
+            ),
         }
 
     def fit_to_budget(self, max_chars: int) -> "AssembledContext":
-        """按条目粒度裁剪上下文，保证被保留的条目都是完整的。"""
         if max_chars <= 0 or not self.has_context:
-            return AssembledContext()
+            return AssembledContext(retrieval_plan=self.retrieval_plan)
 
-        fitted = AssembledContext()
+        fitted = AssembledContext(retrieval_plan=self.retrieval_plan)
         used = 0
 
-        def _try_add_section(
-            header: str,
-            items: list[dict],
-            formatter,
-            target_attr: str,
-        ) -> None:
+        def try_add_section(header: str, items: list[dict], formatter, target_attr: str) -> None:
             nonlocal used
             if not items:
                 return
 
-            section_items: list[dict] = []
-            header_used = False
             header_cost = len(header) + 1
+            header_used = False
+            collected: list[dict] = []
 
             for index, item in enumerate(items, 1):
                 line = formatter(item, index) if formatter.__code__.co_argcount == 2 else formatter(item)
                 if not line:
                     continue
-
-                cost = len(line) + 1
-                if not header_used:
-                    cost += header_cost
-
+                cost = len(line) + 1 + (0 if header_used else header_cost)
                 if used + cost > max_chars:
                     break
-
                 if not header_used:
                     used += header_cost
                     header_used = True
-
                 used += len(line) + 1
-                section_items.append(item)
+                collected.append(item)
 
-            if section_items:
-                setattr(fitted, target_attr, section_items)
+            if collected:
+                setattr(fitted, target_attr, collected)
 
-        _try_add_section(
-            "📋 以下是相关的业务规则（Know-how），请在回答时检查是否涉及：",
+        try_add_section(
+            "📋 以下是相关业务规则（Know-how），回答时请优先核查：",
             self.knowhow_rules,
             self._format_knowhow_rule,
             "knowhow_rules",
         )
-        _try_add_section(
-            "📚 以下是从知识库中检索到的相关参考信息，请在回答时优先参考：",
+        try_add_section(
+            "📚 以下是从知识库检索到的相关信息，回答时请优先参考：",
             self.knowledge_results[:5],
             self._format_knowledge_result,
             "knowledge_results",
         )
-        _try_add_section(
+        try_add_section(
             "🛠️ 检测到用户意图可能匹配以下技能（Skill），可按需引导用户使用：",
             self.matched_skills,
             self._format_skill_match,
@@ -292,13 +302,12 @@ class AssembledContext:
         return fitted
 
     def to_prompt_suffix(self, max_chars: int | None = None) -> str:
-        """将检索结果格式化为 system prompt 的追加段落。"""
         ctx = self.fit_to_budget(max_chars) if max_chars is not None else self
         sections: list[str] = []
 
         if ctx.knowhow_rules:
             lines = [
-                "📋 以下是相关的业务规则（Know-how），请在回答时检查是否涉及：",
+                "📋 以下是相关业务规则（Know-how），回答时请优先核查：",
                 *[
                     ctx._format_knowhow_rule(rule, index)
                     for index, rule in enumerate(ctx.knowhow_rules, 1)
@@ -308,7 +317,7 @@ class AssembledContext:
 
         if ctx.knowledge_results:
             lines = [
-                "📚 以下是从知识库中检索到的相关参考信息，请在回答时优先参考：",
+                "📚 以下是从知识库检索到的相关信息，回答时请优先参考：",
                 *[
                     text
                     for index, result in enumerate(ctx.knowledge_results[:5], 1)
@@ -328,55 +337,14 @@ class AssembledContext:
 
 
 class ContextAssembler:
-    """
-    上下文组装器 - 根据用户查询并行检索：
-      1. 知识库混合检索（SQLite 结构化 + LanceDB 语义）
-      2. Know-how 规则相关性过滤/排序
-      3. Skill 关键词意图匹配（top-1 high/medium 置信度）
-    """
+    def __init__(self, planner=None) -> None:
+        self._planner = planner or retrieval_planner
 
     QUERY_STOPWORDS = {
-        "请问",
-        "帮我",
-        "帮忙",
-        "看看",
-        "看下",
-        "分析",
-        "说明",
-        "介绍",
-        "告诉我",
-        "关于",
-        "这个",
-        "这份",
-        "一下",
-        "一下子",
-        "一下吧",
-        "是否",
-        "怎么",
-        "如何",
-        "哪些",
-        "什么",
-        "需要",
-        "一下子",
-        "里面",
-        "内容",
-        "材料",
-        "文件",
-        "文档",
-        "问题",
-        "情况",
-        "重点",
-        "合理",
-        "有无",
-        "有没有",
-        "吗",
-        "呢",
-        "吧",
-        "呀",
-        "啊",
-        "的",
-        "了",
-        "和",
+        "请问", "帮我", "帮忙", "看看", "看下", "分析", "说明", "介绍", "告诉我",
+        "关于", "这个", "这份", "一个", "一下", "是否", "怎么", "如何", "哪些",
+        "什么", "需要", "里面", "内容", "材料", "文件", "文档", "问题", "情况",
+        "重点", "合理", "有无", "有没有", "吗", "呢", "啊", "吧", "的", "了", "和",
     }
 
     TERM_ALIASES = {
@@ -400,7 +368,6 @@ class ContextAssembler:
     }
 
     def _extract_query_terms(self, query: str) -> list[str]:
-        """提取 query 中可用于匹配 Know-how 的关键词。"""
         normalized = " ".join((query or "").lower().split())
         if not normalized:
             return []
@@ -408,7 +375,7 @@ class ContextAssembler:
         candidates: list[str] = []
         candidates.extend(
             term.strip()
-            for term in re.split(r"[\s,.;:!?，。；：！？、/\\()（）【】\[\]\"'`]+", normalized)
+            for term in re.split(r"[\s,.;:!?，。；：！？、\\()（）【】\[\]\"'`]+", normalized)
             if len(term.strip()) >= 2
         )
         candidates.extend(re.findall(r"[a-z0-9][a-z0-9_.-]{1,}", normalized))
@@ -417,9 +384,9 @@ class ContextAssembler:
             cleaned = segment
             for stopword in sorted(self.QUERY_STOPWORDS, key=len, reverse=True):
                 cleaned = cleaned.replace(stopword, " ")
-            part_candidates = [part.strip() for part in cleaned.split() if len(part.strip()) >= 2]
-            candidates.extend(part_candidates)
-            for part in part_candidates:
+            parts = [part.strip() for part in cleaned.split() if len(part.strip()) >= 2]
+            candidates.extend(parts)
+            for part in parts:
                 if len(part) <= 4:
                     candidates.append(part)
                     continue
@@ -435,7 +402,6 @@ class ContextAssembler:
                 continue
             seen.add(term)
             expanded.append(term)
-
             canonical = self.TERM_ALIASES.get(term)
             if canonical and canonical not in seen:
                 seen.add(canonical)
@@ -450,7 +416,6 @@ class ContextAssembler:
         return normalized
 
     def _score_knowhow_rule(self, query_terms: list[str], query_text: str, rule: dict) -> float:
-        """对单条 Know-how 规则打分，过滤明显无关的规则。"""
         rule_text = str(rule.get("rule_text") or "")
         if not rule_text:
             return 0.0
@@ -469,125 +434,514 @@ class ContextAssembler:
             canonical_term = self.TERM_ALIASES.get(term, term)
             if len(canonical_term) < 2 or canonical_term in matched_terms:
                 continue
-
             if canonical_term in rule_keywords:
                 score += 3.2
                 matched_terms.add(canonical_term)
                 continue
-
             if canonical_term in rule_text_normalized:
                 score += 2.4
                 matched_terms.add(canonical_term)
                 continue
-
             if canonical_term in category_text:
                 score += 1.6
                 matched_terms.add(canonical_term)
 
-        # 完整 query 命中说明规则高度贴合当前问题。
         if len(query_text) >= 4 and query_text in rule_text_normalized:
             score += 3.0
-
         return score
 
     async def assemble(
         self,
         user_query: str,
-        mode: str = "copilot",
+        role_id: str = "copilot",
         category: Optional[str] = None,
+        planner_settings: RetrievalPlannerSettings | None = None,
+        enabled_surfaces: set[RetrievalSurface] | None = None,
+        trace_handler: RetrievalTraceHandler | None = None,
     ) -> AssembledContext:
-        """
-        根据用户最新消息，组装增强上下文。
-        仅在 copilot 模式下执行检索；其他模式返回空上下文。
-        """
         ctx = AssembledContext()
-
-        if mode != "copilot":
+        normalized_query = " ".join((user_query or "").split())
+        if len(normalized_query) < 2:
             return ctx
 
-        if not user_query or len(user_query.strip()) < 2:
-            return ctx
+        allowed_surfaces = self._normalize_enabled_surfaces(enabled_surfaces)
+        plan = await self._plan_retrieval(
+            user_query=normalized_query,
+            role_id=role_id,
+            planner_settings=planner_settings,
+            enabled_surfaces=allowed_surfaces,
+            trace_handler=trace_handler,
+        )
+        ctx.retrieval_plan = plan
 
-        # 并行执行三路检索（任一失败均静默降级）
+        knowledge_actions = [action for action in plan.actions if action.surface == "knowledge"]
+        knowhow_actions = [action for action in plan.actions if action.surface == "knowhow"]
+        skill_actions = [action for action in plan.actions if action.surface == "skill"]
+
         knowledge_task = asyncio.create_task(
-            self._search_knowledge(user_query, category)
+            self._collect_surface_results(
+                surface="knowledge",
+                actions=knowledge_actions,
+                category=category,
+                trace_handler=trace_handler,
+            )
         )
         knowhow_task = asyncio.create_task(
-            self._get_knowhow_rules(user_query)
+            self._collect_surface_results(
+                surface="knowhow",
+                actions=knowhow_actions,
+                trace_handler=trace_handler,
+            )
         )
         skills_task = asyncio.create_task(
-            self._match_skills(user_query)
+            self._collect_surface_results(
+                surface="skill",
+                actions=skill_actions,
+                trace_handler=trace_handler,
+            )
         )
 
         ctx.knowledge_results = await knowledge_task
         ctx.knowhow_rules = await knowhow_task
         ctx.matched_skills = await skills_task
-
         ctx.source_summary = ctx._build_source_summary()
 
         if ctx.has_context:
-            logger.info(f"[ContextAssembler] 已组装上下文: {ctx.source_summary}")
+            logger.info("[ContextAssembler] Assembled context: %s", ctx.source_summary)
         else:
-            logger.debug("[ContextAssembler] 未检索到任何上下文，将直接使用基础 system prompt")
-
+            logger.debug("[ContextAssembler] No context found, using base system prompt")
         return ctx
 
-    async def _search_knowledge(
-        self, query: str, category: Optional[str] = None,
-    ) -> List[dict]:
-        """检索知识库（结构化 + 语义），合并去重"""
+    def _normalize_enabled_surfaces(
+        self,
+        enabled_surfaces: set[RetrievalSurface] | None,
+    ) -> tuple[RetrievalSurface, ...]:
+        surfaces = enabled_surfaces or {"knowledge", "knowhow", "skill"}
+        return tuple(
+            surface
+            for surface in ("knowledge", "knowhow", "skill")
+            if surface in surfaces
+        )
+
+    async def _plan_retrieval(
+        self,
+        *,
+        user_query: str,
+        role_id: str,
+        planner_settings: RetrievalPlannerSettings | None,
+        enabled_surfaces: tuple[RetrievalSurface, ...],
+        trace_handler: RetrievalTraceHandler | None,
+    ) -> RetrievalPlan:
+        step_index = await self._trace_stage_start(
+            trace_handler,
+            "planner",
+            description="规划检索策略",
+            metadata={
+                "role_id": role_id,
+                "query": user_query,
+                "enabled_surfaces": list(enabled_surfaces),
+            },
+        )
         try:
-            results = await hybrid_search.search(
-                query=query, category=category, limit=5,
+            plan = await self._planner.plan(
+                user_query=user_query,
+                enabled_surfaces=set(enabled_surfaces),
+                settings=planner_settings,
             )
-            combined: list[dict] = []
-            seen_ids: set[str] = set()
-            _dedup_counter = 0  # 用于无 id 语义结果的唯一占位键
-
-            for r in results.get("structured", []):
-                rid = str(r.get("id", ""))
-                if not rid:
-                    rid = f"_s{_dedup_counter}"
-                    _dedup_counter += 1
-                if rid not in seen_ids:
-                    seen_ids.add(rid)
-                    combined.append(r)
-
-            for r in results.get("semantic", []):
-                # 语义结果可能用 chunk_id 或 id
-                rid = str(r.get("chunk_id") or r.get("id") or "")
-                if not rid:
-                    rid = f"_sem{_dedup_counter}"
-                    _dedup_counter += 1
-                if rid not in seen_ids:
-                    seen_ids.add(rid)
-                    combined.append(r)
-
-            logger.debug(
-                f"[ContextAssembler] 知识库检索完成: "
-                f"结构化={len(results.get('structured', []))} "
-                f"语义={len(results.get('semantic', []))} "
-                f"去重后={len(combined)}"
+            await self._trace_stage_complete(
+                trace_handler,
+                step_index,
+                "planner",
+                plan.describe(),
+                metadata={"strategy": plan.strategy, "action_count": len(plan.actions)},
             )
-            return combined[:5]
-        except Exception as e:
-            logger.warning(f"[ContextAssembler] 知识库检索失败: {e}", exc_info=True)
+            return plan
+        except Exception as exc:
+            await self._trace_stage_error(trace_handler, step_index, "planner", str(exc))
+            raise
+
+    async def _collect_surface_results(
+        self,
+        *,
+        surface: RetrievalSurface,
+        actions: list[RetrievalPlanAction],
+        trace_handler: RetrievalTraceHandler | None,
+        category: Optional[str] = None,
+    ) -> list[dict]:
+        if not actions:
             return []
 
-    async def _get_knowhow_rules(self, query: str) -> List[dict]:
-        """按 query 相关性筛选并排序活跃 Know-how 规则。"""
+        step_key = f"retrieve_{surface}"
+        step_index = await self._trace_stage_start(
+            trace_handler,
+            step_key,
+            description=self._surface_description(surface, actions),
+            metadata={"surface": surface, "queries": [action.query for action in actions]},
+        )
+
+        try:
+            surface_limit_map = {"knowledge": 8, "knowhow": 6, "skill": 3}
+            surface_limit = min(sum(action.limit for action in actions), surface_limit_map[surface])
+
+            if surface == "knowledge":
+                result_sets = await asyncio.gather(
+                    *[
+                        self.search_knowledge(action.query, category=category, limit=action.limit)
+                        for action in actions
+                    ]
+                )
+            elif surface == "knowhow":
+                result_sets = await asyncio.gather(
+                    *[
+                        self.get_knowhow_rules(action.query, limit=action.limit)
+                        for action in actions
+                    ]
+                )
+            else:
+                result_sets = await asyncio.gather(
+                    *[
+                        self.match_skills(action.query, limit=action.limit)
+                        for action in actions
+                    ]
+                )
+
+            results = self._fuse_surface_results(
+                surface=surface,
+                actions=actions,
+                result_sets=result_sets,
+                limit=surface_limit,
+            )
+            await self._trace_stage_complete(
+                trace_handler,
+                step_index,
+                step_key,
+                self._surface_summary(surface, len(results)),
+                metadata={
+                    "surface": surface,
+                    "result_count": len(results),
+                    "candidate_count": sum(len(result_set) for result_set in result_sets),
+                    "action_count": len(actions),
+                },
+            )
+            return results
+        except Exception as exc:
+            await self._trace_stage_error(trace_handler, step_index, step_key, str(exc))
+            return []
+
+    @staticmethod
+    def _surface_description(surface: RetrievalSurface, actions: list[RetrievalPlanAction]) -> str:
+        labels = {"knowledge": "检索知识库", "knowhow": "检索规则库", "skill": "检索技能库"}
+        queries = "；".join(action.query for action in actions[:3])
+        return f"{labels[surface]}：{queries}" if queries else labels[surface]
+
+    @staticmethod
+    def _surface_summary(surface: RetrievalSurface, result_count: int) -> str:
+        if surface == "knowledge":
+            return f"知识库命中 {result_count} 条"
+        if surface == "knowhow":
+            return f"规则库命中 {result_count} 条"
+        return f"匹配到 {result_count} 个技能"
+
+    def _surface_key_builder(self, surface: RetrievalSurface):
+        if surface == "knowledge":
+            return self._knowledge_record_key
+        if surface == "knowhow":
+            return self._knowhow_record_key
+        return self._skill_record_key
+
+    def _fuse_surface_results(
+        self,
+        *,
+        surface: RetrievalSurface,
+        actions: list[RetrievalPlanAction],
+        result_sets: list[list[dict]],
+        limit: int,
+    ) -> list[dict]:
+        if limit <= 0:
+            return []
+
+        key_builder = self._surface_key_builder(surface)
+        aggregates: dict[str, dict[str, Any]] = {}
+
+        for action_index, (action, result_set) in enumerate(zip(actions, result_sets)):
+            for result_index, item in enumerate(result_set):
+                key = key_builder(item)
+                candidate_score = self._score_surface_candidate(
+                    surface=surface,
+                    item=item,
+                    action=action,
+                    action_index=action_index,
+                    result_index=result_index,
+                )
+                existing = aggregates.get(key)
+                if existing is None:
+                    aggregates[key] = {
+                        "item": item,
+                        "score_sum": candidate_score,
+                        "best_score": candidate_score,
+                        "matched_actions": {action_index},
+                        "first_action_index": action_index,
+                    }
+                    continue
+
+                existing["score_sum"] += candidate_score
+                existing["best_score"] = max(existing["best_score"], candidate_score)
+                existing["matched_actions"].add(action_index)
+                if action_index < existing["first_action_index"]:
+                    existing["first_action_index"] = action_index
+                    existing["item"] = item
+
+        ranked: list[tuple[float, int, int, dict]] = []
+        for aggregate in aggregates.values():
+            repeat_bonus = 0.6 * max(0, len(aggregate["matched_actions"]) - 1)
+            final_score = aggregate["best_score"] + 0.35 * max(
+                0.0,
+                aggregate["score_sum"] - aggregate["best_score"],
+            ) + repeat_bonus
+            ranked.append(
+                (
+                    final_score,
+                    len(aggregate["matched_actions"]),
+                    -aggregate["first_action_index"],
+                    aggregate["item"],
+                )
+            )
+
+        ranked.sort(key=lambda entry: (entry[0], entry[1], entry[2]), reverse=True)
+        return [item for _, _, _, item in ranked[:limit]]
+
+    def _score_surface_candidate(
+        self,
+        *,
+        surface: RetrievalSurface,
+        item: dict,
+        action: RetrievalPlanAction,
+        action_index: int,
+        result_index: int,
+    ) -> float:
+        priority_bonus = max(0.0, 1.8 - action_index * 0.25)
+        required_bonus = 1.1 if action.required else 0.0
+        rank_bonus = max(0.0, 0.7 - result_index * 0.08)
+
+        if surface == "knowledge":
+            base_score = self._score_knowledge_candidate(item, action.query)
+        elif surface == "knowhow":
+            query_terms = self._extract_query_terms(action.query)
+            query_text = self._normalize_rule_text(action.query)
+            base_score = self._score_knowhow_rule(query_terms, query_text, item)
+            base_score += float(item.get("weight", 0)) * 0.12
+            base_score += float(item.get("hit_count", 0)) * 0.005
+        else:
+            base_score = self._score_skill_candidate(item, action.query)
+
+        return base_score + priority_bonus + required_bonus + rank_bonus
+
+    def _score_knowledge_candidate(self, item: dict, query: str) -> float:
+        query_terms = self._extract_query_terms(query)
+        normalized_query = self._normalize_search_text(query)
+        searchable_text = " ".join(
+            [
+                self._normalize_search_text(item.get("item_name")),
+                self._normalize_search_text(item.get("category")),
+                self._normalize_search_text(item.get("supplier")),
+                self._normalize_search_text(item.get("raw_text")),
+                self._normalize_search_text(item.get("content")),
+                self._normalize_search_text(item.get("source_file")),
+            ]
+        )
+        overlap_ratio = self._query_overlap_ratio(query_terms, searchable_text)
+        score = overlap_ratio * 4.0
+        if normalized_query and normalized_query in searchable_text:
+            score += 1.4
+        raw_score = self._coerce_float(item.get("score"))
+        if raw_score is not None:
+            if "content" in item:
+                score += max(0.0, 1.8 - min(max(raw_score, 0.0), 1.8))
+            elif 0.0 <= raw_score <= 1.0:
+                score += raw_score * 1.2
+        if item.get("item_name"):
+            score += 0.35
+        return score
+
+    def _score_skill_candidate(self, item: dict, query: str) -> float:
+        query_terms = self._extract_query_terms(query)
+        searchable_text = " ".join(
+            [
+                self._normalize_search_text(item.get("skill_name")),
+                self._normalize_search_text(item.get("description")),
+                self._normalize_search_text(" ".join(item.get("matched_keywords") or [])),
+            ]
+        )
+        overlap_ratio = self._query_overlap_ratio(query_terms, searchable_text)
+        confidence_bonus = {"high": 1.0, "medium": 0.45}.get(
+            str(item.get("confidence") or "").lower(),
+            0.0,
+        )
+        return overlap_ratio * 3.0 + float(item.get("score", 0.0)) * 4.0 + confidence_bonus
+
+    @staticmethod
+    def _normalize_search_text(value: object) -> str:
+        return " ".join(str(value or "").lower().split())
+
+    def _query_overlap_ratio(self, query_terms: list[str], searchable_text: str) -> float:
+        if not query_terms or not searchable_text:
+            return 0.0
+        matched_terms = {term for term in query_terms if len(term) >= 2 and term in searchable_text}
+        return len(matched_terms) / max(len(query_terms), 1)
+
+    @staticmethod
+    def _knowledge_record_key(record: dict) -> str:
+        return str(
+            record.get("id")
+            or record.get("chunk_id")
+            or (
+                f"{record.get('source_file', '')}:"
+                f"{record.get('chunk_index', '')}:"
+                f"{record.get('char_start', '')}:"
+                f"{str(record.get('content', ''))[:80]}"
+            )
+        )
+
+    @staticmethod
+    def _knowhow_record_key(record: dict) -> str:
+        return str(record.get("id") or f"{record.get('category', '')}:{record.get('rule_text', '')}")
+
+    @staticmethod
+    def _skill_record_key(record: dict) -> str:
+        return str(
+            record.get("skill_id")
+            or record.get("skill_name")
+            or record.get("description")
+            or ""
+        )
+
+    async def _trace_stage_start(
+        self,
+        trace_handler: RetrievalTraceHandler | None,
+        step_key: str,
+        *,
+        description: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> int | None:
+        if trace_handler is None:
+            return None
+        try:
+            return await trace_handler.on_stage_start(
+                step_key,
+                description=description,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.debug("[ContextAssembler] Failed to emit stage start", exc_info=True)
+            return None
+
+    async def _trace_stage_complete(
+        self,
+        trace_handler: RetrievalTraceHandler | None,
+        step_index: int | None,
+        step_key: str,
+        result: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if trace_handler is None or step_index is None:
+            return
+        try:
+            await trace_handler.on_stage_complete(
+                step_index,
+                step_key,
+                result,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.debug("[ContextAssembler] Failed to emit stage completion", exc_info=True)
+
+    async def _trace_stage_error(
+        self,
+        trace_handler: RetrievalTraceHandler | None,
+        step_index: int | None,
+        step_key: str,
+        error: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if trace_handler is None or step_index is None:
+            return
+        try:
+            await trace_handler.on_stage_error(
+                step_index,
+                step_key,
+                error,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.debug("[ContextAssembler] Failed to emit stage error", exc_info=True)
+
+    async def search_knowledge(
+        self,
+        query: str,
+        *,
+        category: Optional[str] = None,
+        limit: int = 5,
+    ) -> List[dict]:
+        return await self._search_knowledge(query, category=category, limit=limit)
+
+    async def _search_knowledge(
+        self,
+        query: str,
+        category: Optional[str] = None,
+        limit: int = 5,
+    ) -> List[dict]:
+        try:
+            results = await hybrid_search.search(query=query, category=category, limit=limit)
+            combined: list[dict] = []
+            seen_ids: set[str] = set()
+            dedup_counter = 0
+
+            for record in results.get("structured", []):
+                record_id = str(record.get("id", ""))
+                if not record_id:
+                    record_id = f"_s{dedup_counter}"
+                    dedup_counter += 1
+                if record_id not in seen_ids:
+                    seen_ids.add(record_id)
+                    combined.append(record)
+
+            for record in results.get("semantic", []):
+                record_id = str(record.get("chunk_id") or record.get("id") or "")
+                if not record_id:
+                    record_id = f"_sem{dedup_counter}"
+                    dedup_counter += 1
+                if record_id not in seen_ids:
+                    seen_ids.add(record_id)
+                    combined.append(record)
+
+            logger.debug(
+                "[ContextAssembler] knowledge search structured=%s semantic=%s merged=%s",
+                len(results.get("structured", [])),
+                len(results.get("semantic", [])),
+                len(combined),
+            )
+            return combined[:limit]
+        except Exception as exc:
+            logger.warning("[ContextAssembler] knowledge search failed: %s", exc, exc_info=True)
+            return []
+
+    async def get_knowhow_rules(self, query: str, *, limit: int = 5) -> List[dict]:
+        return await self._get_knowhow_rules(query, limit=limit)
+
+    async def _get_knowhow_rules(self, query: str, limit: int = 5) -> List[dict]:
         try:
             rules = await knowhow_service.list_rules(active_only=True)
             query_terms = self._extract_query_terms(query)
             query_text = self._normalize_rule_text(query)
             if not rules or not query_terms:
-                logger.debug("[ContextAssembler] Query 缺少有效关键词，跳过 Know-how 注入")
+                logger.debug("[ContextAssembler] skip knowhow injection because query has no useful terms")
                 return []
 
             scored_rules: list[tuple[float, dict]] = []
             for rule in rules:
                 score = self._score_knowhow_rule(query_terms, query_text, rule)
-                # 只保留有明确内容相关性的规则，避免“采购”这类泛词导致整包规则回流。
                 if score < 2.0:
                     continue
                 weighted_score = (
@@ -607,50 +961,60 @@ class ContextAssembler:
             )
             relevant_rules = [rule for _, rule in scored_rules]
             logger.debug(
-                f"[ContextAssembler] Know-how 规则获取完成: 活跃={len(rules)} 条, "
-                f"相关={len(relevant_rules)} 条"
+                "[ContextAssembler] knowhow rules active=%s relevant=%s",
+                len(rules),
+                len(relevant_rules),
             )
-            return relevant_rules
-        except Exception as e:
-            logger.warning(f"[ContextAssembler] Know-how 规则获取失败: {e}", exc_info=True)
+            return relevant_rules[:limit]
+        except Exception as exc:
+            logger.warning("[ContextAssembler] knowhow fetch failed: %s", exc, exc_info=True)
             return []
 
-    async def _match_skills(self, query: str) -> List[dict]:
-        """✅ Issue 2: 根据用户 query 匹配 Skill，返回 high/medium 置信度的结果"""
+    async def match_skills(self, query: str, *, limit: int = 3) -> List[dict]:
+        return await self._match_skills(query, limit=limit)
+
+    async def _match_skills(self, query: str, limit: int = 3) -> List[dict]:
         try:
-            # 确保 skill_manager 已初始化
             if not skill_manager._loaded:
                 await skill_manager.initialize()
 
             skills = skill_manager.list_skills()
             if not skills:
-                logger.debug("[ContextAssembler] 未发现任何已加载的 Skill，跳过匹配")
+                logger.debug("[ContextAssembler] no loaded skills, skip skill matching")
                 return []
 
-            matches = skill_matcher.match(query, skills, top_k=3)
-            # 只保留置信度 high 或 medium 的结果（score >= 0.6）
+            matches = skill_matcher.match(query, skills, top_k=max(limit, 1))
             relevant = [
                 {
-                    "skill_id": m.skill.id,
-                    "skill_name": m.skill.name,
-                    "description": m.skill.description[:150],
-                    "score": m.score,
-                    "confidence": m.confidence,
-                    "matched_keywords": m.matched_keywords,
+                    "skill_id": match.skill.id,
+                    "skill_name": match.skill.name,
+                    "description": match.skill.description[:150],
+                    "score": match.score,
+                    "confidence": match.confidence,
+                    "matched_keywords": match.matched_keywords,
                 }
-                for m in matches
-                if m.confidence in ("high", "medium")
+                for match in matches
+                if match.confidence in ("high", "medium")
             ]
             if relevant:
                 logger.debug(
-                    f"[ContextAssembler] Skill 匹配完成: "
-                    f"命中 {len(relevant)}/{len(skills)} 个 Skill"
+                    "[ContextAssembler] skill match relevant=%s total=%s",
+                    len(relevant),
+                    len(skills),
                 )
-            return relevant
-        except Exception as e:
-            logger.warning(f"[ContextAssembler] Skill 匹配失败: {e}", exc_info=True)
+            return relevant[:limit]
+        except Exception as exc:
+            logger.warning("[ContextAssembler] skill match failed: %s", exc, exc_info=True)
             return []
 
+    @staticmethod
+    def _coerce_float(value: object) -> Optional[float]:
+        try:
+            if value is None or value == "":
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
-# 全局单例
+
 context_assembler = ContextAssembler()
