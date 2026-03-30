@@ -63,6 +63,20 @@ chat persistence or Prompt Template / Prompt Pack runtime support.
 - Runtime chat and conversation APIs use `role_id` / `roleId` as the canonical role field.
 - Legacy `mode` is only kept as a compatibility fallback when reading older payloads or databases.
 
+## 用户管理与 RBAC
+
+- 用户、用户组、资源授权已全部落地，见 `backend/services/storage.py`。
+- 认证流程：`POST /api/auth/login` 返回 JWT Token，前端通过 `authStore` 持久化，后续请求全部由 `authFetch` 自动注入 `Authorization: Bearer <token>`。
+- 所有 `/api/*` 端点（除 `/api/health` 和 `/api/auth/login`）已添加 `get_current_user` 依赖保护。
+- 管理员接口额外验证 `system_role=="admin"`。
+- 密码直接使用 `bcrypt` 库（`bcrypt.hashpw` / `bcrypt.checkpw`），未引入 `passlib`，避免 `AttributeError: module 'bcrypt' has no attribute '__about__'` 兼容性问题。
+- 默认管理员账户：`admin` / `admin123`（首次启动时自动创建）。
+
+### 待完善事项
+
+- Knowledge / AI Role / Skill 创建/编辑 UI 中的可见性选择器（Private / Group / Public）尚未实现。
+- 资源列表页尚未根据 Access Grants 过滤，待后续辭代。
+
 ## Verification Baseline
 
 - Backend tests: `pytest backend/tests -q`

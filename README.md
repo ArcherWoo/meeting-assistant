@@ -40,6 +40,15 @@ python start.py
 - 前端：`http://localhost:4173`
 - 后端：`http://127.0.0.1:5173`
 
+启动后需要登录。系统会自动创建默认管理员账户：
+
+| 字段 | 值 |
+|------|----|
+| 用户名 | `admin` |
+| 密码 | `admin123` |
+
+> ⚠️ 生产环境请在首次登录后立即修改默认密码。
+
 ### 分开启动
 
 前端：
@@ -61,6 +70,13 @@ npm run build
 npm run test:backend
 npm run dev:all
 ```
+
+## 安全说明
+
+- 密码使用 `bcrypt` 单向哈希存储，不可逆向还原。
+- 登录后系统签发 JWT Token，有效期默认 24 小时。
+- 所有 `/api/*` 接口（除 `/api/health` 和 `/api/auth/login`）必须携带有效 Token。
+- 管理员接口（`/api/auth/users`、`/api/auth/groups` 等）额外要求 `system_role=admin`。
 
 ## 文档导航
 

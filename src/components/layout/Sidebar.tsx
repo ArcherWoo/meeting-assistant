@@ -4,6 +4,7 @@
  */
 import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from 'react';
 import { useAppStore } from '@/stores/appStore';
+import { useAuthStore } from '@/stores/authStore';
 import { useChatStore } from '@/stores/chatStore';
 import clsx from 'clsx';
 import { filterRolesBySurface, getPreferredRoleForSurface } from '@/utils/roles';
@@ -14,6 +15,7 @@ const SIDEBAR_MAX_WIDTH = 450;
 const SIDEBAR_DEFAULT_WIDTH = 236;
 
 export default function Sidebar() {
+  const { user, logout, isAdmin } = useAuthStore();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [expandedWidth, setExpandedWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
@@ -400,6 +402,26 @@ export default function Sidebar() {
             >
               <span>⚙️</span>
             </button>
+
+            {isAdmin() && (
+              <button
+                onClick={() => setActiveView(activeView === 'admin' ? 'chat' : 'admin')}
+                className="flex min-h-[40px] w-full items-center justify-center rounded-md border border-transparent text-sm text-text-secondary transition-colors hover:border-surface-divider hover:bg-white dark:hover:border-dark-divider dark:hover:bg-dark-card"
+                title="用户管理"
+                aria-label="用户管理"
+              >
+                <span>👥</span>
+              </button>
+            )}
+
+            <button
+              onClick={logout}
+              className="flex min-h-[40px] w-full items-center justify-center rounded-md border border-transparent text-sm text-text-secondary transition-colors hover:border-surface-divider hover:text-red-500"
+              title="登出"
+              aria-label="登出"
+            >
+              <span>🚪</span>
+            </button>
           </>
         ) : (
           <>
@@ -472,6 +494,31 @@ export default function Sidebar() {
             <span>⚙️</span>
             <span>设置</span>
           </button>
+
+          {/* 管理员入口 */}
+          {isAdmin() && (
+            <button
+              onClick={() => setActiveView(activeView === 'admin' ? 'chat' : 'admin')}
+              className="w-full flex items-center gap-2 rounded-md border border-transparent px-3 py-2 text-sm text-text-secondary transition-colors hover:border-surface-divider hover:bg-white dark:hover:border-dark-divider dark:hover:bg-dark-card"
+            >
+              <span>👥</span>
+              <span>用户管理</span>
+            </button>
+          )}
+
+          {/* 用户信息 & 登出 */}
+          <div className="flex items-center gap-2 rounded-md border border-surface-divider bg-surface px-3 py-2 dark:border-dark-divider dark:bg-dark-sidebar">
+            <span className="flex-1 truncate text-xs text-text-secondary" title={user?.username}>
+              {user?.display_name ?? user?.username}
+            </span>
+            <button
+              onClick={logout}
+              className="text-xs text-text-secondary hover:text-red-500 transition-colors"
+              title="登出"
+            >
+              登出
+            </button>
+          </div>
           </>
         )}
       </div>

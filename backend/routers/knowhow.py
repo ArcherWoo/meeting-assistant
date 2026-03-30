@@ -9,11 +9,12 @@ GET    /api/knowhow/export    - 导出规则库
 POST   /api/knowhow/import    - 导入规则库
 """
 from typing import Any, Literal, Optional
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from services.knowhow_service import knowhow_service
+from routers.auth import get_current_user
 
 router = APIRouter()
 
@@ -38,16 +39,22 @@ class KnowhowRuleUpdate(BaseModel):
 async def list_rules(
     category: Optional[str] = None,
     active_only: bool = False,
+    user: dict = Depends(get_current_user),
 ) -> dict:
-    """获取所有 Know-how 规则，可按分类筛选"""
+    """获取所有 Know-how 规则，可按分类筛选（RBAC 过滤）"""
+    is_admin = user.get("system_role") == "admin"
     rules = await knowhow_service.list_rules(
-        category=category, active_only=active_only,
+        category=category,
+        active_only=active_only,
+        user_id=user["id"],
+        group_id=user.get("group_id"),
+        is_admin=is_admin,
     )
     return {"rules": rules, "total": len(rules)}
 
 
 @router.post("/knowhow")
-async def add_rule(rule: KnowhowRuleCreate) -> dict:
+async def add_rule(rule: KnowhowRuleCreate, user: dict = Depends(get_current_user)) -> dict:
     """添加新的 Know-how 规则"""
     if not rule.rule_text.strip():
         raise HTTPException(status_code=400, detail="规则内容不能为空")
@@ -61,7 +68,7 @@ async def add_rule(rule: KnowhowRuleCreate) -> dict:
 
 
 @router.put("/knowhow/{rule_id}")
-async def update_rule(rule_id: str, rule: KnowhowRuleUpdate) -> dict:
+async def update_rule(rule_id: str, rule: KnowhowRuleUpdate, user: dict = Depends(get_current_user)) -> dict:
     """更新 Know-how 规则，返回更新后的完整规则对象"""
     updates = {k: v for k, v in rule.model_dump().items() if v is not None}
     if not updates:
@@ -78,20 +85,20 @@ async def update_rule(rule_id: str, rule: KnowhowRuleUpdate) -> dict:
 
 
 @router.delete("/knowhow/{rule_id}")
-async def delete_rule(rule_id: str) -> dict:
+async def delete_rule(rule_id: str, user: dict = Depends(get_current_user)) -> dict:
     """删除 Know-how 规则"""
     await knowhow_service.delete_rule(rule_id)
     return {"message": "规则已删除"}
 
 
 @router.get("/knowhow/stats")
-async def get_stats() -> dict:
+async def get_stats(user: dict = Depends(get_current_user)) -> dict:
     """获取 Know-how 统计信息"""
     return await knowhow_service.get_stats()
 
 
 @router.get("/knowhow/export")
-async def export_rules() -> JSONResponse:
+async def export_rules(user: dict = Depends(get_current_user)) -> JSONResponse:
     """导出 Know-how 规则库。"""
     payload = await knowhow_service.export_rules()
     export_date = str(payload["exported_at"]).split("T", 1)[0]
@@ -107,6 +114,7 @@ async def export_rules() -> JSONResponse:
 async def import_rules(
     payload: Any = Body(...),
     strategy: Literal["append", "replace"] = "append",
+    user: dict = Depends(get_current_user),
 ) -> dict:
     """导入 Know-how 规则库。"""
     try:
@@ -128,14 +136,14 @@ class CategoryDeleteRequest(BaseModel):
 
 
 @router.get("/knowhow/categories")
-async def list_categories() -> dict:
+async def list_categories(user: dict = Depends(get_current_user)) -> dict:
     """获取所有分类及其规则数量"""
     categories = await knowhow_service.list_categories()
     return {"categories": categories, "total": len(categories)}
 
 
 @router.put("/knowhow/categories/{name}")
-async def rename_category(name: str, body: CategoryRenameRequest) -> dict:
+async def rename_category(name: str, body: CategoryRenameRequest, user: dict = Depends(get_current_user)) -> dict:
     """重命名分类（批量更新该分类下所有规则的 category 字段）"""
     new_name = body.new_name.strip()
     if not new_name:
@@ -147,7 +155,7 @@ async def rename_category(name: str, body: CategoryRenameRequest) -> dict:
 
 
 @router.delete("/knowhow/categories/{name}")
-async def delete_category(name: str, delete_rules: bool = True) -> dict:
+async def delete_category(name: str, delete_rules: bool = True, user: dict = Depends(get_current_user)) -> dict:
     """
     删除分类。
     delete_rules=true（默认）：连同该分类下所有规则一起删除。

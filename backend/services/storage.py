@@ -231,6 +231,45 @@ CREATE TABLE IF NOT EXISTS agent_run_steps (
     UNIQUE(run_id, step_index)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_run_steps_run ON agent_run_steps(run_id, step_index);
+
+-- ===== RBAC 表 =====
+
+-- 用户组表
+CREATE TABLE IF NOT EXISTS groups (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT DEFAULT '',
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 系统用户表
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    display_name  TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    system_role   TEXT DEFAULT 'user',
+    group_id      TEXT,
+    is_active     INTEGER DEFAULT 1,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+CREATE INDEX IF NOT EXISTS idx_users_group ON users(group_id);
+
+-- 资源访问授权表
+CREATE TABLE IF NOT EXISTS access_grants (
+    id            TEXT PRIMARY KEY,
+    resource_type TEXT NOT NULL,
+    resource_id   TEXT NOT NULL,
+    grant_type    TEXT NOT NULL,
+    grantee_id    TEXT,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_access_grants_resource ON access_grants(resource_type, resource_id);
+CREATE INDEX IF NOT EXISTS idx_access_grants_grantee ON access_grants(grant_type, grantee_id);
 """
 
 
@@ -267,6 +306,8 @@ class StorageService:
         await self._ensure_default_workspace()
         # 确保默认角色存在
         await self._ensure_default_roles()
+        # 确保默认管理员存在
+        await self.ensure_default_admin()
 
     async def close(self) -> None:
         """关闭数据库连接"""
@@ -409,6 +450,133 @@ class StorageService:
             "CREATE INDEX IF NOT EXISTS idx_agent_run_steps_run ON agent_run_steps(run_id, step_index)"
         )
 
+        # --- RBAC migrations: add owner_id to resource tables ---
+        for table in ("roles", "knowhow_rules", "ppt_imports", "conversations", "workspaces"):
+            cols = await self._table_columns(table)
+            if "owner_id" not in cols:
+                await self.db.execute(f"ALTER TABLE {table} ADD COLUMN owner_id TEXT")
+
+    # ===== RBAC User/Group CRUD =====
+
+    async def create_user(
+        self, username: str, display_name: str, password_hash: str,
+        system_role: str = "user", group_id: Optional[str] = None,
+    ) -> dict:
+        uid = gen_id()
+        now = utc_now_iso()
+        await self.db.execute(
+            "INSERT INTO users (id, username, display_name, password_hash, system_role, group_id, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (uid, username, display_name, password_hash, system_role, group_id, now, now),
+        )
+        await self.db.commit()
+        return {"id": uid, "username": username, "display_name": display_name,
+                "system_role": system_role, "group_id": group_id, "is_active": 1,
+                "created_at": now, "updated_at": now}
+
+    async def get_user_by_username(self, username: str) -> Optional[dict]:
+        return await self._fetchone("SELECT * FROM users WHERE username=?", (username,))
+
+    async def get_user_by_id(self, user_id: str) -> Optional[dict]:
+        return await self._fetchone("SELECT * FROM users WHERE id=?", (user_id,))
+
+    async def list_users(self) -> list[dict]:
+        return await self._fetchall("SELECT id, username, display_name, system_role, group_id, is_active, created_at, updated_at FROM users ORDER BY created_at ASC")
+
+    async def update_user(self, user_id: str, **kwargs) -> Optional[dict]:
+        allowed = {"display_name", "system_role", "group_id", "is_active", "password_hash"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if not fields:
+            return await self.get_user_by_id(user_id)
+        fields["updated_at"] = utc_now_iso()
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        await self.db.execute(f"UPDATE users SET {set_clause} WHERE id=?", (*fields.values(), user_id))
+        await self.db.commit()
+        return await self.get_user_by_id(user_id)
+
+    async def delete_user(self, user_id: str) -> bool:
+        row = await self._fetchone("SELECT id FROM users WHERE id=?", (user_id,))
+        if not row:
+            return False
+        # 清理该用户作为被授权对象的所有 access_grants 记录
+        await self.db.execute(
+            "DELETE FROM access_grants WHERE grant_type='user' AND grantee_id=?",
+            (user_id,),
+        )
+        await self.db.execute("DELETE FROM users WHERE id=?", (user_id,))
+        await self.db.commit()
+        return True
+
+    async def create_group(self, name: str, description: str = "") -> dict:
+        gid = gen_id()
+        now = utc_now_iso()
+        await self.db.execute(
+            "INSERT INTO groups (id, name, description, created_at, updated_at) VALUES (?,?,?,?,?)",
+            (gid, name, description, now, now),
+        )
+        await self.db.commit()
+        return {"id": gid, "name": name, "description": description, "created_at": now, "updated_at": now}
+
+    async def list_groups(self) -> list[dict]:
+        return await self._fetchall("SELECT * FROM groups ORDER BY created_at ASC")
+
+    async def delete_group(self, group_id: str) -> bool:
+        row = await self._fetchone("SELECT id FROM groups WHERE id=?", (group_id,))
+        if not row:
+            return False
+        await self.db.execute("UPDATE users SET group_id=NULL WHERE group_id=?", (group_id,))
+        await self.db.execute("DELETE FROM access_grants WHERE grant_type='group' AND grantee_id=?", (group_id,))
+        await self.db.execute("DELETE FROM groups WHERE id=?", (group_id,))
+        await self.db.commit()
+        return True
+
+    async def set_access_grant(
+        self, resource_type: str, resource_id: str, grant_type: str, grantee_id: Optional[str] = None,
+    ) -> dict:
+        """Set an access grant. grant_type: 'public', 'group', 'user'."""
+        # Remove existing grant of same type for this resource+grantee
+        await self.db.execute(
+            "DELETE FROM access_grants WHERE resource_type=? AND resource_id=? AND grant_type=? AND (grantee_id=? OR grantee_id IS NULL)",
+            (resource_type, resource_id, grant_type, grantee_id),
+        )
+        gid = gen_id()
+        now = utc_now_iso()
+        await self.db.execute(
+            "INSERT INTO access_grants (id, resource_type, resource_id, grant_type, grantee_id, created_at) VALUES (?,?,?,?,?,?)",
+            (gid, resource_type, resource_id, grant_type, grantee_id, now),
+        )
+        await self.db.commit()
+        return {"id": gid, "resource_type": resource_type, "resource_id": resource_id,
+                "grant_type": grant_type, "grantee_id": grantee_id, "created_at": now}
+
+    async def remove_access_grant(self, grant_id: str) -> bool:
+        row = await self._fetchone("SELECT id FROM access_grants WHERE id=?", (grant_id,))
+        if not row:
+            return False
+        await self.db.execute("DELETE FROM access_grants WHERE id=?", (grant_id,))
+        await self.db.commit()
+        return True
+
+    async def list_access_grants(self, resource_type: Optional[str] = None, resource_id: Optional[str] = None) -> list[dict]:
+        conditions: list[str] = []
+        params: list[str] = []
+        if resource_type:
+            conditions.append("resource_type=?")
+            params.append(resource_type)
+        if resource_id:
+            conditions.append("resource_id=?")
+            params.append(resource_id)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        return await self._fetchall(f"SELECT * FROM access_grants{where} ORDER BY created_at ASC", params)
+
+    async def ensure_default_admin(self) -> None:
+        """Ensure at least one admin user exists. Create default admin if none."""
+        row = await self._fetchone("SELECT id FROM users WHERE system_role='admin' LIMIT 1")
+        if not row:
+            import bcrypt
+            password_hash = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
+            await self.create_user("admin", "管理员", password_hash, system_role="admin")
+
     # ===== Workspace CRUD =====
 
     async def _ensure_default_workspace(self) -> None:
@@ -534,8 +702,42 @@ class StorageService:
 
     # ===== Role CRUD =====
 
-    async def list_roles(self) -> list[dict]:
-        return await self._fetchall("SELECT * FROM roles ORDER BY sort_order ASC, created_at ASC")
+    async def list_roles(self, owner_id: Optional[str] = None, group_id: Optional[str] = None, is_admin: bool = False) -> list[dict]:
+        """列出角色，按 RBAC 可见性过滤。
+        Admin 用户可见全部；普通用户可见：内置 / 自己创建 / 已被授权（public/group/user）。
+        """
+        if is_admin or owner_id is None:
+            # admin 或未传 owner_id（系统内部调用）：返回全部
+            return await self._fetchall("SELECT * FROM roles ORDER BY sort_order ASC, created_at ASC")
+
+        params: list = [owner_id]
+        group_clause = ""
+        if group_id:
+            group_clause = (
+                "OR id IN ("
+                "  SELECT resource_id FROM access_grants"
+                "  WHERE resource_type='role' AND grant_type='group' AND grantee_id=?"
+                ") "
+            )
+            params.append(group_id)
+        params.append(owner_id)
+
+        sql = (
+            "SELECT * FROM roles WHERE "
+            "is_builtin=1 "
+            "OR owner_id=? "
+            + group_clause +
+            "OR id IN ("
+            "  SELECT resource_id FROM access_grants"
+            "  WHERE resource_type='role' AND grant_type='public'"
+            ") "
+            "OR id IN ("
+            "  SELECT resource_id FROM access_grants"
+            "  WHERE resource_type='role' AND grant_type='user' AND grantee_id=?"
+            ") "
+            "ORDER BY sort_order ASC, created_at ASC"
+        )
+        return await self._fetchall(sql, params)
 
     async def get_role(self, role_id: str) -> Optional[dict]:
         return await self._fetchone("SELECT * FROM roles WHERE id=?", (role_id,))
@@ -552,6 +754,7 @@ class StorageService:
         agent_preflight: Optional[list] = None,
         allowed_surfaces: Optional[list] = None,
         agent_allowed_tools: Optional[list] = None,
+        owner_id: Optional[str] = None,
     ) -> dict:
         import json as _json
         rid = gen_id()
@@ -566,23 +769,12 @@ class StorageService:
         sort_order = (row["max_order"] or 0) + 1 if row else 1
         await self.db.execute(
             "INSERT INTO roles (id, name, icon, description, system_prompt, agent_prompt, capabilities, chat_capabilities, "
-            "agent_preflight, allowed_surfaces, agent_allowed_tools, is_builtin, sort_order, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)",
+            "agent_preflight, allowed_surfaces, agent_allowed_tools, is_builtin, sort_order, owner_id, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)",
             (
-                rid,
-                name,
-                icon,
-                description,
-                system_prompt,
-                agent_prompt,
-                caps,
-                chat_caps,
-                preflight,
-                surfaces,
-                tools,
-                sort_order,
-                now,
-                now,
+                rid, name, icon, description, system_prompt, agent_prompt,
+                caps, chat_caps, preflight, surfaces, tools,
+                sort_order, owner_id, now, now,
             ),
         )
         await self.db.commit()
@@ -594,7 +786,7 @@ class StorageService:
             "agent_preflight": agent_preflight or [],
             "allowed_surfaces": allowed_surfaces or ["chat"],
             "agent_allowed_tools": agent_allowed_tools or [],
-            "is_builtin": 0, "sort_order": sort_order,
+            "is_builtin": 0, "sort_order": sort_order, "owner_id": owner_id,
             "created_at": now, "updated_at": now,
         }
 
@@ -699,20 +891,21 @@ class StorageService:
         surface: str = "chat",
         role_id: str = "copilot",
         is_title_customized: int = 0,
+        owner_id: Optional[str] = None,
     ) -> dict:
         cid = gen_id()
         now = utc_now_iso()
         if "mode" in self._conversation_columns:
             await self.db.execute(
-                "INSERT INTO conversations (id, workspace_id, title, surface, mode, role_id, is_title_customized, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (cid, workspace_id, title, surface, role_id, role_id, is_title_customized, now, now),
+                "INSERT INTO conversations (id, workspace_id, title, surface, mode, role_id, is_title_customized, owner_id, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (cid, workspace_id, title, surface, role_id, role_id, is_title_customized, owner_id, now, now),
             )
         else:
             await self.db.execute(
-                "INSERT INTO conversations (id, workspace_id, title, surface, role_id, is_title_customized, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (cid, workspace_id, title, surface, role_id, is_title_customized, now, now),
+                "INSERT INTO conversations (id, workspace_id, title, surface, role_id, is_title_customized, owner_id, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (cid, workspace_id, title, surface, role_id, is_title_customized, owner_id, now, now),
             )
         await self.db.commit()
         return self._normalize_conversation_row({
@@ -728,18 +921,27 @@ class StorageService:
             "last_message": "",
         })
 
-    async def list_conversations(self, workspace_id: str) -> list[dict]:
-        rows = await self._fetchall(
-            "SELECT c.*, "
-            "("
-            "  SELECT m.content FROM messages m WHERE m.conversation_id = c.id "
-            "  ORDER BY m.created_at DESC LIMIT 1"
-            ") AS last_message "
-            "FROM conversations c "
-            "WHERE c.workspace_id=? "
-            "ORDER BY c.is_pinned DESC, c.updated_at DESC",
-            (workspace_id,),
-        )
+    async def list_conversations(self, workspace_id: str, owner_id: Optional[str] = None) -> list[dict]:
+        if owner_id:
+            rows = await self._fetchall(
+                "SELECT c.*, "
+                "(SELECT m.content FROM messages m WHERE m.conversation_id = c.id "
+                " ORDER BY m.created_at DESC LIMIT 1) AS last_message "
+                "FROM conversations c "
+                "WHERE c.workspace_id=? AND c.owner_id=? "
+                "ORDER BY c.is_pinned DESC, c.updated_at DESC",
+                (workspace_id, owner_id),
+            )
+        else:
+            rows = await self._fetchall(
+                "SELECT c.*, "
+                "(SELECT m.content FROM messages m WHERE m.conversation_id = c.id "
+                " ORDER BY m.created_at DESC LIMIT 1) AS last_message "
+                "FROM conversations c "
+                "WHERE c.workspace_id=? "
+                "ORDER BY c.is_pinned DESC, c.updated_at DESC",
+                (workspace_id,),
+            )
         return [self._normalize_conversation_row(row) for row in rows]
 
     async def get_conversation(self, conversation_id: str) -> Optional[dict]:
@@ -1283,16 +1485,53 @@ class StorageService:
         await self.db.commit()
         return rid
 
-    async def list_knowhow_rules(self, category: Optional[str] = None, active_only: bool = True) -> list[dict]:
-        conditions = []
-        params: list[str] = []
+    async def list_knowhow_rules(
+        self,
+        category: Optional[str] = None,
+        active_only: bool = True,
+        user_id: Optional[str] = None,
+        group_id: Optional[str] = None,
+        is_admin: bool = False,
+    ) -> list[dict]:
+        """列出 Know-how 规则，按 RBAC 可见性过滤。
+        Admin 或不传 user_id（系统内部）：返回全部。
+        普通用户：仅返回 owner_id 为自己 / public 授权 / group 授权 / user 授权的规则。
+        """
+        conditions: list[str] = []
+        params: list = []
+
         if active_only:
             conditions.append("is_active=1")
         if category:
             conditions.append("category=?")
             params.append(category)
+
+        if user_id and not is_admin:
+            rbac_parts = ["owner_id=?"]
+            rbac_params: list = [user_id]
+            rbac_parts.append(
+                "id IN (SELECT resource_id FROM access_grants"
+                " WHERE resource_type='knowhow' AND grant_type='public')"
+            )
+            rbac_parts.append(
+                "id IN (SELECT resource_id FROM access_grants"
+                " WHERE resource_type='knowhow' AND grant_type='user' AND grantee_id=?)"
+            )
+            rbac_params.append(user_id)
+            if group_id:
+                rbac_parts.append(
+                    "id IN (SELECT resource_id FROM access_grants"
+                    " WHERE resource_type='knowhow' AND grant_type='group' AND grantee_id=?)"
+                )
+                rbac_params.append(group_id)
+            conditions.append(f"({' OR '.join(rbac_parts)})")
+            params = rbac_params + params
+
         where = " AND ".join(conditions) if conditions else "1=1"
-        return await self._fetchall(f"SELECT * FROM knowhow_rules WHERE {where} ORDER BY weight DESC, hit_count DESC", params)
+        return await self._fetchall(
+            f"SELECT * FROM knowhow_rules WHERE {where} ORDER BY weight DESC, hit_count DESC",
+            params,
+        )
 
     async def increment_knowhow_hit(self, rule_id: str) -> None:
         await self.db.execute("UPDATE knowhow_rules SET hit_count = hit_count + 1 WHERE id=?", (rule_id,))
@@ -1314,18 +1553,66 @@ class StorageService:
 
     # ===== PPT Imports =====
 
-    async def record_ppt_import(self, file_name: str, file_hash: str, file_size: int, slide_count: int) -> str:
+    async def record_ppt_import(
+        self, file_name: str, file_hash: str, file_size: int, slide_count: int,
+        owner_id: Optional[str] = None,
+    ) -> str:
         """记录 PPT 导入，返回 import_id。若 hash 已存在则返回已有记录 ID"""
         existing = await self._fetchone("SELECT id FROM ppt_imports WHERE file_hash=?", (file_hash,))
         if existing:
             return existing["id"]
         iid = gen_id()
         await self.db.execute(
-            "INSERT INTO ppt_imports (id, file_name, file_hash, file_size, slide_count) VALUES (?,?,?,?,?)",
-            (iid, file_name, file_hash, file_size, slide_count),
+            "INSERT INTO ppt_imports (id, file_name, file_hash, file_size, slide_count, owner_id) VALUES (?,?,?,?,?,?)",
+            (iid, file_name, file_hash, file_size, slide_count, owner_id),
         )
         await self.db.commit()
         return iid
+
+    async def list_ppt_imports(
+        self,
+        user_id: Optional[str] = None,
+        group_id: Optional[str] = None,
+        is_admin: bool = False,
+    ) -> list[dict]:
+        """列出知识库导入记录，按 RBAC 可见性过滤。
+        Admin 或不传 user_id（系统内部）：返回全部。
+        普通用户：仅返回 owner_id 为自己 / public 授权 / group 授权 / user 授权的记录。
+        """
+        if is_admin or user_id is None:
+            return await self._fetchall(
+                "SELECT id, file_name, file_size, slide_count, import_status, imported_at "
+                "FROM ppt_imports ORDER BY imported_at DESC"
+            )
+
+        params: list = [user_id]
+        group_clause = ""
+        if group_id:
+            group_clause = (
+                "OR id IN ("
+                "  SELECT resource_id FROM access_grants"
+                "  WHERE resource_type='knowledge' AND grant_type='group' AND grantee_id=?"
+                ") "
+            )
+            params.append(group_id)
+        params.append(user_id)
+
+        sql = (
+            "SELECT id, file_name, file_size, slide_count, import_status, imported_at "
+            "FROM ppt_imports WHERE "
+            "owner_id=? "
+            + group_clause +
+            "OR id IN ("
+            "  SELECT resource_id FROM access_grants"
+            "  WHERE resource_type='knowledge' AND grant_type='public'"
+            ") "
+            "OR id IN ("
+            "  SELECT resource_id FROM access_grants"
+            "  WHERE resource_type='knowledge' AND grant_type='user' AND grantee_id=?"
+            ") "
+            "ORDER BY imported_at DESC"
+        )
+        return await self._fetchall(sql, params)
 
     async def update_ppt_import_status(self, import_id: str, status: str, extracted_count: int = 0) -> None:
         await self.db.execute(

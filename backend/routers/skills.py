@@ -15,11 +15,12 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from services.skill_manager import _BACKEND_SKILLS_DIR, _USER_SKILLS_DIR, skill_manager
 from services.skill_matcher import skill_matcher
+from routers.auth import get_current_user
 
 router = APIRouter()
 
@@ -35,7 +36,7 @@ class SaveSkillRequest(BaseModel):
 
 
 @router.get("/skills")
-async def list_skills(builtin_only: bool = False) -> dict:
+async def list_skills(builtin_only: bool = False, user: dict = Depends(get_current_user)) -> dict:
     skills = skill_manager.list_skills(builtin_only=builtin_only)
     return {
         "skills": [
@@ -56,7 +57,7 @@ async def list_skills(builtin_only: bool = False) -> dict:
 
 
 @router.get("/skills/{skill_id}")
-async def get_skill(skill_id: str) -> dict:
+async def get_skill(skill_id: str, user: dict = Depends(get_current_user)) -> dict:
     skill = skill_manager.get_skill(skill_id)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' 未找到")
@@ -77,7 +78,7 @@ async def get_skill(skill_id: str) -> dict:
 
 
 @router.get("/skills/{skill_id}/content")
-async def get_skill_content(skill_id: str) -> dict:
+async def get_skill_content(skill_id: str, user: dict = Depends(get_current_user)) -> dict:
     skill = skill_manager.get_skill(skill_id)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' 未找到")
@@ -104,7 +105,7 @@ def _slugify(name: str) -> str:
 
 
 @router.post("/skills")
-async def save_skill(request: SaveSkillRequest) -> dict:
+async def save_skill(request: SaveSkillRequest, user: dict = Depends(get_current_user)) -> dict:
     content = request.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="Skill 内容不能为空")
@@ -132,7 +133,7 @@ async def save_skill(request: SaveSkillRequest) -> dict:
 
 
 @router.put("/skills/{skill_id}")
-async def update_skill(skill_id: str, request: SaveSkillRequest) -> dict:
+async def update_skill(skill_id: str, request: SaveSkillRequest, user: dict = Depends(get_current_user)) -> dict:
     content = request.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="Skill 内容不能为空")
@@ -171,7 +172,7 @@ async def update_skill(skill_id: str, request: SaveSkillRequest) -> dict:
 
 
 @router.delete("/skills/{skill_id}")
-async def delete_skill(skill_id: str) -> dict:
+async def delete_skill(skill_id: str, user: dict = Depends(get_current_user)) -> dict:
     """
     删除 Skill。
 
@@ -235,7 +236,7 @@ async def delete_skill(skill_id: str) -> dict:
 
 
 @router.post("/skills/match")
-async def match_skill(request: MatchRequest) -> dict:
+async def match_skill(request: MatchRequest, user: dict = Depends(get_current_user)) -> dict:
     skills = skill_manager.list_skills()
     if not skills:
         return {"matches": [], "total": 0}

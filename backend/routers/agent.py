@@ -2,7 +2,7 @@
 
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from services.agent_runtime.errors import (
@@ -26,12 +26,13 @@ from services.agent_runtime.runner import execute_agent_stream
 from services.skill_manager import skill_manager
 from services.skill_matcher import skill_matcher
 from services.storage import storage
+from routers.auth import get_current_user
 
 router = APIRouter()
 
 
 @router.post("/agent/match")
-async def match_intent(request: AgentMatchRequest) -> AgentMatchResponse:
+async def match_intent(request: AgentMatchRequest, user: dict = Depends(get_current_user)) -> AgentMatchResponse:
     query = request.query.strip()
     if not query:
         raise HTTPException(status_code=400, detail="query is required")
@@ -83,7 +84,7 @@ async def match_intent(request: AgentMatchRequest) -> AgentMatchResponse:
 
 
 @router.post("/agent/execute")
-async def execute_skill(request: AgentExecuteRequest):
+async def execute_skill(request: AgentExecuteRequest, user: dict = Depends(get_current_user)):
     async def event_stream():
         try:
             async for event in execute_agent_stream(request):
@@ -108,7 +109,7 @@ async def execute_skill(request: AgentExecuteRequest):
 
 
 @router.get("/agent/runs/{run_id}")
-async def get_agent_run(run_id: str) -> dict:
+async def get_agent_run(run_id: str, user: dict = Depends(get_current_user)) -> dict:
     run = await load_agent_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Agent run 不存在")
@@ -116,7 +117,7 @@ async def get_agent_run(run_id: str) -> dict:
 
 
 @router.post("/agent/runs/{run_id}/cancel")
-async def cancel_agent_run(run_id: str) -> dict:
+async def cancel_agent_run(run_id: str, user: dict = Depends(get_current_user)) -> dict:
     run = await load_agent_run(run_id)
     if run and run.get("status") in {"completed", "failed", "cancelled"}:
         return {

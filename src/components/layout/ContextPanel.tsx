@@ -133,6 +133,7 @@ export default function ContextPanel({ width }: { width?: number }) {
   const [imports, setImports] = useState<ImportRecord[]>([]);
   const [importing, setImporting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [isEncrypted, setIsEncrypted] = useState(true);
   const kbFileInputRef = useRef<HTMLInputElement>(null);
   /** 首次数据加载是否完成（避免 khStats 永远卡在"加载中..."） */
   const [statsLoaded, setStatsLoaded] = useState(false);
@@ -200,7 +201,7 @@ export default function ContextPanel({ width }: { width?: number }) {
     e.target.value = '';
     setImporting(true);
     try {
-      const result = await uploadFiles(files);
+      const result = await uploadFiles(files, isEncrypted);
       await refresh();
       if (result.errors.length > 0) {
         alert(`以下文件导入失败：\n${result.errors.map((item) => `${item.filename}: ${item.error}`).join('\n')}`);
@@ -702,6 +703,15 @@ export default function ContextPanel({ width }: { width?: number }) {
                   className="hidden"
                   onChange={handleKbImport}
                 />
+                <label className="flex items-center gap-1 cursor-pointer select-none" title="文件已加密（亿赛通）">
+                  <input
+                    type="checkbox"
+                    checked={isEncrypted}
+                    onChange={(e) => setIsEncrypted(e.target.checked)}
+                    className="accent-primary w-3.5 h-3.5"
+                  />
+                  <span className="text-[10px] text-text-secondary">加密</span>
+                </label>
                 <button
                   onClick={() => kbFileInputRef.current?.click()}
                   disabled={importing}

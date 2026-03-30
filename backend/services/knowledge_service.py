@@ -15,6 +15,7 @@ from typing import List, Optional, Callable, Awaitable, Any
 
 from services.runtime_paths import VECTORS_DIR
 from services.storage import storage, gen_id
+from utils.decryption_handler import decrypt_esafenet_file
 
 logger = logging.getLogger(__name__)
 
@@ -204,32 +205,39 @@ class KnowledgeService:
         self, file_content: bytes, filename: str,
         llm_fn: Optional[object] = None,
         embedding_fn: Optional[object] = None,
+        owner_id: Optional[str] = None,
+        is_encrypted: bool = False,
     ) -> dict:
         """
         通用文件导入入口 - 根据文件类型分发到对应的处理器
+        若 is_encrypted=True，先通过解密 hook 处理文件字节。
         """
+        if is_encrypted:
+            file_content = decrypt_esafenet_file(file_content, filename)
+
         ext = os.path.splitext(filename)[1].lower()
 
         if ext in self.PPT_EXTS:
-            return await self.ingest_ppt(file_content, filename, llm_fn, embedding_fn)
+            return await self.ingest_ppt(file_content, filename, llm_fn, embedding_fn, owner_id=owner_id)
         elif ext in (".pdf",):
-            return await self._ingest_pdf(file_content, filename, embedding_fn)
+            return await self._ingest_pdf(file_content, filename, embedding_fn, owner_id=owner_id)
         elif ext in (".doc", ".docx"):
-            return await self._ingest_docx(file_content, filename, embedding_fn)
+            return await self._ingest_docx(file_content, filename, embedding_fn, owner_id=owner_id)
         elif ext in self.IMAGE_EXTS:
-            return await self._ingest_image(file_content, filename)
+            return await self._ingest_image(file_content, filename, owner_id=owner_id)
         elif ext in self.TEXT_EXTS:
-            return await self._ingest_text(file_content, filename, embedding_fn)
+            return await self._ingest_text(file_content, filename, embedding_fn, owner_id=owner_id)
         elif ext in (".xls", ".xlsx"):
-            return await self._ingest_excel(file_content, filename, embedding_fn)
+            return await self._ingest_excel(file_content, filename, embedding_fn, owner_id=owner_id)
         else:
             # 兜底：尝试当纯文本处理
-            return await self._ingest_text(file_content, filename)
+            return await self._ingest_text(file_content, filename, owner_id=owner_id)
 
     async def ingest_ppt(
         self, file_content: bytes, filename: str,
         llm_fn: Optional[object] = None,
         embedding_fn: Optional[object] = None,
+        owner_id: Optional[str] = None,
     ) -> dict:
         """
         PPT 导入知识库完整 Pipeline
@@ -243,6 +251,7 @@ class KnowledgeService:
         import_id = await storage.record_ppt_import(
             file_name=filename, file_hash=file_hash,
             file_size=len(file_content), slide_count=0,
+            owner_id=owner_id,
         )
         # 检查是否已导入（record_ppt_import 返回已有 ID）
         existing = await storage._fetchone(
@@ -538,6 +547,7 @@ class KnowledgeService:
     async def _ingest_generic(
         self, file_content: bytes, filename: str, text: str, file_type: str,
         embedding_fn: Optional[Any] = None,
+        owner_id: Optional[str] = None,
     ) -> dict:
         """通用文件导入：记录到 ppt_imports，并把文本块写入 SQLite / LanceDB。"""
         import hashlib
@@ -548,6 +558,7 @@ class KnowledgeService:
             file_hash=file_hash,
             file_size=len(file_content),
             slide_count=0,
+            owner_id=owner_id,
         )
         existing = await storage._fetchone(
             "SELECT import_status FROM ppt_imports WHERE id=?",
@@ -590,14 +601,14 @@ class KnowledgeService:
             "char_count": char_count,
         }
 
-    async def _ingest_pdf(self, file_content: bytes, filename: str, embedding_fn: Optional[Any] = None) -> dict:
+    async def _ingest_pdf(self, file_content: bytes, filename: str, embedding_fn: Optional[Any] = None, owner_id: Optional[str] = None) -> dict:
         """导入 PDF 文件（同步解析放入线程池）"""
         import asyncio
 
         text = await asyncio.to_thread(self._extract_pdf_text_sync, file_content, filename)
-        return await self._ingest_generic(file_content, filename, text, "pdf", embedding_fn)
+        return await self._ingest_generic(file_content, filename, text, "pdf", embedding_fn, owner_id=owner_id)
 
-    async def _ingest_docx(self, file_content: bytes, filename: str, embedding_fn: Optional[Any] = None) -> dict:
+    async def _ingest_docx(self, file_content: bytes, filename: str, embedding_fn: Optional[Any] = None, owner_id: Optional[str] = None) -> dict:
         """导入 DOCX 文件（同步解析放入线程池）"""
         import asyncio
 
@@ -615,14 +626,14 @@ class KnowledgeService:
                 return f"[DOCX 文件: {filename}，解析失败: {e}]"
 
         text = await asyncio.to_thread(_parse)
-        return await self._ingest_generic(file_content, filename, text, "docx", embedding_fn)
+        return await self._ingest_generic(file_content, filename, text, "docx", embedding_fn, owner_id=owner_id)
 
-    async def _ingest_image(self, file_content: bytes, filename: str) -> dict:
+    async def _ingest_image(self, file_content: bytes, filename: str, owner_id: Optional[str] = None) -> dict:
         """导入图片文件（记录文件信息，OCR 待后续集成）"""
         text = f"[图片文件: {filename}，大小: {len(file_content) / 1024:.1f}KB]"
-        return await self._ingest_generic(file_content, filename, text, "image")
+        return await self._ingest_generic(file_content, filename, text, "image", owner_id=owner_id)
 
-    async def _ingest_text(self, file_content: bytes, filename: str, embedding_fn: Optional[Any] = None) -> dict:
+    async def _ingest_text(self, file_content: bytes, filename: str, embedding_fn: Optional[Any] = None, owner_id: Optional[str] = None) -> dict:
         """导入纯文本文件"""
         text = ""
         for encoding in ("utf-8", "gbk", "gb2312", "latin-1"):
@@ -633,9 +644,9 @@ class KnowledgeService:
                 continue
         if not text:
             text = file_content.decode("utf-8", errors="replace")
-        return await self._ingest_generic(file_content, filename, text, "text", embedding_fn)
+        return await self._ingest_generic(file_content, filename, text, "text", embedding_fn, owner_id=owner_id)
 
-    async def _ingest_excel(self, file_content: bytes, filename: str, embedding_fn: Optional[Any] = None) -> dict:
+    async def _ingest_excel(self, file_content: bytes, filename: str, embedding_fn: Optional[Any] = None, owner_id: Optional[str] = None) -> dict:
         """导入 Excel 文件（同步解析放入线程池）"""
         import asyncio
 
@@ -661,7 +672,7 @@ class KnowledgeService:
                 return f"[Excel 文件: {filename}，解析失败: {e}]"
 
         text = await asyncio.to_thread(_parse)
-        return await self._ingest_generic(file_content, filename, text, "excel", embedding_fn)
+        return await self._ingest_generic(file_content, filename, text, "excel", embedding_fn, owner_id=owner_id)
 
     async def extract_text(self, file_content: bytes, filename: str) -> dict:
         """
@@ -728,13 +739,14 @@ class KnowledgeService:
             "char_count": len(text),
         }
 
-    async def list_imports(self) -> list:
-        """列出所有已导入的文件"""
-        rows = await storage._fetchall(
-            "SELECT id, file_name, file_size, slide_count, import_status, imported_at "
-            "FROM ppt_imports ORDER BY imported_at DESC"
-        )
-        return rows
+    async def list_imports(
+        self,
+        user_id: Optional[str] = None,
+        group_id: Optional[str] = None,
+        is_admin: bool = False,
+    ) -> list:
+        """列出已导入的文件，按 RBAC 可见性过滤"""
+        return await storage.list_ppt_imports(user_id=user_id, group_id=group_id, is_admin=is_admin)
 
     async def delete_import(self, import_id: str) -> dict:
         """删除指定 import_id 的知识库记录"""

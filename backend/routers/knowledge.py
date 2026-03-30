@@ -9,13 +9,14 @@ DELETE /api/knowledge/imports/{id} - 删除已导入记录
 """
 import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 
 from services.knowledge_service import knowledge_service
 from services.hybrid_search import hybrid_search
 from services.embedding_service import embedding_service
 from services.storage import storage
+from routers.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -102,6 +103,8 @@ async def _validate_and_read_upload(file: UploadFile) -> tuple[str, bytes]:
 async def ingest_file(
     file: UploadFile | None = File(None),
     files: list[UploadFile] | None = File(None),
+    is_encrypted: bool = Form(True),
+    user: dict = Depends(get_current_user),
 ) -> dict:
     """
     将文件导入知识库
@@ -130,6 +133,8 @@ async def ingest_file(
                     filename=validated_filename,
                     llm_fn=None,
                     embedding_fn=embedding_fn,
+                    owner_id=user.get("id"),
+                    is_encrypted=is_encrypted,
                 )
                 results.append(result)
             except ValueError as e:
@@ -157,7 +162,7 @@ async def ingest_file(
 
 
 @router.post("/knowledge/query")
-async def query_knowledge(request: QueryRequest) -> dict:
+async def query_knowledge(request: QueryRequest, user: dict = Depends(get_current_user)) -> dict:
     """
     混合检索 - SQLite 精确查询 + LanceDB 语义检索
     """
@@ -174,7 +179,7 @@ async def query_knowledge(request: QueryRequest) -> dict:
 
 
 @router.get("/knowledge/stats")
-async def get_stats() -> dict:
+async def get_stats(user: dict = Depends(get_current_user)) -> dict:
     """获取知识库统计信息"""
     try:
         stats = await knowledge_service.get_stats()
@@ -188,6 +193,7 @@ async def get_stats() -> dict:
 async def extract_text(
     file: UploadFile | None = File(None),
     files: list[UploadFile] | None = File(None),
+    user: dict = Depends(get_current_user),
 ) -> dict:
     """
     提取文件文本内容（不写入知识库）。
@@ -235,10 +241,15 @@ async def extract_text(
 
 
 @router.get("/knowledge/imports")
-async def list_imports() -> dict:
+async def list_imports(user: dict = Depends(get_current_user)) -> dict:
     """获取已导入文件列表"""
     try:
-        imports = await knowledge_service.list_imports()
+        is_admin = user.get("system_role") == "admin"
+        imports = await knowledge_service.list_imports(
+            user_id=user.get("id"),
+            group_id=user.get("group_id"),
+            is_admin=is_admin,
+        )
         return {"imports": imports, "total": len(imports)}
     except Exception as e:
         logger.error(f"获取导入列表失败: {e}")
@@ -246,7 +257,7 @@ async def list_imports() -> dict:
 
 
 @router.delete("/knowledge/imports/{import_id}")
-async def delete_import(import_id: str) -> dict:
+async def delete_import(import_id: str, user: dict = Depends(get_current_user)) -> dict:
     """删除指定的知识库导入记录"""
     try:
         result = await knowledge_service.delete_import(import_id)

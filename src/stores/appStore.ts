@@ -89,8 +89,8 @@ interface AppState {
   contextPanelVisible: boolean;
   toggleContextPanel: () => void;
   /** 主区域视图切换：chat（聊天区）或 knowhow（规则管理） */
-  activeView: 'chat' | 'knowhow';
-  setActiveView: (view: 'chat' | 'knowhow') => void;
+  activeView: 'chat' | 'knowhow' | 'admin';
+  setActiveView: (view: 'chat' | 'knowhow' | 'admin') => void;
   /** 设置面板开关 */
   settingsOpen: boolean;
   toggleSettings: () => void;

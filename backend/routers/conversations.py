@@ -5,9 +5,10 @@
 import json
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from routers.auth import get_current_user
 from services.storage import storage
 
 router = APIRouter()
@@ -72,10 +73,11 @@ async def _ensure_role_allows_surface(role_id: str, surface: str) -> None:
 
 
 @router.get("/chat/state")
-async def get_chat_state() -> dict:
+async def get_chat_state(user: dict = Depends(get_current_user)) -> dict:
     """一次性返回默认工作区下的所有会话与消息。"""
     workspace_id = await storage.get_default_workspace_id()
-    conversations = await storage.list_conversations(workspace_id)
+    owner_id = None if user.get("role") == "admin" else user["id"]
+    conversations = await storage.list_conversations(workspace_id, owner_id=owner_id)
     messages_by_conversation: dict[str, list[dict]] = {}
 
     for conversation in conversations:
@@ -146,7 +148,7 @@ async def get_chat_state() -> dict:
 
 
 @router.post("/conversations")
-async def create_conversation(request: ConversationCreateRequest) -> dict:
+async def create_conversation(request: ConversationCreateRequest, user: dict = Depends(get_current_user)) -> dict:
     role_id = request.role_id.strip()
     if not role_id:
         raise HTTPException(status_code=400, detail="角色 ID 不能为空")
@@ -162,12 +164,13 @@ async def create_conversation(request: ConversationCreateRequest) -> dict:
         surface=surface,
         role_id=role_id,
         is_title_customized=0,
+        owner_id=user["id"],
     )
     return {"conversation": conversation}
 
 
 @router.put("/conversations/{conversation_id}")
-async def update_conversation(conversation_id: str, request: ConversationUpdateRequest) -> dict:
+async def update_conversation(conversation_id: str, request: ConversationUpdateRequest, user: dict = Depends(get_current_user)) -> dict:
     existing = await storage.get_conversation(conversation_id)
     if not existing:
         raise HTTPException(status_code=404, detail="对话不存在")
@@ -201,7 +204,7 @@ async def update_conversation(conversation_id: str, request: ConversationUpdateR
 
 
 @router.delete("/conversations/{conversation_id}")
-async def delete_conversation(conversation_id: str) -> dict:
+async def delete_conversation(conversation_id: str, user: dict = Depends(get_current_user)) -> dict:
     existing = await storage.get_conversation(conversation_id)
     if not existing:
         raise HTTPException(status_code=404, detail="对话不存在")
@@ -211,7 +214,7 @@ async def delete_conversation(conversation_id: str) -> dict:
 
 
 @router.get("/conversations/{conversation_id}/messages")
-async def list_messages(conversation_id: str) -> dict:
+async def list_messages(conversation_id: str, user: dict = Depends(get_current_user)) -> dict:
     conversation = await storage.get_conversation(conversation_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="对话不存在")
@@ -221,7 +224,7 @@ async def list_messages(conversation_id: str) -> dict:
 
 
 @router.post("/conversations/{conversation_id}/messages")
-async def create_message(conversation_id: str, request: MessageCreateRequest) -> dict:
+async def create_message(conversation_id: str, request: MessageCreateRequest, user: dict = Depends(get_current_user)) -> dict:
     conversation = await storage.get_conversation(conversation_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="对话不存在")
@@ -240,7 +243,7 @@ async def create_message(conversation_id: str, request: MessageCreateRequest) ->
 
 
 @router.put("/messages/{message_id}")
-async def update_message(message_id: str, request: MessageUpdateRequest) -> dict:
+async def update_message(message_id: str, request: MessageUpdateRequest, user: dict = Depends(get_current_user)) -> dict:
     updates = request.model_dump(exclude_none=True)
     message = await storage.update_message(message_id, **updates)
     if not message:

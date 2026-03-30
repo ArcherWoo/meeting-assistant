@@ -11,6 +11,7 @@ import type {
   ContextMetadata, SkillSuggestionEvent,
   SystemPromptPreset,
   Conversation, Message,
+  User, AuthResponse, Group, AccessGrant,
 } from '@/types';
 
 /** 获取后端 API 基础 URL */
@@ -20,6 +21,32 @@ function getBaseUrl(): string {
     return configured.replace(/\/+$/, '');
   }
   return '/api';
+}
+
+// ===== 认证辅助 =====
+
+const AUTH_STORAGE_KEY = 'meeting-assistant-auth';
+
+/** 从 localStorage 读取 JWT token */
+function getToken(): string | null {
+  try {
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    return data?.state?.token ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** 带 JWT 认证头的 fetch 包装 */
+export function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const token = getToken();
+  const headers = new Headers(init?.headers);
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  return fetch(input, { ...init, headers });
 }
 
 // ===== 健康检查 =====
@@ -40,7 +67,7 @@ export interface ChatStatePayload {
 }
 
 export async function getChatState(): Promise<ChatStatePayload> {
-  const res = await fetch(`${getBaseUrl()}/chat/state`);
+  const res = await authFetch(`${getBaseUrl()}/chat/state`);
   if (!res.ok) throw new Error('获取会话状态失败');
   return res.json();
 }
@@ -50,7 +77,7 @@ export async function createConversationRecord(
   surface: 'chat' | 'agent' = 'chat',
   title = '新对话'
 ): Promise<Conversation> {
-  const res = await fetch(`${getBaseUrl()}/conversations`, {
+  const res = await authFetch(`${getBaseUrl()}/conversations`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ role_id: roleId, surface, title }),
@@ -73,7 +100,7 @@ export async function updateConversationRecord(
     is_title_customized: boolean;
   }>
 ): Promise<Conversation> {
-  const res = await fetch(`${getBaseUrl()}/conversations/${encodeURIComponent(conversationId)}`, {
+  const res = await authFetch(`${getBaseUrl()}/conversations/${encodeURIComponent(conversationId)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -87,7 +114,7 @@ export async function updateConversationRecord(
 }
 
 export async function deleteConversationRecord(conversationId: string): Promise<void> {
-  const res = await fetch(`${getBaseUrl()}/conversations/${encodeURIComponent(conversationId)}`, {
+  const res = await authFetch(`${getBaseUrl()}/conversations/${encodeURIComponent(conversationId)}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -100,7 +127,7 @@ export async function createMessageRecord(
   conversationId: string,
   payload: Pick<Message, 'role' | 'content'> & Partial<Pick<Message, 'model' | 'tokenInput' | 'tokenOutput' | 'durationMs' | 'metadata'>>
 ): Promise<Message> {
-  const res = await fetch(`${getBaseUrl()}/conversations/${encodeURIComponent(conversationId)}/messages`, {
+  const res = await authFetch(`${getBaseUrl()}/conversations/${encodeURIComponent(conversationId)}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -125,7 +152,7 @@ export async function updateMessageRecord(
   messageId: string,
   payload: Partial<Pick<Message, 'content' | 'model' | 'tokenInput' | 'tokenOutput' | 'durationMs' | 'metadata'>>
 ): Promise<Message> {
-  const res = await fetch(`${getBaseUrl()}/messages/${encodeURIComponent(messageId)}`, {
+  const res = await authFetch(`${getBaseUrl()}/messages/${encodeURIComponent(messageId)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -239,7 +266,7 @@ export async function streamChat(
       return false;
     };
 
-    const res = await fetch(`${getBaseUrl()}/chat/completions`, {
+    const res = await authFetch(`${getBaseUrl()}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -308,7 +335,7 @@ export async function testLLMConnection(
   apiKey: string,
   model?: string
 ): Promise<LLMConnectionTestResult> {
-  const res = await fetch(`${getBaseUrl()}/chat/test-connection`, {
+  const res = await authFetch(`${getBaseUrl()}/chat/test-connection`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ api_url: apiUrl, api_key: apiKey, model: model ?? '' }),
@@ -325,7 +352,7 @@ export async function testLLMConnection(
 export async function parsePPT(file: File): Promise<PPTParseResult> {
   const formData = new FormData();
   formData.append('file', file);
-  const res = await fetch(`${getBaseUrl()}/ppt/parse`, {
+  const res = await authFetch(`${getBaseUrl()}/ppt/parse`, {
     method: 'POST',
     body: formData,
   });
@@ -340,7 +367,7 @@ export async function parsePPT(file: File): Promise<PPTParseResult> {
 
 /** 获取所有已加载的 Skill 列表 */
 export async function listSkills(): Promise<SkillMeta[]> {
-  const res = await fetch(`${getBaseUrl()}/skills`);
+  const res = await authFetch(`${getBaseUrl()}/skills`);
   if (!res.ok) throw new Error('获取 Skill 列表失败');
   const data = await res.json();
   // 后端返回 { skills: [...], total: N }
@@ -349,21 +376,21 @@ export async function listSkills(): Promise<SkillMeta[]> {
 
 /** 获取单个 Skill 详情 */
 export async function getSkill(skillId: string): Promise<SkillMeta> {
-  const res = await fetch(`${getBaseUrl()}/skills/${encodeURIComponent(skillId)}`);
+  const res = await authFetch(`${getBaseUrl()}/skills/${encodeURIComponent(skillId)}`);
   if (!res.ok) throw new Error('获取 Skill 详情失败');
   return res.json();
 }
 
 /** 获取 Skill 原始 Markdown 内容 */
 export async function getSkillContent(skillId: string): Promise<{ id: string; content: string; source_path: string; is_builtin: boolean }> {
-  const res = await fetch(`${getBaseUrl()}/skills/${encodeURIComponent(skillId)}/content`);
+  const res = await authFetch(`${getBaseUrl()}/skills/${encodeURIComponent(skillId)}/content`);
   if (!res.ok) throw new Error('获取 Skill 内容失败');
   return res.json();
 }
 
 /** 保存新 Skill（后端返回 {id, name, message, source_path}） */
 export async function saveSkill(content: string, filename?: string): Promise<{ id: string; name: string; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/skills`, {
+  const res = await authFetch(`${getBaseUrl()}/skills`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content, filename }),
@@ -377,7 +404,7 @@ export async function saveSkill(content: string, filename?: string): Promise<{ i
 
 /** 更新已有 Skill 内容 */
 export async function updateSkill(skillId: string, content: string): Promise<{ id: string; name: string; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/skills/${encodeURIComponent(skillId)}`, {
+  const res = await authFetch(`${getBaseUrl()}/skills/${encodeURIComponent(skillId)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
@@ -391,7 +418,7 @@ export async function updateSkill(skillId: string, content: string): Promise<{ i
 
 /** 删除用户自建或覆盖的 Skill */
 export async function deleteSkill(skillId: string): Promise<{ id: string; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/skills/${encodeURIComponent(skillId)}`, {
+  const res = await authFetch(`${getBaseUrl()}/skills/${encodeURIComponent(skillId)}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -407,7 +434,7 @@ export async function deleteSkill(skillId: string): Promise<{ id: string; messag
 export async function getSystemPrompt(
   roleId: string
 ): Promise<{ role_id: string; prompt: string; default_prompt?: string; is_custom: boolean; resolved_prompt?: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(roleId)}`);
+  const res = await authFetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(roleId)}`);
   if (!res.ok) throw new Error('获取 System Prompt 失败');
   return res.json();
 }
@@ -417,7 +444,7 @@ export async function updateSystemPrompt(
   roleId: string,
   prompt: string
 ): Promise<{ role_id: string; prompt: string; default_prompt?: string; resolved_prompt?: string; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(roleId)}`, {
+  const res = await authFetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(roleId)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt }),
@@ -433,7 +460,7 @@ export async function updateSystemPrompt(
 export async function resetSystemPrompt(
   roleId: string
 ): Promise<{ role_id: string; prompt: string; default_prompt?: string; resolved_prompt?: string; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(roleId)}`, {
+  const res = await authFetch(`${getBaseUrl()}/settings/system-prompt/${encodeURIComponent(roleId)}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -444,7 +471,7 @@ export async function resetSystemPrompt(
 }
 
 export async function listSystemPromptPresets(): Promise<SystemPromptPreset[]> {
-  const res = await fetch(`${getBaseUrl()}/settings/system-prompt-presets`);
+  const res = await authFetch(`${getBaseUrl()}/settings/system-prompt-presets`);
   if (!res.ok) throw new Error('鑾峰彇 System Prompt 棰勮澶辫触');
   const data = await res.json();
   return Array.isArray(data) ? data : (data.presets ?? []);
@@ -455,7 +482,7 @@ export async function createSystemPromptPreset(
   roleId: string,
   prompt: string
 ): Promise<{ preset: SystemPromptPreset; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/system-prompt-presets`, {
+  const res = await authFetch(`${getBaseUrl()}/settings/system-prompt-presets`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, role_id: roleId, prompt }),
@@ -468,7 +495,7 @@ export async function createSystemPromptPreset(
 }
 
 export async function deleteSystemPromptPreset(presetId: string): Promise<{ id: string; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/system-prompt-presets/${encodeURIComponent(presetId)}`, {
+  const res = await authFetch(`${getBaseUrl()}/settings/system-prompt-presets/${encodeURIComponent(presetId)}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -479,7 +506,7 @@ export async function deleteSystemPromptPreset(presetId: string): Promise<{ id: 
 }
 
 export async function matchSkill(query: string): Promise<SkillMatch[]> {
-  const res = await fetch(`${getBaseUrl()}/skills/match`, {
+  const res = await authFetch(`${getBaseUrl()}/skills/match`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query }),
@@ -498,7 +525,7 @@ export async function listKnowhowRules(category?: string, activeOnly?: boolean):
   if (typeof activeOnly === 'boolean') params.set('active_only', String(activeOnly));
 
   const query = params.toString();
-  const res = await fetch(`${getBaseUrl()}/knowhow${query ? `?${query}` : ''}`);
+  const res = await authFetch(`${getBaseUrl()}/knowhow${query ? `?${query}` : ''}`);
   if (!res.ok) throw new Error('获取规则列表失败');
   const data = await res.json();
   return Array.isArray(data) ? data : (data.rules ?? []);
@@ -508,7 +535,7 @@ export async function listKnowhowRules(category?: string, activeOnly?: boolean):
 export async function createKnowhowRule(
   rule: Pick<KnowhowRule, 'category' | 'rule_text' | 'weight' | 'source'>
 ): Promise<{ id: string; message: string }> {
-  const res = await fetch(`${getBaseUrl()}/knowhow`, {
+  const res = await authFetch(`${getBaseUrl()}/knowhow`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(rule),
@@ -522,7 +549,7 @@ export async function updateKnowhowRule(
   ruleId: string,
   updates: Partial<Pick<KnowhowRule, 'category' | 'rule_text' | 'weight' | 'is_active'>>
 ): Promise<KnowhowRule> {
-  const res = await fetch(`${getBaseUrl()}/knowhow/${encodeURIComponent(ruleId)}`, {
+  const res = await authFetch(`${getBaseUrl()}/knowhow/${encodeURIComponent(ruleId)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
@@ -533,7 +560,7 @@ export async function updateKnowhowRule(
 
 /** 删除 Know-how 规则 */
 export async function deleteKnowhowRule(ruleId: string): Promise<void> {
-  const res = await fetch(`${getBaseUrl()}/knowhow/${encodeURIComponent(ruleId)}`, {
+  const res = await authFetch(`${getBaseUrl()}/knowhow/${encodeURIComponent(ruleId)}`, {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error('删除规则失败');
@@ -541,7 +568,7 @@ export async function deleteKnowhowRule(ruleId: string): Promise<void> {
 
 /** 获取 Know-how 分类列表（含每个分类的规则数） */
 export async function listKnowhowCategories(): Promise<{ name: string; rule_count: number }[]> {
-  const res = await fetch(`${getBaseUrl()}/knowhow/categories`);
+  const res = await authFetch(`${getBaseUrl()}/knowhow/categories`);
   if (!res.ok) throw new Error('获取分类列表失败');
   const data = await res.json();
   return data.categories ?? [];
@@ -552,7 +579,7 @@ export async function renameKnowhowCategory(
   oldName: string,
   newName: string
 ): Promise<{ message: string; affected_rules: number }> {
-  const res = await fetch(`${getBaseUrl()}/knowhow/categories/${encodeURIComponent(oldName)}`, {
+  const res = await authFetch(`${getBaseUrl()}/knowhow/categories/${encodeURIComponent(oldName)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ new_name: newName }),
@@ -570,7 +597,7 @@ export async function deleteKnowhowCategory(
   deleteRules = true
 ): Promise<{ message: string; affected_rules: number }> {
   const url = `${getBaseUrl()}/knowhow/categories/${encodeURIComponent(name)}?delete_rules=${deleteRules}`;
-  const res = await fetch(url, { method: 'DELETE' });
+  const res = await authFetch(url, { method: 'DELETE' });
   if (!res.ok) {
     const error = await res.json().catch(() => ({ detail: '删除分类失败' }));
     throw new Error(error.detail);
@@ -585,14 +612,14 @@ export async function getKnowhowStats(): Promise<{
   categories: string[];
   total_hits: number;
 }> {
-  const res = await fetch(`${getBaseUrl()}/knowhow/stats`);
+  const res = await authFetch(`${getBaseUrl()}/knowhow/stats`);
   if (!res.ok) throw new Error('获取规则统计失败');
   return res.json();
 }
 
 /** 导出当前 Know-how 规则库 */
 export async function exportKnowhowRules(): Promise<KnowhowExportData> {
-  const res = await fetch(`${getBaseUrl()}/knowhow/export`);
+  const res = await authFetch(`${getBaseUrl()}/knowhow/export`);
   if (!res.ok) throw new Error('导出规则库失败');
   return res.json();
 }
@@ -602,7 +629,7 @@ export async function importKnowhowRules(
   payload: unknown,
   strategy: KnowhowImportStrategy = 'append'
 ): Promise<KnowhowImportResult> {
-  const res = await fetch(`${getBaseUrl()}/knowhow/import?strategy=${encodeURIComponent(strategy)}`, {
+  const res = await authFetch(`${getBaseUrl()}/knowhow/import?strategy=${encodeURIComponent(strategy)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -640,13 +667,14 @@ export interface BatchExtractTextResult {
 }
 
 /** 批量上传文件到知识库（支持 PPT/PDF/DOCX/图片/文本等） */
-export async function uploadFiles(files: File[]): Promise<BatchIngestResult> {
+export async function uploadFiles(files: File[], isEncrypted: boolean = true): Promise<BatchIngestResult> {
   if (files.length === 0) {
     return { results: [], errors: [], total: 0, success_count: 0, failed_count: 0 };
   }
   const formData = new FormData();
   files.forEach((file) => formData.append('files', file));
-  const res = await fetch(`${getBaseUrl()}/knowledge/ingest`, {
+  formData.append('is_encrypted', String(isEncrypted));
+  const res = await authFetch(`${getBaseUrl()}/knowledge/ingest`, {
     method: 'POST',
     body: formData,
   });
@@ -658,8 +686,8 @@ export async function uploadFiles(files: File[]): Promise<BatchIngestResult> {
 }
 
 /** 上传单个文件到知识库（兼容旧调用方） */
-export async function uploadFile(file: File): Promise<IngestResult> {
-  const result = await uploadFiles([file]);
+export async function uploadFile(file: File, isEncrypted: boolean = true): Promise<IngestResult> {
+  const result = await uploadFiles([file], isEncrypted);
   if (result.results.length > 0) {
     return result.results[0];
   }
@@ -673,7 +701,7 @@ export async function extractFilesText(files: File[]): Promise<BatchExtractTextR
   }
   const formData = new FormData();
   files.forEach((file) => formData.append('files', file));
-  const res = await fetch(`${getBaseUrl()}/knowledge/extract-text`, {
+  const res = await authFetch(`${getBaseUrl()}/knowledge/extract-text`, {
     method: 'POST',
     body: formData,
   });
@@ -695,14 +723,14 @@ export async function extractFileText(file: File): Promise<ExtractedTextResult> 
 
 /** 获取已导入文件列表 */
 export async function listKnowledgeImports(): Promise<{ imports: Array<{ id: string; file_name: string; file_size: number; slide_count: number; import_status: string; imported_at: string }>; total: number }> {
-  const res = await fetch(`${getBaseUrl()}/knowledge/imports`);
+  const res = await authFetch(`${getBaseUrl()}/knowledge/imports`);
   if (!res.ok) throw new Error('获取导入列表失败');
   return res.json();
 }
 
 /** 删除知识库导入记录 */
 export async function deleteKnowledgeImport(importId: string): Promise<{ deleted: boolean; filename: string }> {
-  const res = await fetch(`${getBaseUrl()}/knowledge/imports/${encodeURIComponent(importId)}`, {
+  const res = await authFetch(`${getBaseUrl()}/knowledge/imports/${encodeURIComponent(importId)}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -717,7 +745,7 @@ export async function queryKnowledge(
   query: string,
   filters?: { category?: string; min_amount?: number; max_amount?: number }
 ): Promise<{ results: Record<string, unknown>[]; analysis?: string }> {
-  const res = await fetch(`${getBaseUrl()}/knowledge/query`, {
+  const res = await authFetch(`${getBaseUrl()}/knowledge/query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, ...filters }),
@@ -728,7 +756,7 @@ export async function queryKnowledge(
 
 /** 获取知识库统计信息 */
 export async function getKnowledgeStats(): Promise<KnowledgeStats> {
-  const res = await fetch(`${getBaseUrl()}/knowledge/stats`);
+  const res = await authFetch(`${getBaseUrl()}/knowledge/stats`);
   if (!res.ok) throw new Error('获取知识库统计失败');
   return res.json();
 }
@@ -740,7 +768,7 @@ export async function agentMatch(
   query: string,
   roleId?: string
 ): Promise<AgentMatchResult> {
-  const res = await fetch(`${getBaseUrl()}/agent/match`, {
+  const res = await authFetch(`${getBaseUrl()}/agent/match`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, role_id: roleId }),
@@ -770,7 +798,7 @@ export async function agentExecute(
   }
 ): Promise<void> {
   try {
-    const res = await fetch(`${getBaseUrl()}/agent/execute`, {
+    const res = await authFetch(`${getBaseUrl()}/agent/execute`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -836,7 +864,7 @@ export async function agentExecute(
 }
 
 export async function cancelAgentRun(runId: string): Promise<AgentRunCancelResponse> {
-  const res = await fetch(`${getBaseUrl()}/agent/runs/${encodeURIComponent(runId)}/cancel`, {
+  const res = await authFetch(`${getBaseUrl()}/agent/runs/${encodeURIComponent(runId)}/cancel`, {
     method: 'POST',
   });
   if (!res.ok) {
@@ -855,7 +883,7 @@ export async function cancelAgentRun(runId: string): Promise<AgentRunCancelRespo
  * @returns 生成的标题字符串
  */
 export async function getAgentRun(runId: string): Promise<AgentRunRecord> {
-  const res = await fetch(`${getBaseUrl()}/agent/runs/${encodeURIComponent(runId)}`);
+  const res = await authFetch(`${getBaseUrl()}/agent/runs/${encodeURIComponent(runId)}`);
   if (!res.ok) {
     const error = await res.json().catch(() => ({ detail: '获取 Agent 执行记录失败' }));
     throw new Error(error.detail || '获取 Agent 执行记录失败');
@@ -868,7 +896,7 @@ export async function generateAutoTitle(
   messages: ChatMessage[],
   config: LLMConfig
 ): Promise<string> {
-  const res = await fetch(`${getBaseUrl()}/chat/auto-title`, {
+  const res = await authFetch(`${getBaseUrl()}/chat/auto-title`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -897,7 +925,7 @@ export interface EmbeddingConfig {
 
 /** 获取 Embedding API 配置 */
 export async function getEmbeddingConfig(): Promise<EmbeddingConfig> {
-  const res = await fetch(`${getBaseUrl()}/settings/embedding`);
+  const res = await authFetch(`${getBaseUrl()}/settings/embedding`);
   if (!res.ok) throw new Error('获取 Embedding 配置失败');
   return res.json();
 }
@@ -906,7 +934,7 @@ export async function getEmbeddingConfig(): Promise<EmbeddingConfig> {
 export async function updateEmbeddingConfig(
   config: Pick<EmbeddingConfig, 'api_url' | 'api_key' | 'model'>
 ): Promise<{ message: string; is_configured: boolean }> {
-  const res = await fetch(`${getBaseUrl()}/settings/embedding`, {
+  const res = await authFetch(`${getBaseUrl()}/settings/embedding`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(config),
@@ -917,7 +945,7 @@ export async function updateEmbeddingConfig(
 
 /** 清除 Embedding API 配置（回退到使用 LLM API 凭证） */
 export async function resetEmbeddingConfig(): Promise<{ message: string }> {
-  const res = await fetch(`${getBaseUrl()}/settings/embedding`, {
+  const res = await authFetch(`${getBaseUrl()}/settings/embedding`, {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error('清除 Embedding 配置失败');
@@ -928,7 +956,7 @@ export async function resetEmbeddingConfig(): Promise<{ message: string }> {
 export async function testEmbeddingConnection(
   config: Pick<EmbeddingConfig, 'api_url' | 'api_key' | 'model'>
 ): Promise<{ success: boolean; message: string; dimension?: number }> {
-  const res = await fetch(`${getBaseUrl()}/settings/embedding/test`, {
+  const res = await authFetch(`${getBaseUrl()}/settings/embedding/test`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(config),
@@ -941,7 +969,7 @@ export async function testEmbeddingConnection(
 
 /** 获取所有角色列表 */
 export async function listRoles(): Promise<Role[]> {
-  const res = await fetch(`${getBaseUrl()}/settings/roles`);
+  const res = await authFetch(`${getBaseUrl()}/settings/roles`);
   if (!res.ok) throw new Error('获取角色列表失败');
   const data = await res.json();
   return data.roles as Role[];
@@ -960,7 +988,7 @@ export async function createRole(payload: {
   allowed_surfaces?: Array<'chat' | 'agent'>;
   agent_allowed_tools?: string[];
 }): Promise<Role> {
-  const res = await fetch(`${getBaseUrl()}/settings/roles`, {
+  const res = await authFetch(`${getBaseUrl()}/settings/roles`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -987,7 +1015,7 @@ export async function updateRole(
     sort_order: number;
   }>
 ): Promise<Role> {
-  const res = await fetch(`${getBaseUrl()}/settings/roles/${roleId}`, {
+  const res = await authFetch(`${getBaseUrl()}/settings/roles/${roleId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -999,11 +1027,142 @@ export async function updateRole(
 
 /** 删除角色 */
 export async function deleteRole(roleId: string): Promise<void> {
-  const res = await fetch(`${getBaseUrl()}/settings/roles/${roleId}`, {
+  const res = await authFetch(`${getBaseUrl()}/settings/roles/${roleId}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || '删除角色失败');
+  }
+}
+
+// ===== 认证 & 用户管理 =====
+
+export async function login(username: string, password: string): Promise<AuthResponse> {
+  const res = await fetch(`${getBaseUrl()}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || '登录失败');
+  }
+  return res.json();
+}
+
+export async function getMe(): Promise<User> {
+  const res = await authFetch(`${getBaseUrl()}/auth/me`);
+  if (!res.ok) throw new Error('获取用户信息失败');
+  return res.json();
+}
+
+export async function registerUser(data: {
+  username: string; display_name: string; password: string;
+  system_role?: string; group_id?: string;
+}): Promise<User> {
+  const res = await authFetch(`${getBaseUrl()}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || '注册用户失败');
+  }
+  return res.json();
+}
+
+export async function listUsers(): Promise<User[]> {
+  const res = await authFetch(`${getBaseUrl()}/auth/users`);
+  if (!res.ok) throw new Error('获取用户列表失败');
+  return res.json();
+}
+
+export async function updateUser(userId: string, data: Record<string, unknown>): Promise<User> {
+  const res = await authFetch(`${getBaseUrl()}/auth/users/${encodeURIComponent(userId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || '更新用户失败');
+  }
+  return res.json();
+}
+
+export async function deleteUser(userId: string): Promise<void> {
+  const res = await authFetch(`${getBaseUrl()}/auth/users/${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || '删除用户失败');
+  }
+}
+
+export async function listGroups(): Promise<Group[]> {
+  const res = await authFetch(`${getBaseUrl()}/auth/groups`);
+  if (!res.ok) throw new Error('获取用户组列表失败');
+  return res.json();
+}
+
+export async function createGroup(name: string, description = ''): Promise<Group> {
+  const res = await authFetch(`${getBaseUrl()}/auth/groups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, description }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || '创建用户组失败');
+  }
+  return res.json();
+}
+
+export async function deleteGroup(groupId: string): Promise<void> {
+  const res = await authFetch(`${getBaseUrl()}/auth/groups/${encodeURIComponent(groupId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || '删除用户组失败');
+  }
+}
+
+export async function listGrants(resourceType?: string, resourceId?: string): Promise<AccessGrant[]> {
+  const params = new URLSearchParams();
+  if (resourceType) params.set('resource_type', resourceType);
+  if (resourceId) params.set('resource_id', resourceId);
+  const query = params.toString();
+  const res = await authFetch(`${getBaseUrl()}/auth/grants${query ? `?${query}` : ''}`);
+  if (!res.ok) throw new Error('获取授权列表失败');
+  return res.json();
+}
+
+export async function setGrant(data: {
+  resource_type: string; resource_id: string;
+  grant_type: string; grantee_id?: string;
+}): Promise<AccessGrant> {
+  const res = await authFetch(`${getBaseUrl()}/auth/grants`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || '设置授权失败');
+  }
+  return res.json();
+}
+
+export async function removeGrant(grantId: string): Promise<void> {
+  const res = await authFetch(`${getBaseUrl()}/auth/grants/${encodeURIComponent(grantId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || '删除授权失败');
   }
 }

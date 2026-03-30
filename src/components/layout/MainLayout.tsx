@@ -9,6 +9,7 @@ import Sidebar from './Sidebar';
 import ChatArea from '../chat/ChatArea';
 import ContextPanel from './ContextPanel';
 import KnowhowManager from '../knowhow/KnowhowManager';
+import AdminPanel from '../auth/AdminPanel';
 import SettingsModal from '../common/SettingsModal';
 
 const CONTEXT_MIN_WIDTH = 220;
@@ -55,7 +56,7 @@ export default function MainLayout() {
 
         {/* 主区域 - 聊天区 或 Know-how 管理 */}
         <main className="flex-1 flex flex-col min-w-0 bg-surface dark:bg-dark">
-          {activeView === 'knowhow' ? <KnowhowManager /> : <ChatArea />}
+          {activeView === 'admin' ? <AdminPanel /> : activeView === 'knowhow' ? <KnowhowManager /> : <ChatArea />}
         </main>
 
         {/* 右侧面板分隔拖拽手柄 */}

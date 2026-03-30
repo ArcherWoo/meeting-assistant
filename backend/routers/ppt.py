@@ -3,15 +3,16 @@ PPT 解析路由
 Phase 1: 使用 python-pptx 基础解析
 Phase 2: 集成 Docling 双引擎方案
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from services.ppt_parser import PPTParser
+from routers.auth import get_current_user
 
 router = APIRouter()
 ppt_parser = PPTParser()
 
 
 @router.post("/ppt/parse")
-async def parse_pptx(file: UploadFile = File(...)):
+async def parse_pptx(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
     """
     解析上传的 PPT 文件，返回结构化内容
     支持 .pptx 格式

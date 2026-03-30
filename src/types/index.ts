@@ -437,6 +437,38 @@ export interface AgentExecutionEvent {
   };
 }
 
+// ===== 认证 & 用户管理 =====
+export type SystemRole = 'admin' | 'user';
+
+export interface User {
+  id: string;
+  username: string;
+  display_name: string;
+  system_role: SystemRole;
+  group_id: string | null;
+}
+
+export interface AuthResponse {
+  token: string;
+  user: User;
+}
+
+export interface Group {
+  id: string;
+  name: string;
+  description: string;
+  created_at: string;
+}
+
+export interface AccessGrant {
+  id: string;
+  resource_type: string;
+  resource_id: string;
+  grant_type: string;
+  grantee_id: string | null;
+  created_at: string;
+}
+
 // ===== UI 状态 =====
 export type Theme = 'light' | 'dark' | 'system';
 

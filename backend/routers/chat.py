@@ -6,7 +6,7 @@ import json
 import logging
 import re
 from typing import AsyncGenerator, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -17,6 +17,7 @@ from services.embedding_service import embedding_service
 from services.role_config import resolve_chat_capabilities
 from services.retrieval_planner import RetrievalPlannerSettings
 from services.system_prompt_defaults import DEFAULT_SYSTEM_PROMPTS
+from routers.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -291,7 +292,7 @@ async def _stream_with_metadata(
 
 
 @router.post("/chat/completions")
-async def chat_completions(request: ChatRequest):
+async def chat_completions(request: ChatRequest, user: dict = Depends(get_current_user)):
     """
     流式聊天接口 - SSE 格式返回 LLM 响应
     兼容 OpenAI Chat Completions API 协议
@@ -351,7 +352,7 @@ async def chat_completions(request: ChatRequest):
 
 
 @router.post("/chat/auto-title")
-async def generate_auto_title(request: AutoTitleRequest):
+async def generate_auto_title(request: AutoTitleRequest, user: dict = Depends(get_current_user)):
     """
     根据前 3 轮对话内容（最多 6 条消息），调用 LLM 生成语义化中文标题（10 字以内）
     """
@@ -401,7 +402,7 @@ async def generate_auto_title(request: AutoTitleRequest):
 
 
 @router.post("/chat/test-connection")
-async def test_connection(config: ConfigUpdateRequest):
+async def test_connection(config: ConfigUpdateRequest, user: dict = Depends(get_current_user)):
     """测试 LLM API 连接是否正常"""
     try:
         result = await llm_service.test_connection(

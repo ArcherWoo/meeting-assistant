@@ -14,8 +14,10 @@ import json
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+
+from routers.auth import get_current_user
 
 from services.role_config import (
     VALID_AGENT_PREFLIGHT,
@@ -321,13 +323,18 @@ async def _save_system_prompt_presets(presets: list[dict]) -> None:
 
 
 @router.get("/settings/roles")
-async def list_roles() -> dict:
-    rows = await storage.list_roles()
+async def list_roles(user: dict = Depends(get_current_user)) -> dict:
+    is_admin = user.get("system_role") == "admin"
+    rows = await storage.list_roles(
+        owner_id=user["id"],
+        group_id=user.get("group_id"),
+        is_admin=is_admin,
+    )
     return {"roles": [_normalize_role_row(row) for row in rows]}
 
 
 @router.post("/settings/roles")
-async def create_role(request: RoleCreateRequest) -> dict:
+async def create_role(request: RoleCreateRequest, user: dict = Depends(get_current_user)) -> dict:
     name = request.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="角色名称不能为空")
@@ -344,12 +351,13 @@ async def create_role(request: RoleCreateRequest) -> dict:
         agent_preflight=agent_preflight,
         allowed_surfaces=_validate_allowed_surfaces(request.allowed_surfaces),
         agent_allowed_tools=agent_allowed_tools,
+        owner_id=user["id"],
     )
     return {"role": _normalize_role_row(role), "message": f"角色 '{name}' 已创建"}
 
 
 @router.put("/settings/roles/{role_id}")
-async def update_role(role_id: str, request: RoleUpdateRequest) -> dict:
+async def update_role(role_id: str, request: RoleUpdateRequest, user: dict = Depends(get_current_user)) -> dict:
     existing = await storage.get_role(role_id)
     if not existing:
         raise HTTPException(status_code=404, detail="角色不存在")
@@ -396,7 +404,7 @@ async def update_role(role_id: str, request: RoleUpdateRequest) -> dict:
 
 
 @router.delete("/settings/roles/{role_id}")
-async def delete_role(role_id: str) -> dict:
+async def delete_role(role_id: str, user: dict = Depends(get_current_user)) -> dict:
     try:
         deleted = await storage.delete_role(role_id)
     except ValueError as exc:
@@ -408,7 +416,7 @@ async def delete_role(role_id: str) -> dict:
 
 
 @router.get("/settings/system-prompt/{role_id}")
-async def get_system_prompt(role_id: str) -> dict:
+async def get_system_prompt(role_id: str, user: dict = Depends(get_current_user)) -> dict:
     normalized_role_id = _ensure_role_id(role_id)
     prompt, is_custom = await _get_prompt(normalized_role_id)
     return {
@@ -421,7 +429,7 @@ async def get_system_prompt(role_id: str) -> dict:
 
 
 @router.put("/settings/system-prompt/{role_id}")
-async def update_system_prompt(role_id: str, request: SystemPromptRequest) -> dict:
+async def update_system_prompt(role_id: str, request: SystemPromptRequest, user: dict = Depends(get_current_user)) -> dict:
     normalized_role_id = _ensure_role_id(role_id)
     prompt = request.prompt.strip()
     if not prompt:
@@ -438,7 +446,7 @@ async def update_system_prompt(role_id: str, request: SystemPromptRequest) -> di
 
 
 @router.delete("/settings/system-prompt/{role_id}")
-async def reset_system_prompt(role_id: str) -> dict:
+async def reset_system_prompt(role_id: str, user: dict = Depends(get_current_user)) -> dict:
     normalized_role_id = _ensure_role_id(role_id)
     await storage.set_setting(_settings_key(normalized_role_id), "")
     prompt = await _role_default_prompt(normalized_role_id)
@@ -452,12 +460,12 @@ async def reset_system_prompt(role_id: str) -> dict:
 
 
 @router.get("/settings/system-prompts")
-async def get_system_prompts() -> dict:
+async def get_system_prompts(user: dict = Depends(get_current_user)) -> dict:
     return await _get_prompt_bundle()
 
 
 @router.put("/settings/system-prompts")
-async def update_system_prompts(request: SystemPromptBundleRequest) -> dict:
+async def update_system_prompts(request: SystemPromptBundleRequest, user: dict = Depends(get_current_user)) -> dict:
     for role_id, prompt in request.prompts.items():
         normalized_role_id = _ensure_role_id(role_id)
         if normalized_role_id:
@@ -468,13 +476,13 @@ async def update_system_prompts(request: SystemPromptBundleRequest) -> dict:
 
 
 @router.get("/settings/system-prompt-presets")
-async def list_system_prompt_presets() -> dict:
+async def list_system_prompt_presets(user: dict = Depends(get_current_user)) -> dict:
     presets = await _load_system_prompt_presets()
     return {"presets": presets, "total": len(presets)}
 
 
 @router.post("/settings/system-prompt-presets")
-async def create_system_prompt_preset(request: SystemPromptPresetRequest) -> dict:
+async def create_system_prompt_preset(request: SystemPromptPresetRequest, user: dict = Depends(get_current_user)) -> dict:
     name = request.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="预设名称不能为空")
@@ -500,7 +508,7 @@ async def create_system_prompt_preset(request: SystemPromptPresetRequest) -> dic
 
 
 @router.delete("/settings/system-prompt-presets/{preset_id}")
-async def delete_system_prompt_preset(preset_id: str) -> dict:
+async def delete_system_prompt_preset(preset_id: str, user: dict = Depends(get_current_user)) -> dict:
     presets = await _load_system_prompt_presets()
     remaining = [preset for preset in presets if preset["id"] != preset_id]
     if len(remaining) == len(presets):
@@ -511,7 +519,7 @@ async def delete_system_prompt_preset(preset_id: str) -> dict:
 
 
 @router.get("/settings/embedding")
-async def get_embedding_config() -> dict:
+async def get_embedding_config(user: dict = Depends(get_current_user)) -> dict:
     api_url = await storage.get_setting(_EMB_URL_KEY, default="")
     api_key = await storage.get_setting(_EMB_KEY_KEY, default="")
     model = await storage.get_setting(_EMB_MODEL_KEY, default=_EMB_MODEL_DEFAULT)
@@ -524,7 +532,7 @@ async def get_embedding_config() -> dict:
 
 
 @router.put("/settings/embedding")
-async def update_embedding_config(request: EmbeddingConfigRequest) -> dict:
+async def update_embedding_config(request: EmbeddingConfigRequest, user: dict = Depends(get_current_user)) -> dict:
     await storage.set_setting(_EMB_URL_KEY, request.api_url.strip())
     await storage.set_setting(_EMB_KEY_KEY, request.api_key.strip())
     await storage.set_setting(_EMB_MODEL_KEY, request.model.strip() or _EMB_MODEL_DEFAULT)
@@ -535,7 +543,7 @@ async def update_embedding_config(request: EmbeddingConfigRequest) -> dict:
 
 
 @router.delete("/settings/embedding")
-async def reset_embedding_config() -> dict:
+async def reset_embedding_config(user: dict = Depends(get_current_user)) -> dict:
     await storage.set_setting(_EMB_URL_KEY, "")
     await storage.set_setting(_EMB_KEY_KEY, "")
     await storage.set_setting(_EMB_MODEL_KEY, "")
@@ -543,7 +551,7 @@ async def reset_embedding_config() -> dict:
 
 
 @router.post("/settings/embedding/test")
-async def test_embedding_config(request: EmbeddingConfigRequest) -> dict:
+async def test_embedding_config(request: EmbeddingConfigRequest, user: dict = Depends(get_current_user)) -> dict:
     if not request.api_url.strip() or not request.api_key.strip():
         raise HTTPException(status_code=400, detail="请填写 API Base URL 和 API Key")
 

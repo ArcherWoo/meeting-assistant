@@ -54,10 +54,21 @@ class KnowhowService:
         return count
 
     async def list_rules(
-        self, category: Optional[str] = None, active_only: bool = True,
+        self,
+        category: Optional[str] = None,
+        active_only: bool = True,
+        user_id: Optional[str] = None,
+        group_id: Optional[str] = None,
+        is_admin: bool = False,
     ) -> List[dict]:
-        """获取规则列表"""
-        return await storage.list_knowhow_rules(category=category, active_only=active_only)
+        """获取规则列表，支持 RBAC 过滤"""
+        return await storage.list_knowhow_rules(
+            category=category,
+            active_only=active_only,
+            user_id=user_id,
+            group_id=group_id,
+            is_admin=is_admin,
+        )
 
     async def add_rule(
         self, category: str, rule_text: str, weight: int = 2, source: str = "user",
@@ -269,9 +280,7 @@ class KnowhowService:
 
     def _extract_keywords(self, rule_text: str) -> List[str]:
         """从规则文本中提取关键词（简单分词）"""
-        # 提取中文关键短语（2-4字）
         keywords: List[str] = []
-        # 常见采购相关关键词
         term_map = {
             "ISO": "iso", "认证": "认证", "资质": "资质", "供应商": "供应商",
             "价格": "价格", "均价": "均价", "偏差": "偏差",

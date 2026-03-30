@@ -4,7 +4,9 @@
  */
 import { useEffect } from 'react';
 import { useAppStore } from './stores/appStore';
+import { useAuthStore } from './stores/authStore';
 import MainLayout from './components/layout/MainLayout';
+import LoginPage from './components/auth/LoginPage';
 
 /** 将 #rrggbb 转为 "r g b" 空格分隔格式，供 CSS rgb() 使用 */
 function hexToRgbParts(hex: string): string {
@@ -24,6 +26,12 @@ function darkenHexParts(hex: string, factor = 0.82): string {
 
 export default function App() {
   const { theme, accentColor } = useAppStore();
+  const { user, initialized, init } = useAuthStore();
+
+  // 初始化认证状态
+  useEffect(() => {
+    void init();
+  }, [init]);
 
   // 主题色 CSS 变量注入
   useEffect(() => {
@@ -48,6 +56,20 @@ export default function App() {
 
     root.classList.toggle('dark', theme === 'dark');
   }, [theme]);
+
+  // 未初始化时显示加载状态
+  if (!initialized) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-surface-sidebar dark:bg-dark">
+        <span className="text-text-secondary">Loading...</span>
+      </div>
+    );
+  }
+
+  // 未登录时显示登录页
+  if (!user) {
+    return <LoginPage />;
+  }
 
   return <MainLayout />;
 }

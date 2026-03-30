@@ -1,7 +1,7 @@
 # Meeting Assistant 产品需求文档（PRD）
 
-> 版本：v2.0  
-> 日期：2026-03-29  
+> 版本：v2.1  
+> 日期：2026-03-30  
 > 状态：当前基线 / 施工中
 
 ---
@@ -597,3 +597,112 @@ Role
 - 改造蓝图：[docs/development/CHAT_AGENT_REFACTOR_BLUEPRINT.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/development/CHAT_AGENT_REFACTOR_BLUEPRINT.md)
 - 当前状态说明：[docs/CURRENT_STATE.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/CURRENT_STATE.md)
 - SSE 元数据说明：[docs/reference/SSE_CONTEXT_METADATA.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/reference/SSE_CONTEXT_METADATA.md)
+
+---
+
+## 17. 多租户与权限管理（RBAC）
+
+> 本章记录 v2.1 新增的多租户用户管理与基于角色的访问控制系统，为后续 Domain Management 集成打下基础。
+
+### 17.1 核心概念区分
+
+**极其重要**：本系统存在两套“角色”概念，务必严格区分：
+
+| 概念 | 英文 | 定义 | 存储位置 |
+|------|------|------|------|
+| 系统用户角色 | System Role | 控制登录账户的管理权限（`admin` / `user`） | `users.system_role` 字段 |
+| AI 角色 / 角色人格 | AI Role / Persona | 控制 Chat 与 Agent 行为的配置（如 Copilot、采购专家） | `roles` 表 |
+
+**两者完全独立，不可混淡**：
+
+- 系统用户 `admin` 登录后看到的是“用户管理”入口，与 AI 角色列表无关。
+- AI 角色（Copilot / 执行助手等）是对话能力配置，所有登录用户均可使用，不受系统角色限制。
+
+### 17.2 系统用户模型
+
+系统用户（System User）是拥有登录凭据的人员账户：
+
+```text
+User
+├─ id            UUID
+├─ username      登录名（唯一）
+├─ display_name  显示名称
+├─ password_hash bcrypt 哈希后的密码
+├─ system_role   "admin" | "user"
+├─ group_id      所属用户组（可为空）
+├─ is_active     账户是否启用
+└─ created_at / updated_at
+```
+
+系统角色权限：
+
+- `admin`：可访问用户管理 API（创建/删除用户、管理用户组、设置资源授权），可调用全部受保护端点。
+- `user`：只能访问自身数据及有权限的资源，不能访问 `/api/auth/users`、`/api/auth/groups`、`/api/auth/grants` 等管理端点。
+
+### 17.3 用户组模型
+
+```text
+Group
+├─ id          UUID
+├─ name        组名（唯一）
+├─ description 描述
+└─ created_at
+```
+
+用户通过 `users.group_id` 归属到某一个用户组，一个用户只能属于一个组。
+
+### 17.4 资源授权（Access Grants）模型
+
+```text
+AccessGrant
+├─ id            UUID
+├─ resource_type "knowledge" | "role" | "skill"
+├─ resource_id   目标资源的 UUID
+├─ grant_type    "public" | "group" | "user"
+├─ grantee_id    当 grant_type 为 "group" 或 "user" 时，填入对应 ID
+└─ created_at
+```
+
+### 17.5 资源可见性规则
+
+每条资源（Knowledge / AI Role / Skill）遵循以下可见性逻辑：
+
+| 可见性 | 描述 | 判断条件 |
+|--------|------|----------|
+| **Private（私有）** | 仅创建者可见 | 无 Access Grant 且 `owner_id = 当前用户 id` |
+| **Group（组内共享）** | 同组用户可见 | 存在 `grant_type="group"` 且 `grantee_id = 当前用户的 group_id` |
+| **Public（公开）** | 所有登录用户可见 | 存在 `grant_type="public"` 或资源为内置（`is_builtin=1`） |
+
+补充规则：
+
+- **管理员绕过过滤**：`system_role="admin"` 的用户在后端跳过 `owner_id` 过滤，可看到全部资源。
+- **内置资源始终可见**：`is_builtin=1` 的资源对所有用户可见，不受 Access Grants 约束。
+
+### 17.6 认证流程
+
+```text
+用户输入用户名+密码
+→ POST /api/auth/login
+→ 后端验证 bcrypt hash
+→ 签发 JWT（payload: sub=user_id, username, role, exp）
+→ 前端 authStore 持久化 token
+→ 后续所有请求通过 authFetch 注入 Authorization: Bearer <token>
+→ 后端 get_current_user 依赖解码 token 并注入用户上下文
+```
+
+JWT 有效期默认 **24 小时**（可通过环境变量 `JWT_EXPIRE_MINUTES` 调整）。
+
+### 17.7 默认账户
+
+首次启动时，如果数据库中不存在任何 `system_role="admin"` 的用户，系统自动创建默认管理员：
+
+- **用户名**：`admin`
+- **密码**：`admin123`
+
+> ⚠️ **生产环境必须在首次登录后立即修改默认密码。**
+
+### 17.8 待完善事项
+
+- [ ] Knowledge / AI Role / Skill 创建/编辑 UI 中增加可见性选择器（Private / Group / Public）
+- [ ] 资源列表页根据当前用户的 Access Grants 过滤显示内容
+- [ ] 支持将用户从一个组迁移到另一个组

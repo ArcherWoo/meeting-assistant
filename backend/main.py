@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from routers import health, chat, ppt, skills, knowledge, knowhow, agent, settings, conversations
+from routers import health, chat, ppt, skills, knowledge, knowhow, agent, settings, conversations, auth
 
 logger = logging.getLogger(__name__)
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -109,6 +109,9 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # 注册路由 - Auth
+    app.include_router(auth.router, prefix="/api", tags=["Auth"])
 
     # 注册路由 - Phase 1
     app.include_router(health.router, prefix="/api", tags=["Health"])
