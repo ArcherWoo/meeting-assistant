@@ -141,6 +141,58 @@
     @apply my-3 rounded-lg border border-surface-divider dark:border-dark-divider;
   }
 
+  .markdown-body .markdown-table-shell {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(125, 132, 145, 0.45) transparent;
+  }
+
+  .markdown-body .markdown-table-shell::-webkit-scrollbar {
+    height: 8px;
+  }
+
+  .markdown-body .markdown-table-shell::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .markdown-body .markdown-table-shell::-webkit-scrollbar-thumb {
+    background-color: rgba(125, 132, 145, 0.38);
+    border-radius: 9999px;
+  }
+
+  .markdown-body .markdown-table th:first-child,
+  .markdown-body .markdown-table td:first-child {
+    @apply pl-5;
+  }
+
+  .markdown-body .markdown-table th:last-child,
+  .markdown-body .markdown-table td:last-child {
+    @apply pr-5;
+  }
+
+  .markdown-highlight {
+    @apply inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium leading-5 shadow-sm;
+  }
+
+  .markdown-highlight-inline {
+    vertical-align: baseline;
+  }
+
+  .markdown-highlight-good {
+    @apply border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300;
+  }
+
+  .markdown-highlight-bad {
+    @apply border-red-200 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300;
+  }
+
+  .markdown-highlight-warn {
+    @apply border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300;
+  }
+
+  .markdown-highlight-info {
+    @apply border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-300;
+  }
+
   /* 毛玻璃效果 */
   .glass {
     @apply backdrop-blur-xl bg-white/70 dark:bg-dark-sidebar/70;
