@@ -92,6 +92,7 @@ def _python_import_name(package_name: str) -> str:
         "python-pptx": "pptx",
         "python-multipart": "multipart",
         "pydantic-ai-slim": "pydantic_ai",
+        "python-jose": "jose",
     }
     return overrides.get(package_name, package_name.replace("-", "_").lower())
 
@@ -100,7 +101,7 @@ def check_python() -> None:
     major, minor = sys.version_info[:2]
     if (major, minor) < (3, 9):
         fail(f"Python 3.9+ is required, current version is {major}.{minor}.")
-    ok(f"Python {major}.{minor}")
+    ok(f"Python {major}.{minor} ({sys.executable})")
 
 
 def check_node() -> None:

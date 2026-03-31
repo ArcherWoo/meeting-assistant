@@ -30,7 +30,7 @@ class RetrievalPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.strategy, "fallback")
         self.assertEqual(
             [action.surface for action in plan.actions],
-            ["knowledge", "knowhow", "skill"],
+            ["knowledge", "knowhow"],
         )
         self.assertEqual(plan.normalized_query, "请核对供应商资质和报价风险")
 

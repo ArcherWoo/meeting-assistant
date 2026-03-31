@@ -7,7 +7,7 @@ import { persist } from 'zustand/middleware';
 import type { User } from '@/types';
 import { login as apiLogin, getMe } from '@/services/api';
 
-const AUTH_STORAGE_KEY = 'meeting-assistant-auth';
+const AUTH_STORAGE_KEY = 'CPSC AI 中台 智枢-auth';
 
 interface AuthState {
   /** 当前登录用户 */

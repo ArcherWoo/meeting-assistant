@@ -182,7 +182,7 @@ export const useAppStore = create<AppState>()(
       toggleSettings: () => set((state) => ({ settingsOpen: !state.settingsOpen })),
     }),
     {
-      name: 'meeting-assistant-app',
+      name: '智枢-app',
       version: 4,
       migrate: (persistedState) => {
         const persisted = (persistedState ?? {}) as PersistedAppState;

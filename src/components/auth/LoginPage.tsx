@@ -33,7 +33,7 @@ export default function LoginPage() {
         <div className="text-center">
           <span className="text-3xl">🍒</span>
           <h1 className="mt-2 text-xl font-semibold text-text-primary dark:text-text-dark-primary">
-            Meeting Assistant
+            CPSC AI 中台--智枢
           </h1>
           <p className="mt-1 text-sm text-text-secondary">请登录以继续</p>
         </div>

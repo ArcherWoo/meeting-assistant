@@ -18,28 +18,32 @@ interface AgentExecutionRequest {
 }
 
 export default function ChatArea() {
-  const {
-    activeSurface,
-    currentRoleId,
-    roles,
-    llmConfigs,
-    activeLLMConfigId,
-    toggleContextPanel,
-    contextPanelVisible,
-    backend,
-  } = useAppStore();
+  const activeSurface = useAppStore((state) => state.activeSurface);
+  const currentRoleId = useAppStore((state) => state.currentRoleId);
+  const roles = useAppStore((state) => state.roles);
+  const llmConfigs = useAppStore((state) => state.llmConfigs);
+  const activeLLMConfigId = useAppStore((state) => state.activeLLMConfigId);
+  const toggleContextPanel = useAppStore((state) => state.toggleContextPanel);
+  const contextPanelVisible = useAppStore((state) => state.contextPanelVisible);
+  const backend = useAppStore((state) => state.backend);
   const currentRole = roles.find((r) => r.id === currentRoleId);
-  const {
-    conversations, activeConversationId, messagesByConversation,
-    streamingByConversation, streamingContentByConversation,
-    addMessage, setStreaming,
-    appendStreamContent, resetStreamContent, updateMessage, updateMessageMetadata,
-    createConversation, setActiveConversation,
-  } = useChatStore();
+  const conversations = useChatStore((state) => state.conversations);
+  const activeConversationId = useChatStore((state) => state.activeConversationId);
+  const messagesByConversation = useChatStore((state) => state.messagesByConversation);
+  const streamingByConversation = useChatStore((state) => state.streamingByConversation);
+  const addMessage = useChatStore((state) => state.addMessage);
+  const setStreaming = useChatStore((state) => state.setStreaming);
+  const updateMessage = useChatStore((state) => state.updateMessage);
+  const updateMessageMetadata = useChatStore((state) => state.updateMessageMetadata);
+  const createConversation = useChatStore((state) => state.createConversation);
+  const setActiveConversation = useChatStore((state) => state.setActiveConversation);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   // 每个对话独立持有自己的 AbortController，避免多对话并发时互相覆盖
   const abortMapRef = useRef<Record<string, AbortController>>({});
+  const pendingStreamContentRef = useRef<Record<string, string>>({});
+  const pendingAssistantMessageIdRef = useRef<Record<string, string>>({});
+  const flushTimerRef = useRef<Record<string, number>>({});
   const welcomeFileRef = useRef<HTMLInputElement>(null);
   const activeLLMConfig = llmConfigs.find((config) => config.id === activeLLMConfigId) ?? llmConfigs[0];
   /** Agent 模式：当前正在执行的查询 */
@@ -62,7 +66,16 @@ export default function ChatArea() {
   const visibleConversationId = modeConversation?.id ?? null;
   const visibleMessages = visibleConversationId ? (messagesByConversation[visibleConversationId] ?? []) : [];
   const visibleIsStreaming = visibleConversationId ? (streamingByConversation[visibleConversationId] ?? false) : false;
-  const visibleStreamingContent = visibleConversationId ? (streamingContentByConversation[visibleConversationId] ?? '') : '';
+  const streamingMessageId = useMemo(() => {
+    if (!visibleIsStreaming) return null;
+    for (let index = visibleMessages.length - 1; index >= 0; index -= 1) {
+      const message = visibleMessages[index];
+      if (message.role === 'assistant') {
+        return message.id;
+      }
+    }
+    return null;
+  }, [visibleIsStreaming, visibleMessages]);
 
   useEffect(() => {
     if (visibleConversationId && visibleConversationId !== activeConversationId) {
@@ -76,10 +89,51 @@ export default function ChatArea() {
     }
   }, [activeSurface, agentExecution]);
 
-  // 消息列表自动滚动到底部
+  const clearPendingStreamState = useCallback((conversationId: string) => {
+    const timer = flushTimerRef.current[conversationId];
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      delete flushTimerRef.current[conversationId];
+    }
+    delete pendingStreamContentRef.current[conversationId];
+    delete pendingAssistantMessageIdRef.current[conversationId];
+  }, []);
+
+  const flushPendingStreamUpdate = useCallback((conversationId: string) => {
+    const messageId = pendingAssistantMessageIdRef.current[conversationId];
+    const content = pendingStreamContentRef.current[conversationId];
+    const timer = flushTimerRef.current[conversationId];
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      delete flushTimerRef.current[conversationId];
+    }
+    if (!messageId || content === undefined) {
+      return;
+    }
+    void updateMessage(messageId, content, conversationId, { persist: false }).catch(() => {});
+  }, [updateMessage]);
+
+  const schedulePendingStreamUpdate = useCallback((conversationId: string, messageId: string) => {
+    pendingAssistantMessageIdRef.current[conversationId] = messageId;
+    if (flushTimerRef.current[conversationId] !== undefined) {
+      return;
+    }
+    flushTimerRef.current[conversationId] = window.setTimeout(() => {
+      flushPendingStreamUpdate(conversationId);
+    }, 32);
+  }, [flushPendingStreamUpdate]);
+
+  useEffect(() => () => {
+    Object.values(flushTimerRef.current).forEach((timer) => window.clearTimeout(timer));
+  }, []);
+
+  // 消息列表自动滚动到底部；流式阶段使用 auto，避免每个 chunk 触发 smooth 动画
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [visibleMessages, visibleStreamingContent]);
+    messagesEndRef.current?.scrollIntoView({
+      behavior: visibleIsStreaming ? 'auto' : 'smooth',
+      block: 'end',
+    });
+  }, [visibleMessages, visibleIsStreaming]);
 
   const handleApplySkillSuggestion = useCallback((
     message: Message,
@@ -138,7 +192,6 @@ export default function ChatArea() {
 
     // 使用当前 convId 隔离流式状态，避免阻塞其他对话
     setStreaming(true, targetConvId);
-    resetStreamContent(targetConvId);
 
     // 每个对话独立创建 AbortController，存入 Map，互不干扰
     const controller = new AbortController();
@@ -157,13 +210,13 @@ export default function ChatArea() {
       activeLLMConfig,
       (chunk) => {
         fullContent += chunk;
-        appendStreamContent(chunk, targetConvId);
-        void updateMessage(assistantMsgId, fullContent, targetConvId, { persist: false }).catch(() => {});
+        pendingStreamContentRef.current[targetConvId] = fullContent;
+        schedulePendingStreamUpdate(targetConvId, assistantMsgId);
       },
       () => {
         setStreaming(false, targetConvId);
-        resetStreamContent(targetConvId);
         delete abortMapRef.current[targetConvId];
+        clearPendingStreamState(targetConvId);
         void updateMessage(assistantMsgId, fullContent, targetConvId).catch(() => {});
 
         // 自动命名：第 3 条 assistant 消息完成后（或之后），且用户未手动命名
@@ -198,7 +251,7 @@ export default function ChatArea() {
       },
       (error) => {
         setStreaming(false, targetConvId);
-        resetStreamContent(targetConvId);
+        clearPendingStreamState(targetConvId);
         void updateMessage(assistantMsgId, `⚠️ 错误: ${error}`, targetConvId).catch(() => {});
         delete abortMapRef.current[targetConvId];
       },
@@ -249,10 +302,11 @@ export default function ChatArea() {
   /** 停止生成（仅中止当前活跃对话的流，不影响其他对话） */
   const handleStop = () => {
     if (visibleConversationId) {
+      flushPendingStreamUpdate(visibleConversationId);
       abortMapRef.current[visibleConversationId]?.abort();
       delete abortMapRef.current[visibleConversationId];
       setStreaming(false, visibleConversationId);
-      resetStreamContent(visibleConversationId);
+      clearPendingStreamState(visibleConversationId);
     }
   };
 
@@ -294,55 +348,56 @@ export default function ChatArea() {
       {/* 消息列表 */}
       <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-4 bg-[#F7F8FA] dark:bg-[#101726]">
         <div className="flex h-full w-full flex-col">
-        {visibleMessages.length === 0 && !agentExecution ? (
-          <>
-            {/* 隐藏的文件输入（欢迎屏使用） */}
-            <input
-              ref={welcomeFileRef}
-              type="file"
-              multiple
-              accept=".ppt,.pptx,.pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.xls,.xlsx,.png,.jpg,.jpeg,.gif,.bmp,.webp,image/*"
-              className="hidden"
-              onChange={handleWelcomeFileChange}
-            />
-            <WelcomeScreen
-              mode={currentRoleId}
-              surface={activeSurface}
-              onQuickMessage={handleSend}
-              onUploadFile={() => welcomeFileRef.current?.click()}
-              uploading={welcomeUploading}
-            />
-          </>
-        ) : (
-          <>
-            {visibleMessages.map((msg) => (
-              <MessageBubble
-                key={msg.id}
-                message={msg}
-                onApplySkillSuggestion={handleApplySkillSuggestion}
-                onDismissSkillSuggestion={handleDismissSkillSuggestion}
+          {visibleMessages.length === 0 && !agentExecution ? (
+            <>
+              {/* 隐藏的文件输入（欢迎屏使用） */}
+              <input
+                ref={welcomeFileRef}
+                type="file"
+                multiple
+                accept=".ppt,.pptx,.pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.xls,.xlsx,.png,.jpg,.jpeg,.gif,.bmp,.webp,image/*"
+                className="hidden"
+                onChange={handleWelcomeFileChange}
               />
-            ))}
-            {/* Agent 模式执行面板 */}
-            {activeSurface === 'agent' && agentExecution && (
-              <AgentExecutionPanel
-                query={agentExecution.query}
-                conversationId={agentExecution.conversationId}
-                onComplete={async (payload) => {
-                  await addMessage({
-                    conversationId: agentExecution.conversationId,
-                    role: 'assistant',
-                    content: payload.content,
-                    metadata: payload.metadata,
-                  });
-                  setAgentExecution(null);
-                }}
-                onCancel={() => setAgentExecution(null)}
+              <WelcomeScreen
+                mode={currentRoleId}
+                surface={activeSurface}
+                onQuickMessage={handleSend}
+                onUploadFile={() => welcomeFileRef.current?.click()}
+                uploading={welcomeUploading}
               />
-            )}
-          </>
-        )}
-        <div ref={messagesEndRef} />
+            </>
+          ) : (
+            <>
+              {visibleMessages.map((msg) => (
+                <MessageBubble
+                  key={msg.id}
+                  message={msg}
+                  isStreaming={msg.id === streamingMessageId}
+                  onApplySkillSuggestion={handleApplySkillSuggestion}
+                  onDismissSkillSuggestion={handleDismissSkillSuggestion}
+                />
+              ))}
+              {/* Agent 模式执行面板 */}
+              {activeSurface === 'agent' && agentExecution && (
+                <AgentExecutionPanel
+                  query={agentExecution.query}
+                  conversationId={agentExecution.conversationId}
+                  onComplete={async (payload) => {
+                    await addMessage({
+                      conversationId: agentExecution.conversationId,
+                      role: 'assistant',
+                      content: payload.content,
+                      metadata: payload.metadata,
+                    });
+                    setAgentExecution(null);
+                  }}
+                  onCancel={() => setAgentExecution(null)}
+                />
+              )}
+            </>
+          )}
+          <div ref={messagesEndRef} />
         </div>
       </div>
 
@@ -371,10 +426,10 @@ function WelcomeScreen({ mode, surface, onQuickMessage, onUploadFile, uploading 
     <div className="flex flex-1 items-center justify-center py-8 animate-fade-in">
       <div className="win-panel w-full max-w-2xl px-8 py-9 text-center">
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl border border-surface-divider dark:border-dark-divider bg-white dark:bg-dark-sidebar text-3xl shadow-sm">🍒</div>
-        <h2 className="text-[22px] font-semibold mb-2">Meeting Assistant</h2>
+        <h2 className="text-[22px] font-semibold mb-2">Ask Me Anything</h2>
         <p className="text-text-secondary text-sm max-w-xl mx-auto leading-6">
           {surface === 'agent' && '选择一个任务并输入目标，我会以当前 Agent 角色执行完整流程。'}
-          {surface === 'chat' && mode === 'copilot' && '你好！我是你的会议助手。使用下方 📎 按钮添加附件，或直接提问。'}
+          {surface === 'chat' && mode === 'copilot' && '你好！我是你的AI小助手。使用下方 📎 按钮添加附件，或直接提问。'}
           {surface === 'chat' && mode === 'builder' && '在这里，你可以通过对话创建自定义 Skill，将重复工作自动化。'}
           {surface === 'chat' && mode === 'executor' && '你当前在聊天链路下使用执行助手角色，可以先讨论需求，再切到 Agent 执行。'}
         </p>

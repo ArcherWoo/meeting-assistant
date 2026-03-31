@@ -25,7 +25,7 @@ function getBaseUrl(): string {
 
 // ===== 认证辅助 =====
 
-const AUTH_STORAGE_KEY = 'meeting-assistant-auth';
+const AUTH_STORAGE_KEY = 'CPSC AI 中台 智枢-auth';
 
 /** 从 localStorage 读取 JWT token */
 function getToken(): string | null {

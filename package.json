@@ -1,8 +1,8 @@
 {
-  "name": "meeting-assistant",
+  "name": "CPSC AI 中台--智枢",
   "version": "0.1.0",
   "type": "module",
-  "description": "AI-powered Meeting Assistant - Web version with PPT analysis, meeting summaries, and skill automation",
+  "description": "AI-powered Platform - Web version with PPT analysis, meeting summaries, and skill automation",
   "scripts": {
     "dev": "vite",
     "dev:frontend": "vite",
@@ -35,6 +35,6 @@
     "typescript": "^5.6.3",
     "vite": "^6.0.1"
   },
-  "author": "Meeting Assistant Team",
+  "author": "CPSCI",
   "license": "MIT"
 }

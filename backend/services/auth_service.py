@@ -9,7 +9,7 @@ from jose import JWTError, jwt
 import bcrypt
 
 # JWT 配置
-SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "meeting-assistant-secret-key-change-in-production")
+SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "智枢-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("JWT_EXPIRE_MINUTES", "1440"))  # 默认24小时
 

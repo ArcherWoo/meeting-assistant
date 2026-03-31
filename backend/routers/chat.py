@@ -15,7 +15,7 @@ from services.storage import storage
 from services.context_assembler import context_assembler, AssembledContext
 from services.embedding_service import embedding_service
 from services.role_config import resolve_chat_capabilities
-from services.retrieval_planner import RetrievalPlannerSettings
+
 from services.system_prompt_defaults import DEFAULT_SYSTEM_PROMPTS
 from routers.auth import get_current_user
 
@@ -221,11 +221,6 @@ async def _assemble_context(request: ChatRequest, messages: list[dict]) -> Assem
         return await context_assembler.assemble(
             user_query=rag_query,
             role_id=role_id,
-            planner_settings=RetrievalPlannerSettings(
-                api_url=request.api_url,
-                api_key=request.api_key,
-                model=request.model,
-            ),
             enabled_surfaces=enabled_surfaces,
         )
     except Exception as e:

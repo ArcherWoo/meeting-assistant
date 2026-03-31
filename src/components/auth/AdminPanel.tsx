@@ -307,7 +307,7 @@ function GroupTable({ groups, onDelete }: {
 
 // ===== 资源授权 Tab =====
 type ResType = 'role' | 'skill' | 'knowledge' | 'knowhow';
-const RES_LABELS: Record<ResType, string> = { role: 'AI角色', skill: 'Skill', knowledge: '知识文件', knowhow: 'Know-how规约' };
+const RES_LABELS: Record<ResType, string> = { role: 'AI角色', skill: 'Skill', knowledge: '知识文件', knowhow: 'Know-how规则' };
 
 function GrantsTab({ users, groups }: { users: User[]; groups: Group[] }) {
   const [resType, setResType] = useState<ResType>('role');

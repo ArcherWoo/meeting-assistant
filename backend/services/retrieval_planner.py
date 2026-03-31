@@ -85,6 +85,86 @@ class RetrievalPlanner:
     def __init__(self, llm_service: LLMService | None = None) -> None:
         self._llm_service = llm_service or LLMService()
 
+    _SMALL_TALK_HINTS: tuple[str, ...] = (
+        "你好",
+        "您好",
+        "hello",
+        "hi",
+        "在吗",
+        "你是谁",
+        "你是干嘛的",
+        "你能做什么",
+        "你可以做什么",
+        "能做什么",
+        "可以做什么",
+        "介绍一下你自己",
+        "介绍下你自己",
+        "谢谢",
+        "谢了",
+    )
+    _KNOWLEDGE_HINTS: tuple[str, ...] = (
+        "文件",
+        "文档",
+        "材料",
+        "附件",
+        "ppt",
+        "pdf",
+        "合同",
+        "报价",
+        "价格",
+        "均价",
+        "参数",
+        "规格",
+        "记录",
+        "数据",
+        "内容",
+        "清单",
+        "名单",
+        "供应商",
+        "采购",
+        "条款",
+        "交付",
+        "付款",
+        "金额",
+        "预算",
+    )
+    _KNOWHOW_HINTS: tuple[str, ...] = (
+        "资质",
+        "认证",
+        "合规",
+        "审批",
+        "流程",
+        "风险",
+        "规范",
+        "规则",
+        "政策",
+        "要求",
+        "必须",
+        "应当",
+        "单一来源",
+        "单一",
+        "审查",
+        "审计",
+        "招标",
+        "资格",
+        "售后",
+        "违约",
+    )
+    _SKILL_HINTS: tuple[str, ...] = (
+        "模板",
+        "流程",
+        "步骤",
+        "清单",
+        "生成",
+        "起草",
+        "工作流",
+        "自动化",
+        "skill",
+        "技能",
+        "playbook",
+        "执行方案",
+    )
+
     _BASE_INSTRUCTIONS = """
 You are a retrieval planner for a Chinese enterprise assistant.
 
@@ -374,28 +454,100 @@ JSON schema:
             raise ValueError(f"planner response did not contain JSON: {text[:200]}")
         return stripped[start:end + 1]
 
+    @staticmethod
+    def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+        return any(keyword in text for keyword in keywords)
+
+    @staticmethod
+    def _compact_query(query: str, max_chars: int = 60) -> str:
+        compact = " ".join((query or "").split())
+        if len(compact) <= max_chars:
+            return compact
+        return compact[:max_chars].rstrip()
+
     def _build_fallback_plan(
         self,
         *,
         user_query: str,
         allowed_surfaces: tuple[RetrievalSurface, ...],
     ) -> RetrievalPlan:
-        actions = [
-            RetrievalPlanAction(
-                surface=surface,
-                query=user_query,
-                limit=_DEFAULT_LIMITS[surface],
-                required=False,
-                rationale="fallback_default",
+        normalized_query = " ".join((user_query or "").lower().split())
+        compact_query = self._compact_query(user_query)
+        allowed_set = set(allowed_surfaces)
+
+        if not normalized_query:
+            return RetrievalPlan(
+                strategy="fallback",
+                intent="empty query",
+                normalized_query=compact_query,
+                actions=[],
+                notes=["empty_query"],
             )
-            for surface in allowed_surfaces
-        ]
+
+        is_small_talk = (
+            len(normalized_query) <= 18
+            and self._contains_any(normalized_query, self._SMALL_TALK_HINTS)
+        )
+        if is_small_talk:
+            return RetrievalPlan(
+                strategy="fallback",
+                intent="casual chat",
+                normalized_query=compact_query,
+                actions=[],
+                notes=["heuristic_skip_small_talk"],
+            )
+
+        wants_skill = "skill" in allowed_set and self._contains_any(normalized_query, self._SKILL_HINTS)
+        wants_knowledge = "knowledge" in allowed_set and self._contains_any(normalized_query, self._KNOWLEDGE_HINTS)
+        wants_knowhow = "knowhow" in allowed_set and self._contains_any(normalized_query, self._KNOWHOW_HINTS)
+
+        actions: list[RetrievalPlanAction] = []
+        if wants_skill:
+            actions.append(
+                RetrievalPlanAction(
+                    surface="skill",
+                    query=compact_query,
+                    limit=min(2, _DEFAULT_LIMITS["skill"]),
+                    required=True,
+                    rationale="heuristic_skill_match",
+                )
+            )
+        if wants_knowledge:
+            actions.append(
+                RetrievalPlanAction(
+                    surface="knowledge",
+                    query=compact_query,
+                    limit=min(4, _DEFAULT_LIMITS["knowledge"]),
+                    required=True,
+                    rationale="heuristic_document_or_fact_lookup",
+                )
+            )
+        if wants_knowhow:
+            actions.append(
+                RetrievalPlanAction(
+                    surface="knowhow",
+                    query=compact_query,
+                    limit=min(4, _DEFAULT_LIMITS["knowhow"]),
+                    required=True,
+                    rationale="heuristic_rule_or_risk_lookup",
+                )
+            )
+
+        if not actions:
+            return RetrievalPlan(
+                strategy="fallback",
+                intent="general answer without retrieval",
+                normalized_query=compact_query,
+                actions=[],
+                notes=["heuristic_skip_retrieval"],
+            )
+
         return RetrievalPlan(
             strategy="fallback",
-            intent="fallback retrieval",
-            normalized_query=user_query,
+            intent="heuristic retrieval",
+            normalized_query=compact_query,
             actions=actions,
-            notes=["llm_planner_unavailable"],
+            notes=["llm_planner_unavailable", "heuristic_targeted_surfaces"],
         )
 
     def _sanitize_plan(

@@ -3,6 +3,7 @@
  * 用户消息右对齐，AI 消息左对齐。
  * AI 消息支持 Markdown、上下文引用、Skill 推荐和 Agent 结构化结果。
  */
+import { memo } from 'react';
 import clsx from 'clsx';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import RetrievalPlanCard from '@/components/common/RetrievalPlanCard';
@@ -11,6 +12,7 @@ import type { ContextCitation, ContextMetadata, Message, SkillSuggestionEvent } 
 
 interface Props {
   message: Message;
+  isStreaming?: boolean;
   onApplySkillSuggestion?: (message: Message, suggestion: SkillSuggestionEvent) => void;
   onDismissSkillSuggestion?: (message: Message) => void;
 }
@@ -150,14 +152,15 @@ function getContextCountSummary(context: ContextMetadata, kind: 'injected' | 're
   return parts.length > 0 ? parts.join(' / ') : '无引用来源';
 }
 
-export default function MessageBubble({
+function MessageBubble({
   message,
+  isStreaming = false,
   onApplySkillSuggestion,
   onDismissSkillSuggestion,
 }: Props) {
   const isUser = message.role === 'user';
   const isError = message.content.startsWith('⚠️');
-  const senderLabel = isUser ? '你' : 'Meeting Assistant';
+  const senderLabel = isUser ? '你' : '智枢';
   const context = message.metadata?.context;
   const agentResult = message.metadata?.agentResult;
   const skillSuggestion = message.metadata?.skillSuggestion;
@@ -413,6 +416,8 @@ export default function MessageBubble({
         >
           {isUser ? (
             <p className="whitespace-pre-wrap">{message.content}</p>
+          ) : isStreaming ? (
+            <p className="whitespace-pre-wrap">{message.content}</p>
           ) : message.content ? (
             <div className="markdown-body text-[13px] leading-6">
               <ReactMarkdown components={markdownComponents}>
@@ -571,3 +576,5 @@ export default function MessageBubble({
     </div>
   );
 }
+
+export default memo(MessageBubble);

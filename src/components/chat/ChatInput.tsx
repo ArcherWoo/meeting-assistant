@@ -290,7 +290,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
 
       {/* 底部提示 */}
       <p className="mt-2 pl-1 text-[11px] text-text-secondary">
-        Meeting Assistant 可能会犯错，请核实重要信息
+        Version beta 0.2.0
       </p>
     </div>
   );

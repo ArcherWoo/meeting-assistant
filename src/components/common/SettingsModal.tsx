@@ -19,12 +19,12 @@ import type { LLMConnectionTestResult, LLMProfile, Role, SystemPromptPreset } fr
 
 type SettingsTab = 'models' | 'roles' | 'appearance';
 
-/** 角色图标预设（12个，3列布局） */
+/** 角色图标预设（8个，稳态表单布局） */
 const ROLE_EMOJIS = [
-  '💬', '🤖', '🧑‍💻',
-  '🔍', '🛠️', '📚',
-  '🎯', '🎭', '👨‍💼',
-  '🌐', '🚀', '💡',
+  '💬', '🤖',
+  '🔍', '🛠️',
+  '🎯', '🎭',
+  '🌐', '🚀',
 ];
 
 /** 主题色预设 */
@@ -799,8 +799,8 @@ export default function SettingsModal() {
                             <span className="text-xs text-text-secondary">▾</span>
                           </button>
                           {emojiPickerOpen && (
-                            <div className="absolute left-0 top-full z-20 mt-1 rounded-lg border border-surface-divider bg-white p-4 shadow-lg dark:border-dark-divider dark:bg-dark-card">
-                              <div className="grid grid-cols-3 gap-3">
+                            <div className="absolute left-0 top-full z-20 mt-1.5 w-full rounded-md border border-surface-divider bg-white p-2 shadow-md dark:border-dark-divider dark:bg-dark-card">
+                              <div className="grid grid-cols-2 gap-2">
                                 {ROLE_EMOJIS.map((emoji) => (
                                   <button
                                     key={emoji}
@@ -811,8 +811,9 @@ export default function SettingsModal() {
                                       setEmojiPickerOpen(false);
                                     }}
                                     className={clsx(
-                                      'flex h-10 w-10 items-center justify-center rounded-lg text-2xl transition-colors hover:bg-primary/5 dark:hover:bg-primary/10',
-                                      roleDraft.icon === emoji && 'bg-primary/10 ring-2 ring-inset ring-primary/30'
+                                      'flex h-10 w-full items-center justify-center rounded-md border text-[22px] shadow-sm transition-colors',
+                                      'border-surface-divider bg-surface-sidebar/35 hover:border-primary/30 hover:bg-surface-sidebar dark:border-dark-divider dark:bg-dark-sidebar/50 dark:hover:bg-dark-sidebar',
+                                      roleDraft.icon === emoji && 'border-primary/50 bg-primary/10 text-text-primary ring-1 ring-inset ring-primary/25 dark:text-text-dark-primary'
                                     )}
                                   >
                                     {emoji}

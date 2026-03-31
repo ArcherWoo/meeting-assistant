@@ -691,6 +691,10 @@ class ContextAssembler:
                     existing["first_action_index"] = action_index
                     existing["item"] = item
 
+        # 知识库最低相关度门槛：低于此值的结果不注入上下文，避免弱相关内容污染 prompt
+        _MIN_SCORE: dict[str, float] = {"knowledge": 4.5, "knowhow": 0.0, "skill": 0.0}
+        min_threshold = _MIN_SCORE.get(surface, 0.0)
+
         ranked: list[tuple[float, int, int, dict]] = []
         for aggregate in aggregates.values():
             repeat_bonus = 0.6 * max(0, len(aggregate["matched_actions"]) - 1)
@@ -698,6 +702,8 @@ class ContextAssembler:
                 0.0,
                 aggregate["score_sum"] - aggregate["best_score"],
             ) + repeat_bonus
+            if final_score < min_threshold:
+                continue
             ranked.append(
                 (
                     final_score,

@@ -200,8 +200,8 @@ export default function Sidebar() {
         <span className="flex h-8 w-8 items-center justify-center rounded-md border border-surface-divider dark:border-dark-divider bg-white text-lg shadow-sm dark:bg-dark-card">🍒</span>
         {!sidebarCollapsed && (
           <div className="min-w-0">
-            <span className="block truncate text-sm font-semibold">Meeting Asst</span>
-            <span className="block truncate text-[11px] text-text-secondary">Web App</span>
+            <span className="block truncate text-sm font-semibold">CPSC AI 中台--智枢</span>
+            <span className="block truncate text-[11px] text-text-secondary">Powered By CPSCI</span>
           </div>
         )}
         <button
