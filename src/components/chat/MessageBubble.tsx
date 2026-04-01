@@ -382,6 +382,7 @@ function MessageBubble({
         <div
           className={clsx(
             'overflow-hidden px-4 py-3 text-[13px] leading-6 shadow-sm',
+            isUser && 'select-text cursor-text [user-select:text] [-webkit-user-select:text]',
             isUser
               ? 'rounded-xl rounded-tr-sm bg-primary text-white'
               : isError
@@ -391,7 +392,9 @@ function MessageBubble({
         >
           {isUser ? (
             <>
-              <p className="whitespace-pre-wrap">{message.content}</p>
+              <p className="whitespace-pre-wrap select-text [user-select:text] [-webkit-user-select:text]">
+                {message.content}
+              </p>
               {attachments.length > 0 && (
                 <div className="mt-3 space-y-2">
                   {attachments.map((attachment, index) => (
