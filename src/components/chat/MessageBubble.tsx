@@ -3,8 +3,9 @@
  * 用户消息右对齐，AI 消息左对齐。
  * AI 消息支持 Markdown、上下文引用、Skill 推荐和 Agent 结构化结果。
  */
-import { memo } from 'react';
+import { memo, useState } from 'react';
 import clsx from 'clsx';
+import { AlertCircle, Check, Copy } from 'lucide-react';
 import RetrievalPlanCard from '@/components/common/RetrievalPlanCard';
 import StructuredPayloadView from '@/components/common/StructuredPayloadView';
 import RichMarkdown from '@/components/chat/RichMarkdown';
@@ -129,6 +130,7 @@ function MessageBubble({
   onRetryGeneration,
   canRetryGeneration = false,
 }: Props) {
+  const [copyState, setCopyState] = useState<'idle' | 'done' | 'error'>('idle');
   const isUser = message.role === 'user';
   const generationState = message.metadata?.generationState;
   const generationError = message.metadata?.generationError;
@@ -161,6 +163,34 @@ function MessageBubble({
     ),
   );
 
+  const handleCopyUserMessage = async () => {
+    const text = message.content?.trim();
+    if (!text) return;
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', 'true');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      setCopyState('done');
+    } catch {
+      setCopyState('error');
+    }
+
+    window.setTimeout(() => {
+      setCopyState('idle');
+    }, 1600);
+  };
+
   return (
     <div
       className={clsx(
@@ -174,9 +204,22 @@ function MessageBubble({
         </div>
       )}
 
-      <div className="min-w-0 max-w-[78%]">
-        <div className={clsx('mb-1 px-1 text-[11px] text-text-secondary', isUser && 'text-right')}>
-          {senderLabel}
+      <div className="relative min-w-0 max-w-[78%]">
+        <div className={clsx(
+          'mb-1 px-1 text-[11px] text-text-secondary',
+          isUser && 'text-right',
+        )}>
+          {isUser && (
+            <button
+              type="button"
+              onClick={() => { void handleCopyUserMessage(); }}
+              className="hidden"
+              title="复制这条消息"
+            >
+              {copyState === 'done' ? '已复制' : copyState === 'error' ? '复制失败' : '复制'}
+            </button>
+          )}
+          <span>{senderLabel}</span>
         </div>
 
         {!isUser && !isError && (hasContextMetadata || skillSuggestion) && (
@@ -381,10 +424,10 @@ function MessageBubble({
 
         <div
           className={clsx(
-            'overflow-hidden px-4 py-3 text-[13px] leading-6 shadow-sm',
+            'relative overflow-visible px-4 py-3 text-[13px] leading-6 shadow-sm',
             isUser && 'select-text cursor-text [user-select:text] [-webkit-user-select:text]',
             isUser
-              ? 'rounded-xl rounded-tr-sm bg-primary text-white'
+              ? 'rounded-[20px] rounded-tr-md border border-[#3F6DF6] bg-[#4B74F8] pr-11 pb-4 text-white [box-shadow:0_10px_24px_rgba(75,116,248,0.28)]'
               : isError
                 ? 'rounded-xl rounded-tl-sm border border-red-200 bg-red-50 text-red-600 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400'
                 : 'rounded-xl rounded-tl-sm border border-surface-divider bg-white text-text-primary dark:border-dark-divider dark:bg-dark-card dark:text-text-dark-primary',
@@ -398,10 +441,13 @@ function MessageBubble({
               {attachments.length > 0 && (
                 <div className="mt-3 space-y-2">
                   {attachments.map((attachment, index) => (
-                    <div key={attachment.id || `${attachment.fileName}-${index}`} className="rounded-lg border border-white/20 bg-white/10 px-3 py-2">
+                    <div
+                      key={attachment.id || `${attachment.fileName}-${index}`}
+                      className="rounded-xl border border-white/24 bg-white/14 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+                    >
                       <p className="truncate text-xs font-medium">{attachment.fileName}</p>
                       {attachmentSummaries[index] && (
-                        <p className="mt-1 text-[11px] text-white/80">{attachmentSummaries[index]}</p>
+                        <p className="mt-1 text-[11px] text-white/78">{attachmentSummaries[index]}</p>
                       )}
                     </div>
                   ))}
@@ -605,6 +651,31 @@ function MessageBubble({
             </div>
           )}
         </div>
+
+        {isUser && (
+          <button
+            type="button"
+            onClick={() => { void handleCopyUserMessage(); }}
+            className={clsx(
+              'absolute bottom-2 right-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-md border shadow-sm backdrop-blur-sm transition-all',
+              copyState === 'done'
+                ? 'border-emerald-200 bg-white text-emerald-600'
+                : copyState === 'error'
+                  ? 'border-red-200 bg-white text-red-500'
+                  : 'border-slate-200 bg-white text-slate-500 hover:border-primary/25 hover:text-primary',
+            )}
+            title="复制这条消息"
+            aria-label="复制这条消息"
+          >
+            {copyState === 'done' ? (
+              <Check size={15} strokeWidth={2.25} />
+            ) : copyState === 'error' ? (
+              <AlertCircle size={15} strokeWidth={2.1} />
+            ) : (
+              <Copy size={15} strokeWidth={2.1} />
+            )}
+          </button>
+        )}
       </div>
 
       {isUser && (
