@@ -11,9 +11,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from services.llm_service import LLMService
+from services.llm_profiles import get_runtime_llm_config
 from services.storage import storage
 from services.context_assembler import context_assembler, AssembledContext
 from services.embedding_service import embedding_service
+from services.access_control import can_access_role, is_admin
 from services.role_config import resolve_chat_capabilities
 
 from services.system_prompt_defaults import DEFAULT_SYSTEM_PROMPTS
@@ -128,6 +130,7 @@ class ChatRequest(BaseModel):
     stream: bool = True
     api_url: str = "https://api.openai.com/v1"
     api_key: str = ""
+    llm_profile_id: str = ""
     role_id: str = ""
     mode: str = ""
     rag_query: str = ""
@@ -145,6 +148,7 @@ class AutoTitleRequest(BaseModel):
     messages: list[ChatMessage]
     api_url: str
     api_key: str
+    llm_profile_id: str = ""
     model: str = "gpt-4o"
 
 
@@ -172,13 +176,19 @@ async def _build_messages(request: ChatRequest) -> list[dict]:
     return messages
 
 
-async def _assemble_context(request: ChatRequest, messages: list[dict]) -> AssembledContext:
+async def _assemble_context(
+    request: ChatRequest,
+    messages: list[dict],
+    user: Optional[dict],
+    role: Optional[dict] = None,
+    runtime_api_url: str = "",
+    runtime_api_key: str = "",
+) -> AssembledContext:
     """独立的上下文组装步骤，仅 Chat 自动增强开启时才执行检索。"""
     role_id = _request_role_id(request)
     if not role_id:
         return AssembledContext()
 
-    role = await storage.get_role(role_id)
     if role:
         chat_capabilities = resolve_chat_capabilities(role)
         enabled_surfaces = set()
@@ -200,10 +210,10 @@ async def _assemble_context(request: ChatRequest, messages: list[dict]) -> Assem
     emb_model = await storage.get_setting("embedding_model") or "text-embedding-3-small"
     if emb_url and emb_key:
         embedding_service.configure(api_url=emb_url, api_key=emb_key, model=emb_model)
-    elif not embedding_service.is_configured and request.api_url and request.api_key:
+    elif not embedding_service.is_configured and runtime_api_url and runtime_api_key:
         embedding_service.configure(
-            api_url=request.api_url,
-            api_key=request.api_key,
+            api_url=runtime_api_url,
+            api_key=runtime_api_key,
             model="text-embedding-3-small",
         )
 
@@ -222,10 +232,51 @@ async def _assemble_context(request: ChatRequest, messages: list[dict]) -> Assem
             user_query=rag_query,
             role_id=role_id,
             enabled_surfaces=enabled_surfaces,
+            user=user,
         )
     except Exception as e:
         logger.warning(f"[RAG] 上下文组装失败，降级为无增强回答: {e}")
         return AssembledContext()
+
+
+def _build_context_metadata_payload(
+    ctx: AssembledContext,
+    retrieved_ctx: Optional[AssembledContext] = None,
+) -> Optional[dict]:
+    raw_ctx = retrieved_ctx or ctx
+    if not (ctx.has_context or raw_ctx.has_context):
+        return None
+
+    payload = ctx.to_metadata_payload()
+    payload["schema_version"] = 2
+
+    truncated = ctx != raw_ctx
+    payload["truncated"] = truncated
+
+    if truncated:
+        retrieved_payload = raw_ctx.to_metadata_payload()
+        payload["retrieved_summary"] = retrieved_payload["summary"]
+        payload["retrieved_knowledge_count"] = retrieved_payload["knowledge_count"]
+        payload["retrieved_knowhow_count"] = retrieved_payload["knowhow_count"]
+        payload["retrieved_skill_count"] = retrieved_payload["skill_count"]
+        payload["retrieved_citations"] = retrieved_payload["citations"]
+
+    return payload
+
+
+def _build_skill_suggestion_payload(skill: Optional[dict]) -> Optional[dict]:
+    if not skill:
+        return None
+    return {
+        "type": "skill_suggestion",
+        "schema_version": 2,
+        "skill_id": skill["skill_id"],
+        "skill_name": skill["skill_name"],
+        "description": skill["description"],
+        "score": skill["score"],
+        "confidence": skill["confidence"],
+        "matched_keywords": skill.get("matched_keywords", []),
+    }
 
 
 async def _stream_with_metadata(
@@ -235,51 +286,23 @@ async def _stream_with_metadata(
     suggested_skill: Optional[dict] = None,
 ) -> AsyncGenerator[str, None]:
     """包装 LLM 流式输出，在 [DONE] 之前注入 context_metadata 和 skill_suggestion 事件。"""
-    raw_ctx = retrieved_ctx or ctx
-
-    def _build_context_metadata_payload() -> dict:
-        payload = ctx.to_metadata_payload()
-        payload["schema_version"] = 2
-
-        truncated = ctx != raw_ctx
-        payload["truncated"] = truncated
-
-        if truncated:
-            retrieved_payload = raw_ctx.to_metadata_payload()
-            payload["retrieved_summary"] = retrieved_payload["summary"]
-            payload["retrieved_knowledge_count"] = retrieved_payload["knowledge_count"]
-            payload["retrieved_knowhow_count"] = retrieved_payload["knowhow_count"]
-            payload["retrieved_skill_count"] = retrieved_payload["skill_count"]
-            payload["retrieved_citations"] = retrieved_payload["citations"]
-
-        return payload
-
-    def _build_skill_suggestion_payload(skill: dict) -> dict:
-        return {
-            "type": "skill_suggestion",
-            "schema_version": 2,
-            "skill_id": skill["skill_id"],
-            "skill_name": skill["skill_name"],
-            "description": skill["description"],
-            "score": skill["score"],
-            "confidence": skill["confidence"],
-            "matched_keywords": skill.get("matched_keywords", []),
-        }
-
     async for chunk in raw_stream:
         if chunk.strip() == "data: [DONE]":
             # 在 [DONE] 之前注入元数据
-            if ctx.has_context or raw_ctx.has_context:
+            context_payload = _build_context_metadata_payload(ctx, retrieved_ctx)
+            if context_payload:
                 metadata = {
                     "type": "context_metadata",
-                    "sources": _build_context_metadata_payload(),
+                    "sources": context_payload,
                 }
                 yield f"data: {json.dumps(metadata, ensure_ascii=False)}\n\n"
 
             # 如果有匹配到的 Skill，注入推荐事件
+            raw_ctx = retrieved_ctx or ctx
             top_skill = suggested_skill or (raw_ctx.matched_skills[0] if raw_ctx.matched_skills else None)
-            if top_skill:
-                yield f"data: {json.dumps(_build_skill_suggestion_payload(top_skill), ensure_ascii=False)}\n\n"
+            skill_payload = _build_skill_suggestion_payload(top_skill)
+            if skill_payload:
+                yield f"data: {json.dumps(skill_payload, ensure_ascii=False)}\n\n"
 
             yield chunk
             return
@@ -292,13 +315,35 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
     流式聊天接口 - SSE 格式返回 LLM 响应
     兼容 OpenAI Chat Completions API 协议
     """
-    if not request.api_key:
-        raise HTTPException(status_code=400, detail="API Key is required")
+    llm_config = await get_runtime_llm_config(
+        profile_id=request.llm_profile_id,
+        api_url=request.api_url,
+        api_key=request.api_key,
+        model=request.model,
+    )
+    if not llm_config["api_key"]:
+        raise HTTPException(status_code=400, detail="未找到可用的 LLM 配置，请先由管理员完成配置")
+
+    role_id = _request_role_id(request)
+    role: Optional[dict] = None
+    if role_id:
+        role = await storage.get_role(role_id)
+        if role and not await can_access_role(role, user):
+            raise HTTPException(status_code=403, detail="无权使用该角色")
+        if not role and role_id not in DEFAULT_SYSTEM_PROMPTS:
+            raise HTTPException(status_code=400, detail="角色不存在")
 
     messages = await _build_messages(request)
 
     # 独立的上下文组装步骤（仅 copilot 模式）
-    assembled_ctx = await _assemble_context(request, messages)
+    assembled_ctx = await _assemble_context(
+        request,
+        messages,
+        user,
+        role,
+        runtime_api_url=llm_config["api_url"],
+        runtime_api_key=llm_config["api_key"],
+    )
     prompt_ctx = AssembledContext()
 
     if assembled_ctx.has_context:
@@ -314,11 +359,11 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
     if request.stream:
         raw_stream = llm_service.stream_chat(
             messages=messages,
-            model=request.model,
+            model=llm_config["model"],
             temperature=request.temperature,
             max_tokens=request.max_tokens,
-            api_url=request.api_url,
-            api_key=request.api_key,
+            api_url=llm_config["api_url"],
+            api_key=llm_config["api_key"],
         )
         return StreamingResponse(
             _stream_with_metadata(
@@ -337,13 +382,21 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
     else:
         result = await llm_service.chat(
             messages=messages,
-            model=request.model,
+            model=llm_config["model"],
             temperature=request.temperature,
             max_tokens=request.max_tokens,
-            api_url=request.api_url,
-            api_key=request.api_key,
+            api_url=llm_config["api_url"],
+            api_key=llm_config["api_key"],
         )
-        return result
+        response = dict(result)
+        context_payload = _build_context_metadata_payload(prompt_ctx, assembled_ctx)
+        if context_payload:
+            response["context_metadata"] = context_payload
+        top_skill = assembled_ctx.matched_skills[0] if assembled_ctx.matched_skills else None
+        skill_payload = _build_skill_suggestion_payload(top_skill)
+        if skill_payload:
+            response["skill_suggestion"] = skill_payload
+        return response
 
 
 @router.post("/chat/auto-title")
@@ -351,8 +404,14 @@ async def generate_auto_title(request: AutoTitleRequest, user: dict = Depends(ge
     """
     根据前 3 轮对话内容（最多 6 条消息），调用 LLM 生成语义化中文标题（10 字以内）
     """
-    if not request.api_key:
-        raise HTTPException(status_code=400, detail="API Key is required")
+    llm_config = await get_runtime_llm_config(
+        profile_id=request.llm_profile_id,
+        api_url=request.api_url,
+        api_key=request.api_key,
+        model=request.model,
+    )
+    if not llm_config["api_key"]:
+        raise HTTPException(status_code=400, detail="未找到可用的 LLM 配置，请先由管理员完成配置")
 
     # 仅使用前 6 条 user/assistant 消息，每条内容截取前 300 字避免 prompt 过长
     dialogue_lines = []
@@ -378,11 +437,11 @@ async def generate_auto_title(request: AutoTitleRequest, user: dict = Depends(ge
     try:
         result = await llm_service.chat(
             messages=messages_for_llm,
-            model=request.model,
+            model=llm_config["model"],
             temperature=0.3,
             max_tokens=30,
-            api_url=request.api_url,
-            api_key=request.api_key,
+            api_url=llm_config["api_url"],
+            api_key=llm_config["api_key"],
         )
         title = llm_service.extract_text_content(result)
         title = re.sub(r'^["“”‘’\s]+|["“”‘’\s]+$', "", title).strip()
@@ -399,6 +458,8 @@ async def generate_auto_title(request: AutoTitleRequest, user: dict = Depends(ge
 @router.post("/chat/test-connection")
 async def test_connection(config: ConfigUpdateRequest, user: dict = Depends(get_current_user)):
     """测试 LLM API 连接是否正常"""
+    if not is_admin(user):
+        raise HTTPException(status_code=403, detail="仅管理员可以测试 LLM 连接")
     try:
         result = await llm_service.test_connection(
             api_url=config.api_url,
@@ -410,4 +471,3 @@ async def test_connection(config: ConfigUpdateRequest, user: dict = Depends(get_
         return {"success": True, "message": message, **result}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"连接失败: {str(e)}")
-

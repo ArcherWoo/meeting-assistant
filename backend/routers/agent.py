@@ -5,6 +5,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
+from services.access_control import can_access_role, filter_accessible_skills, get_accessible_skill
 from services.agent_runtime.errors import (
     AgentConfigurationError,
     AgentContinuationError,
@@ -38,6 +39,12 @@ async def match_intent(request: AgentMatchRequest, user: dict = Depends(get_curr
         raise HTTPException(status_code=400, detail="query is required")
 
     normalized_role_id = normalize_agent_role_id(request.role_id or "executor")
+    role = await storage.get_role(normalized_role_id)
+    if not role:
+        raise HTTPException(status_code=404, detail=f"角色 {normalized_role_id} 不存在")
+    if isinstance(user, dict) and not await can_access_role(role, user):
+        raise HTTPException(status_code=403, detail="无权使用该角色")
+
     try:
         _, policy = await load_agent_role_policy(storage, normalized_role_id)
     except RoleNotAllowedForSurfaceError as exc:
@@ -53,7 +60,7 @@ async def match_intent(request: AgentMatchRequest, user: dict = Depends(get_curr
     if not skill_manager._loaded:
         await skill_manager.initialize()
 
-    skills = skill_manager.list_skills()
+    skills = await filter_accessible_skills(skill_manager.list_skills(), user)
     if not skills:
         return AgentMatchResponse(
             matched=False,
@@ -85,9 +92,20 @@ async def match_intent(request: AgentMatchRequest, user: dict = Depends(get_curr
 
 @router.post("/agent/execute")
 async def execute_skill(request: AgentExecuteRequest, user: dict = Depends(get_current_user)):
+    role = await storage.get_role(normalize_agent_role_id(request.role_id))
+    if not role:
+        raise HTTPException(status_code=404, detail="角色不存在")
+    if isinstance(user, dict) and not await can_access_role(role, user):
+        raise HTTPException(status_code=403, detail="无权使用该角色")
+
+    if request.skill_id and isinstance(user, dict):
+        skill = await get_accessible_skill(request.skill_id, user)
+        if not skill:
+            raise HTTPException(status_code=403, detail="无权使用该 Skill")
+
     async def event_stream():
         try:
-            async for event in execute_agent_stream(request):
+            async for event in execute_agent_stream(request, user=user):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except (RoleNotAllowedForSurfaceError, AgentContinuationError) as exc:
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"

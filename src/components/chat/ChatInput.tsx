@@ -5,21 +5,13 @@
 import { useState, useRef, useCallback, useEffect, type KeyboardEvent, type ChangeEvent } from 'react';
 import clsx from 'clsx';
 import { useAppStore } from '@/stores/appStore';
-import { extractFilesText } from '@/services/api';
-
-/** 附件信息 */
-interface Attachment {
-  id: string;
-  filename: string;
-  fileType: string;
-  fileSize: number;
-  text: string;
-  charCount: number;
-}
+import { useAuthStore } from '@/stores/authStore';
+import { extractFilesText, setActiveLLMProfile as persistActiveLLMProfile } from '@/services/api';
+import type { Attachment } from '@/types';
 
 interface Props {
-  /** 发送消息（content + 可选附件文本上下文） */
-  onSend: (content: string, attachmentContext?: string) => Promise<void> | void;
+  /** 发送消息（content + 可选附件列表） */
+  onSend: (content: string, attachments?: Attachment[]) => Promise<void> | void;
   onStop: () => void;
   isStreaming: boolean;
   disabled?: boolean;
@@ -31,9 +23,11 @@ interface Props {
 
 export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefillText, onPrefillConsumed }: Props) {
   const { llmConfigs, activeLLMConfigId, setActiveLLMConfig, toggleSettings } = useAppStore();
+  const isAdmin = useAuthStore((state) => state.user?.system_role === 'admin');
   const [input, setInput] = useState('');
   const [uploading, setUploading] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [feedbackMessage, setFeedbackMessage] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const activeLLMConfig = llmConfigs.find((config) => config.id === activeLLMConfigId) ?? llmConfigs[0];
@@ -58,6 +52,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
     e.target.value = '';
 
     setUploading(true);
+    setFeedbackMessage('');
     try {
       const result = await extractFilesText(files);
       const fileSizeQueue = files.reduce<Record<string, number[]>>((acc, file) => {
@@ -69,7 +64,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
       }, {});
       const nextAttachments = result.files.map((item, index) => ({
         id: globalThis.crypto?.randomUUID?.() ?? `${item.filename}-${index}-${Date.now()}-${Math.random()}`,
-        filename: item.filename,
+        fileName: item.filename,
         fileType: item.file_type,
         fileSize: fileSizeQueue[item.filename]?.shift() ?? 0,
         text: item.text,
@@ -81,10 +76,10 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
         setAttachments((current) => [...current, ...nextAttachments]);
       }
       if (failedMessages.length > 0) {
-        alert(`以下文件文本提取失败：\n${failedMessages.join('\n')}`);
+        setFeedbackMessage(`以下文件文本提取失败：${failedMessages.join('；')}`);
       }
     } catch (err: any) {
-      alert(`文件文本提取失败：${err.message || '未知错误'}`);
+      setFeedbackMessage(`文件文本提取失败：${err.message || '未知错误'}`);
     } finally {
       setUploading(false);
     }
@@ -112,26 +107,24 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
   }, []);
 
   /** 发送消息（附件文本作为上下文一起发送） */
-  const handleSend = () => {
+  const handleSend = async () => {
     const trimmed = input.trim();
     // 允许只有附件没有文字（此时用默认提示词）
     if (!trimmed && attachments.length === 0) return;
     if (isStreaming) return;
 
     const userMessage = trimmed || (attachments.length > 1 ? '请综合分析这些文件的内容' : '请分析这份文件的内容');
-    const attachmentContext = attachments.length > 0
-      ? attachments.map((attachment, index) => (
-          `\n\n---\n📎 附件${attachments.length > 1 ? ` #${index + 1}` : ''}「${attachment.filename}」内容（${attachment.charCount} 字符）：\n\n${attachment.text}`
-        )).join('')
-      : undefined;
+    setFeedbackMessage('');
 
-    void Promise.resolve(onSend(userMessage, attachmentContext)).catch((error: unknown) => {
-      alert((error as Error).message || '发送失败');
-    });
-    setInput('');
-    setAttachments([]);
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
+    try {
+      await Promise.resolve(onSend(userMessage, attachments.length > 0 ? attachments : undefined));
+      setInput('');
+      setAttachments([]);
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
+    } catch (error: unknown) {
+      setFeedbackMessage((error as Error).message || '发送失败');
     }
   };
 
@@ -143,15 +136,33 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
     }
   };
 
+  const handleModelChange = async (profileId: string) => {
+    if (!profileId) return;
+    try {
+      if (isAdmin) {
+        await persistActiveLLMProfile(profileId);
+      }
+      setActiveLLMConfig(profileId);
+      setFeedbackMessage('');
+    } catch (error) {
+      setFeedbackMessage((error as Error).message || '切换模型失败');
+    }
+  };
+
   const canSend = Boolean(input.trim() || attachments.length > 0) && !disabled;
 
   return (
     <div className="border-t border-surface-divider dark:border-dark-divider bg-surface-card dark:bg-dark-card px-4 py-3">
+      {feedbackMessage && (
+        <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
+          {feedbackMessage}
+        </div>
+      )}
       {/* API Key 未配置提示 */}
       {disabled && (
         <div className="mb-3 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
           <span className="flex h-5 w-5 items-center justify-center rounded bg-amber-100 text-[11px] dark:bg-amber-900/40">⚠</span>
-          <span>请先在设置中配置 API Key</span>
+          <span>{isAdmin ? '请先在设置中配置 LLM' : '管理员尚未配置可用的 LLM'}</span>
         </div>
       )}
 
@@ -168,16 +179,16 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
             {attachments.map((attachment) => (
               <div key={attachment.id} className="flex items-center gap-3 rounded-md border border-blue-100 bg-white/80 px-3 py-2 dark:border-blue-900/40 dark:bg-blue-950/20">
                 <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium truncate">{attachment.filename}</p>
+                  <p className="text-xs font-medium truncate">{attachment.fileName}</p>
                   <p className="text-[11px] text-text-secondary mt-0.5">
-                    {attachment.fileType.toUpperCase()} · {formatSize(attachment.fileSize)} · {attachment.charCount} 字符
+                    {attachment.fileType.toUpperCase()} · {formatSize(attachment.fileSize)} · {attachment.charCount ?? 0} 字符
                   </p>
                 </div>
                 <button
                   onClick={() => removeAttachment(attachment.id)}
                   className="win-icon-button h-8 w-8 flex-shrink-0 text-sm"
                   title="移除附件"
-                  aria-label={`移除附件 ${attachment.filename}`}
+                  aria-label={`移除附件 ${attachment.fileName}`}
                 >
                   ✕
                 </button>
@@ -223,12 +234,15 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
             value={input}
             onChange={(e) => {
               setInput(e.target.value);
+              if (feedbackMessage) {
+                setFeedbackMessage('');
+              }
               adjustHeight();
             }}
             onKeyDown={handleKeyDown}
             placeholder={
               disabled
-                ? '请先配置 API Key...'
+                ? (isAdmin ? '请先配置 LLM...' : '等待管理员配置 LLM...')
                 : attachments.length > 0
                   ? '输入提示词，或直接发送让 AI 分析这些附件内容...'
                   : '输入消息，Enter 发送，Shift+Enter 换行'
@@ -253,7 +267,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
             </button>
           ) : (
             <button
-              onClick={handleSend}
+              onClick={() => { void handleSend(); }}
               disabled={!canSend}
               className="win-button-primary h-9 min-w-[72px] flex-shrink-0 px-4 text-sm"
               title="发送"
@@ -266,24 +280,30 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
         <div className="flex items-center justify-between gap-3 border-t border-surface-divider dark:border-dark-divider px-3 py-2.5 flex-wrap">
           <div className="flex items-center gap-2 min-w-0 flex-1">
             <span className="text-xs text-text-secondary whitespace-nowrap">当前模型</span>
-            <select
-              value={activeLLMConfig?.id ?? ''}
-              onChange={(e) => setActiveLLMConfig(e.target.value)}
-              className="win-select min-w-[220px] max-w-full !py-1.5 text-xs"
-            >
-              {llmConfigs.map((config) => (
-                <option key={config.id} value={config.id}>
-                  {config.name} · {config.model}
-                </option>
-              ))}
-            </select>
+            {isAdmin ? (
+              <select
+                value={activeLLMConfig?.id ?? ''}
+                onChange={(e) => { void handleModelChange(e.target.value); }}
+                className="win-select min-w-[220px] max-w-full !py-1.5 text-xs"
+              >
+                {llmConfigs.map((config) => (
+                  <option key={config.id} value={config.id}>
+                    {config.name} · {config.model}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div className="min-w-[220px] max-w-full rounded-md border border-surface-divider bg-surface px-3 py-1.5 text-xs text-text-secondary shadow-sm dark:border-dark-divider dark:bg-dark-card">
+                {activeLLMConfig ? `${activeLLMConfig.name} · ${activeLLMConfig.model}` : '未配置'}
+              </div>
+            )}
           </div>
 
           <button
             onClick={toggleSettings}
             className="win-button-subtle px-2 py-1 text-xs"
           >
-            管理模型配置
+            {isAdmin ? '管理模型配置' : '设置'}
           </button>
         </div>
       </div>

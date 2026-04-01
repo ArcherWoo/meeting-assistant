@@ -141,6 +141,28 @@
     @apply my-3 rounded-lg border border-surface-divider dark:border-dark-divider;
   }
 
+  .markdown-body strong {
+    @apply font-semibold text-slate-900 dark:text-slate-50;
+  }
+
+  .markdown-body .markdown-emphasis {
+    font-style: italic;
+    font-synthesis: style;
+  }
+
+  .markdown-body strong .markdown-emphasis,
+  .markdown-body .markdown-emphasis strong {
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 0.18em;
+  }
+
+  .markdown-body .markdown-soft-break {
+    display: block;
+    content: '';
+    margin-top: 0.2rem;
+  }
+
   .markdown-body .markdown-table-shell {
     scrollbar-width: thin;
     scrollbar-color: rgba(125, 132, 145, 0.45) transparent;

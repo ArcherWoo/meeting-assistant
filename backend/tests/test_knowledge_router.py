@@ -20,6 +20,9 @@ def make_upload(filename: str, content: bytes) -> UploadFile:
 
 
 class KnowledgeRouterTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.user = {"id": "tester", "system_role": "admin", "group_id": None}
+
     async def test_extract_text_single_file_keeps_legacy_response_shape(self):
         upload = make_upload("note.txt", b"meeting notes")
 
@@ -79,7 +82,7 @@ class KnowledgeRouterTests(unittest.IsolatedAsyncioTestCase):
                     "char_count": 13,
                 }),
             ) as ingest_mock:
-                result = await knowledge_router.ingest_file(file=None, files=uploads)
+                result = await knowledge_router.ingest_file(file=None, files=uploads, user=self.user)
 
         self.assertEqual(result["total"], 2)
         self.assertEqual(result["success_count"], 1)
@@ -93,7 +96,7 @@ class KnowledgeRouterTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(knowledge_router.storage, "get_setting", AsyncMock(return_value="")) as get_setting_mock:
             with self.assertRaises(HTTPException) as context:
-                await knowledge_router.ingest_file(file=upload, files=None)
+                await knowledge_router.ingest_file(file=upload, files=None, user=self.user)
 
         self.assertEqual(context.exception.status_code, 400)
         self.assertIn(".exe", context.exception.detail)

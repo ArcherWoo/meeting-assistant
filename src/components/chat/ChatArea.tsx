@@ -7,7 +7,7 @@ import { useState, useRef, useEffect, useCallback, useMemo, type ChangeEvent } f
 import { useAppStore } from '@/stores/appStore';
 import { useChatStore, DEFAULT_CONVERSATION_TITLE } from '@/stores/chatStore';
 import { streamChat, extractFilesText, generateAutoTitle } from '@/services/api';
-import { type Message, type SkillSuggestionEvent } from '@/types';
+import { type Attachment, type LLMConfig, type Message, type SkillSuggestionEvent } from '@/types';
 import MessageBubble from './MessageBubble';
 import ChatInput from './ChatInput';
 import AgentExecutionPanel from '../agent/AgentExecutionPanel';
@@ -15,6 +15,33 @@ import AgentExecutionPanel from '../agent/AgentExecutionPanel';
 interface AgentExecutionRequest {
   query: string;
   conversationId: string;
+}
+
+const STOPPED_MESSAGE_FALLBACK = '（已停止生成）';
+const ERROR_MESSAGE_FALLBACK = '本次生成失败，请重试。';
+
+function buildAttachmentContext(attachments?: Attachment[]): string {
+  if (!attachments?.length) return '';
+  return attachments.map((attachment, index) => (
+    `\n\n---\n📎 附件${attachments.length > 1 ? ` #${index + 1}` : ''}「${attachment.fileName}」内容（${attachment.charCount ?? 0} 字符）：\n\n${attachment.text ?? ''}`
+  )).join('');
+}
+
+function buildHistoryMessage(message: Pick<Message, 'role' | 'content' | 'attachments'>): { role: string; content: string } {
+  if (message.role !== 'user') {
+    return { role: message.role, content: message.content };
+  }
+  const attachmentContext = buildAttachmentContext(message.attachments);
+  return {
+    role: message.role,
+    content: attachmentContext ? `${message.content}${attachmentContext}` : message.content,
+  };
+}
+
+function buildHistoryMessages(messages: Message[]): Array<{ role: string; content: string }> {
+  return messages
+    .filter((message) => !(message.role === 'assistant' && message.metadata?.generationState === 'error' && message.content.trim() === ERROR_MESSAGE_FALLBACK))
+    .map(buildHistoryMessage);
 }
 
 export default function ChatArea() {
@@ -46,9 +73,11 @@ export default function ChatArea() {
   const flushTimerRef = useRef<Record<string, number>>({});
   const welcomeFileRef = useRef<HTMLInputElement>(null);
   const activeLLMConfig = llmConfigs.find((config) => config.id === activeLLMConfigId) ?? llmConfigs[0];
+  const hasUsableLLMConfig = Boolean(activeLLMConfig && (activeLLMConfig.hasApiKey ?? activeLLMConfig.apiKey));
   /** Agent 模式：当前正在执行的查询 */
   const [agentExecution, setAgentExecution] = useState<AgentExecutionRequest | null>(null);
   const [welcomeUploading, setWelcomeUploading] = useState(false);
+  const [welcomeFeedbackMessage, setWelcomeFeedbackMessage] = useState('');
   /** 预填充到输入框的文本 */
   const [prefillText, setPrefillText] = useState('');
   const clearPrefill = useCallback(() => setPrefillText(''), []);
@@ -155,8 +184,165 @@ export default function ChatArea() {
     ).catch(() => {});
   }, [updateMessageMetadata]);
 
+  const finalizeAutoTitle = useCallback((conversationId: string, llmConfig: LLMConfig) => {
+    window.setTimeout(() => {
+      const state = useChatStore.getState();
+      const conv = state.conversations.find((item) => item.id === conversationId);
+      const convMessages = state.messagesByConversation[conversationId] ?? [];
+      const assistantCount = convMessages.filter((item) => item.role === 'assistant').length;
+
+      if (
+        conv
+        && !conv.isTitleCustomized
+        && conv.title === DEFAULT_CONVERSATION_TITLE
+        && assistantCount >= 3
+      ) {
+        generateAutoTitle(
+          convMessages.map((item) => ({ role: item.role, content: item.content })),
+          llmConfig,
+        )
+          .then((title) => {
+            if (title && title !== DEFAULT_CONVERSATION_TITLE) {
+              void useChatStore.getState().renameConversation(conversationId, title, false).catch(() => {});
+            }
+          })
+          .catch(() => {});
+      }
+    }, 100);
+  }, []);
+
+  const startAssistantStream = useCallback((params: {
+    conversationId: string;
+    assistantMessageId: string;
+    history: Array<{ role: string; content: string }>;
+    llmConfig: LLMConfig;
+    ragQuery: string;
+    roleId: string;
+  }) => {
+    const {
+      conversationId,
+      assistantMessageId,
+      history,
+      llmConfig,
+      ragQuery,
+      roleId,
+    } = params;
+
+    setStreaming(true, conversationId);
+    clearPendingStreamState(conversationId);
+    pendingStreamContentRef.current[conversationId] = '';
+    pendingAssistantMessageIdRef.current[conversationId] = assistantMessageId;
+
+    void updateMessage(assistantMessageId, '', conversationId, { persist: false }).catch(() => {});
+    void updateMessageMetadata(
+      assistantMessageId,
+      {
+        context: undefined,
+        skillSuggestion: undefined,
+        generationState: undefined,
+        generationError: undefined,
+      },
+      conversationId,
+      { persist: false },
+    ).catch(() => {});
+
+    const controller = new AbortController();
+    abortMapRef.current[conversationId] = controller;
+
+    let fullContent = '';
+
+    const handleStreamError = (error: string) => {
+      setStreaming(false, conversationId);
+      flushPendingStreamUpdate(conversationId);
+      clearPendingStreamState(conversationId);
+      delete abortMapRef.current[conversationId];
+      const nextContent = fullContent.trim() ? fullContent : ERROR_MESSAGE_FALLBACK;
+      void updateMessage(assistantMessageId, nextContent, conversationId).catch(() => {});
+      void updateMessageMetadata(
+        assistantMessageId,
+        {
+          generationState: 'error',
+          generationError: error,
+        },
+        conversationId,
+      ).catch(() => {});
+    };
+
+    void streamChat(
+      history,
+      llmConfig,
+      (chunk) => {
+        fullContent += chunk;
+        pendingStreamContentRef.current[conversationId] = fullContent;
+        schedulePendingStreamUpdate(conversationId, assistantMessageId);
+      },
+      () => {
+        setStreaming(false, conversationId);
+        delete abortMapRef.current[conversationId];
+        clearPendingStreamState(conversationId);
+        void updateMessage(assistantMessageId, fullContent, conversationId).catch(() => {});
+        void updateMessageMetadata(
+          assistantMessageId,
+          {
+            generationState: undefined,
+            generationError: undefined,
+          },
+          conversationId,
+        ).catch(() => {});
+        finalizeAutoTitle(conversationId, llmConfig);
+      },
+      handleStreamError,
+      controller.signal,
+      roleId,
+      ragQuery,
+      (metadata) => {
+        void updateMessageMetadata(assistantMessageId, { context: metadata }, conversationId).catch(() => {});
+      },
+      (suggestion) => {
+        void updateMessageMetadata(assistantMessageId, { skillSuggestion: suggestion }, conversationId).catch(() => {});
+      },
+    ).catch((error: unknown) => {
+      handleStreamError((error as Error).message || '网络错误');
+    });
+  }, [
+    clearPendingStreamState,
+    finalizeAutoTitle,
+    flushPendingStreamUpdate,
+    schedulePendingStreamUpdate,
+    setStreaming,
+    updateMessage,
+    updateMessageMetadata,
+  ]);
+
+  const handleRetryGeneration = useCallback((message: Message) => {
+    if (!activeLLMConfig) {
+      return;
+    }
+
+    const convMessages = messagesByConversation[message.conversationId] ?? [];
+    const assistantIndex = convMessages.findIndex((item) => item.id === message.id);
+    if (assistantIndex < 0 || assistantIndex !== convMessages.length - 1) {
+      return;
+    }
+
+    const historyBeforeAssistant = convMessages.slice(0, assistantIndex);
+    const lastUserMessage = [...historyBeforeAssistant].reverse().find((item) => item.role === 'user');
+    if (!lastUserMessage) {
+      return;
+    }
+
+    startAssistantStream({
+      conversationId: message.conversationId,
+      assistantMessageId: message.id,
+      history: buildHistoryMessages(historyBeforeAssistant),
+      llmConfig: activeLLMConfig,
+      ragQuery: lastUserMessage.content,
+      roleId: currentRoleId,
+    });
+  }, [activeLLMConfig, currentRoleId, messagesByConversation, startAssistantStream]);
+
   /** 发送消息（支持附件上下文） */
-  const handleSend = async (content: string, attachmentContext?: string) => {
+  const handleSend = async (content: string, attachments?: Attachment[]) => {
     // Agent 模式：触发 Skill 匹配 → 执行工作流
     if (activeSurface === 'agent') {
       let convId = visibleConversationId;
@@ -176,96 +362,49 @@ export default function ChatArea() {
 
     const targetConvId = convId;
     const historyMessages = messagesByConversation[targetConvId] ?? [];
+    const messageAttachments = attachments && attachments.length > 0 ? attachments : undefined;
 
-    // 用户消息只显示用户输入的文字（不含附件原文）
-    await addMessage({ conversationId: targetConvId, role: 'user', content });
+    if (!activeLLMConfig) {
+      throw new Error('请选择可用模型配置');
+    }
 
-    if (!activeLLMConfig) return;
-
-    // 发给 LLM 的内容 = 用户消息 + 附件文本上下文
-    const llmContent = attachmentContext ? content + attachmentContext : content;
+    await addMessage({
+      conversationId: targetConvId,
+      role: 'user',
+      content,
+      attachments: messageAttachments,
+    });
 
     const history = [
-      ...historyMessages.map((m) => ({ role: m.role, content: m.content })),
-      { role: 'user', content: llmContent },
+      ...buildHistoryMessages(historyMessages),
+      buildHistoryMessage({ role: 'user', content, attachments: messageAttachments }),
     ];
-
-    // 使用当前 convId 隔离流式状态，避免阻塞其他对话
-    setStreaming(true, targetConvId);
-
-    // 每个对话独立创建 AbortController，存入 Map，互不干扰
-    const controller = new AbortController();
-    abortMapRef.current[targetConvId] = controller;
-
     const assistantMsgId = await addMessage({
       conversationId: targetConvId,
       role: 'assistant',
       content: '',
     });
 
-    let fullContent = '';
-
-    await streamChat(
+    startAssistantStream({
+      conversationId: targetConvId,
+      assistantMessageId: assistantMsgId,
       history,
-      activeLLMConfig,
-      (chunk) => {
-        fullContent += chunk;
-        pendingStreamContentRef.current[targetConvId] = fullContent;
-        schedulePendingStreamUpdate(targetConvId, assistantMsgId);
-      },
-      () => {
-        setStreaming(false, targetConvId);
-        delete abortMapRef.current[targetConvId];
-        clearPendingStreamState(targetConvId);
-        void updateMessage(assistantMsgId, fullContent, targetConvId).catch(() => {});
-
-        // 自动命名：第 3 条 assistant 消息完成后（或之后），且用户未手动命名
-        // 使用 setTimeout 确保 store 状态已完全同步
-        if (activeLLMConfig) {
-          setTimeout(() => {
-            const state = useChatStore.getState();
-            const conv = state.conversations.find((c) => c.id === targetConvId);
-            const convMessages = state.messagesByConversation[targetConvId] ?? [];
-            const assistantCount = convMessages.filter((m) => m.role === 'assistant').length;
-
-            // 条件：未手动命名 + 标题仍为默认 + 至少完成 3 轮
-            if (
-              conv &&
-              !conv.isTitleCustomized &&
-              conv.title === DEFAULT_CONVERSATION_TITLE &&
-              assistantCount >= 3
-            ) {
-              generateAutoTitle(
-                convMessages.map((m) => ({ role: m.role, content: m.content })),
-                activeLLMConfig
-              )
-                .then((title) => {
-                  if (title && title !== DEFAULT_CONVERSATION_TITLE) {
-                    void useChatStore.getState().renameConversation(targetConvId, title, false).catch(() => {});
-                  }
-                })
-                .catch(() => {});
-            }
-          }, 100);
-        }
-      },
-      (error) => {
-        setStreaming(false, targetConvId);
-        clearPendingStreamState(targetConvId);
-        void updateMessage(assistantMsgId, `⚠️ 错误: ${error}`, targetConvId).catch(() => {});
-        delete abortMapRef.current[targetConvId];
-      },
-      controller.signal,
-      currentRoleId,
-      content,
-      (metadata) => {
-        void updateMessageMetadata(assistantMsgId, { context: metadata }, targetConvId).catch(() => {});
-      },
-      (suggestion) => {
-        void updateMessageMetadata(assistantMsgId, { skillSuggestion: suggestion }, targetConvId).catch(() => {});
-      },
-    );
+      llmConfig: activeLLMConfig,
+      ragQuery: content,
+      roleId: currentRoleId,
+    });
   };
+
+  /** 欢迎屏文件上传：提取文本后直接发送 */
+  const handleWelcomeQuickMessage = useCallback(async (message: string) => {
+    setWelcomeFeedbackMessage('');
+    try {
+      await handleSend(message);
+    } catch (error: unknown) {
+      setWelcomeFeedbackMessage((error as Error).message || '发送失败');
+      throw error;
+    }
+  }, [handleSend]);
 
   /** 欢迎屏文件上传：提取文本后直接发送 */
   const handleWelcomeFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -273,27 +412,33 @@ export default function ChatArea() {
     if (files.length === 0) return;
     e.target.value = '';
     setWelcomeUploading(true);
+    setWelcomeFeedbackMessage('');
     try {
       const extracted = await extractFilesText(files);
       const successfulResults = extracted.files;
       const failedMessages = extracted.errors.map((item) => `${item.filename}: ${item.error}`);
 
       if (failedMessages.length > 0) {
-        alert(`以下文件文本提取失败：\n${failedMessages.join('\n')}`);
+        setWelcomeFeedbackMessage(`以下文件文本提取失败：${failedMessages.join('；')}`);
       }
       if (successfulResults.length === 0) {
         return;
       }
 
-      const attachmentContext = successfulResults.map((result, index) => (
-        `\n\n---\n📎 附件${successfulResults.length > 1 ? ` #${index + 1}` : ''}「${result.filename}」内容（${result.char_count} 字符）：\n\n${result.text}`
-      )).join('');
+      const attachments: Attachment[] = successfulResults.map((result, index) => ({
+        id: globalThis.crypto?.randomUUID?.() ?? `${result.filename}-${index}-${Date.now()}-${Math.random()}`,
+        fileName: result.filename,
+        fileType: result.file_type,
+        fileSize: 0,
+        text: result.text,
+        charCount: result.char_count,
+      }));
       await handleSend(
         successfulResults.length > 1 ? '请综合分析这些文件的内容' : '请分析这份文件的内容',
-        attachmentContext,
+        attachments,
       );
     } catch (err: any) {
-      alert(`文件文本提取失败：${err.message || '未知错误'}`);
+      setWelcomeFeedbackMessage(`文件文本提取失败：${err.message || '未知错误'}`);
     } finally {
       setWelcomeUploading(false);
     }
@@ -302,11 +447,25 @@ export default function ChatArea() {
   /** 停止生成（仅中止当前活跃对话的流，不影响其他对话） */
   const handleStop = () => {
     if (visibleConversationId) {
+      const assistantMessageId = pendingAssistantMessageIdRef.current[visibleConversationId] ?? streamingMessageId;
+      const partialContent = pendingStreamContentRef.current[visibleConversationId] ?? '';
       flushPendingStreamUpdate(visibleConversationId);
       abortMapRef.current[visibleConversationId]?.abort();
       delete abortMapRef.current[visibleConversationId];
       setStreaming(false, visibleConversationId);
       clearPendingStreamState(visibleConversationId);
+      if (assistantMessageId) {
+        const nextContent = partialContent.trim() ? partialContent : STOPPED_MESSAGE_FALLBACK;
+        void updateMessage(assistantMessageId, nextContent, visibleConversationId).catch(() => {});
+        void updateMessageMetadata(
+          assistantMessageId,
+          {
+            generationState: 'stopped',
+            generationError: undefined,
+          },
+          visibleConversationId,
+        ).catch(() => {});
+      }
     }
   };
 
@@ -362,20 +521,28 @@ export default function ChatArea() {
               <WelcomeScreen
                 mode={currentRoleId}
                 surface={activeSurface}
-                onQuickMessage={handleSend}
+                onQuickMessage={handleWelcomeQuickMessage}
                 onUploadFile={() => welcomeFileRef.current?.click()}
                 uploading={welcomeUploading}
+                feedbackMessage={welcomeFeedbackMessage}
               />
             </>
           ) : (
             <>
-              {visibleMessages.map((msg) => (
+              {visibleMessages.map((msg, index) => (
                 <MessageBubble
                   key={msg.id}
                   message={msg}
                   isStreaming={msg.id === streamingMessageId}
                   onApplySkillSuggestion={handleApplySkillSuggestion}
                   onDismissSkillSuggestion={handleDismissSkillSuggestion}
+                  onRetryGeneration={handleRetryGeneration}
+                  canRetryGeneration={
+                    !visibleIsStreaming
+                    && index === visibleMessages.length - 1
+                    && msg.role === 'assistant'
+                    && Boolean(msg.metadata?.generationState)
+                  }
                 />
               ))}
               {/* Agent 模式执行面板 */}
@@ -406,7 +573,7 @@ export default function ChatArea() {
         onSend={handleSend}
         onStop={handleStop}
         isStreaming={visibleIsStreaming}
-        disabled={!activeLLMConfig?.apiKey}
+        disabled={!hasUsableLLMConfig}
         prefillText={prefillText}
         onPrefillConsumed={clearPrefill}
       />
@@ -415,18 +582,24 @@ export default function ChatArea() {
 }
 
 /** 欢迎屏幕 - 无对话时显示 */
-function WelcomeScreen({ mode, surface, onQuickMessage, onUploadFile, uploading }: {
+function WelcomeScreen({ mode, surface, onQuickMessage, onUploadFile, uploading, feedbackMessage }: {
   mode: string;
   surface: 'chat' | 'agent';
-  onQuickMessage: (msg: string) => Promise<void> | void;
+  onQuickMessage: (msg: string, attachments?: Attachment[]) => Promise<void> | void;
   onUploadFile: () => void;
   uploading: boolean;
+  feedbackMessage: string;
 }) {
   return (
     <div className="flex flex-1 items-center justify-center py-8 animate-fade-in">
       <div className="win-panel w-full max-w-2xl px-8 py-9 text-center">
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl border border-surface-divider dark:border-dark-divider bg-white dark:bg-dark-sidebar text-3xl shadow-sm">🍒</div>
         <h2 className="text-[22px] font-semibold mb-2">Ask Me Anything</h2>
+        {feedbackMessage && (
+          <div className="mx-auto mb-4 max-w-xl rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-left text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
+            {feedbackMessage}
+          </div>
+        )}
         <p className="text-text-secondary text-sm max-w-xl mx-auto leading-6">
           {surface === 'agent' && '选择一个任务并输入目标，我会以当前 Agent 角色执行完整流程。'}
           {surface === 'chat' && mode === 'copilot' && '你好！我是你的AI小助手。使用下方 📎 按钮添加附件，或直接提问。'}

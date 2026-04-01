@@ -16,6 +16,7 @@ DELETE /api/auth/grants/{id} - 删除访问授权（仅管理员）
 import logging
 from typing import Optional
 
+import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -56,6 +57,24 @@ async def require_admin(user: dict = Depends(get_current_user)) -> dict:
     return user
 
 
+def _is_default_admin(user: Optional[dict]) -> bool:
+    return bool(user) and user.get("username") == "admin"
+
+
+def _normalize_system_role(system_role: str) -> str:
+    normalized = str(system_role or "").strip().lower()
+    if normalized not in {"admin", "user"}:
+        raise HTTPException(status_code=400, detail="system_role 仅支持 admin 或 user")
+    return normalized
+
+
+async def _normalize_group_id(group_id: Optional[str]) -> Optional[str]:
+    normalized = str(group_id or "").strip() or None
+    if normalized and not await storage.get_group_by_id(normalized):
+        raise HTTPException(status_code=400, detail="指定的用户组不存在")
+    return normalized
+
+
 # ===== 请求模型 =====
 
 class LoginRequest(BaseModel):
@@ -79,6 +98,10 @@ class UpdateUserRequest(BaseModel):
 class CreateGroupRequest(BaseModel):
     name: str
     description: str = ""
+
+class UpdateGroupRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
 
 class SetGrantRequest(BaseModel):
     resource_type: str
@@ -113,9 +136,10 @@ async def register(req: RegisterRequest, _admin: dict = Depends(require_admin)):
     existing = await storage.get_user_by_username(req.username)
     if existing:
         raise HTTPException(status_code=409, detail="用户名已存在")
+    group_id = await _normalize_group_id(req.group_id)
     user = await storage.create_user(
         req.username, req.display_name, hash_password(req.password),
-        system_role=req.system_role, group_id=req.group_id,
+        system_role=_normalize_system_role(req.system_role), group_id=group_id,
     )
     return {k: user[k] for k in ("id", "username", "display_name", "system_role", "group_id")}
 
@@ -127,9 +151,18 @@ async def list_users(_admin: dict = Depends(require_admin)):
 
 @router.put("/auth/users/{user_id}")
 async def update_user(user_id: str, req: UpdateUserRequest, _admin: dict = Depends(require_admin)):
+    existing_user = await storage.get_user_by_id(user_id)
+    if not existing_user:
+        raise HTTPException(status_code=404, detail="用户不存在")
     updates = req.model_dump(exclude_none=True)
     if "password" in updates:
         updates["password_hash"] = hash_password(updates.pop("password"))
+    if "system_role" in updates:
+        updates["system_role"] = _normalize_system_role(str(updates["system_role"]))
+        if _is_default_admin(existing_user) and updates["system_role"] != "admin":
+            raise HTTPException(status_code=400, detail="默认 admin 账号不能降级")
+    if "group_id" in updates:
+        updates["group_id"] = await _normalize_group_id(updates.get("group_id"))
     user = await storage.update_user(user_id, **updates)
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
@@ -138,6 +171,11 @@ async def update_user(user_id: str, req: UpdateUserRequest, _admin: dict = Depen
 
 @router.delete("/auth/users/{user_id}")
 async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
+    target_user = await storage.get_user_by_id(user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if _is_default_admin(target_user):
+        raise HTTPException(status_code=400, detail="默认 admin 账号不能删除")
     if user_id == admin["id"]:
         raise HTTPException(status_code=400, detail="不能删除自己")
     if not await storage.delete_user(user_id):
@@ -153,7 +191,30 @@ async def list_groups(_user: dict = Depends(get_current_user)):
 
 @router.post("/auth/groups", status_code=201)
 async def create_group(req: CreateGroupRequest, _admin: dict = Depends(require_admin)):
-    return await storage.create_group(req.name, req.description)
+    name = str(req.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="用户组名称不能为空")
+    try:
+        return await storage.create_group(name, str(req.description or "").strip())
+    except aiosqlite.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="用户组名称已存在") from exc
+
+@router.put("/auth/groups/{group_id}")
+async def update_group(group_id: str, req: UpdateGroupRequest, _admin: dict = Depends(require_admin)):
+    updates = req.model_dump(exclude_none=True)
+    if "name" in updates:
+        updates["name"] = str(updates["name"] or "").strip()
+        if not updates["name"]:
+            raise HTTPException(status_code=400, detail="用户组名称不能为空")
+    if "description" in updates:
+        updates["description"] = str(updates["description"] or "").strip()
+    try:
+        group = await storage.update_group(group_id, **updates)
+    except aiosqlite.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="用户组名称已存在") from exc
+    if not group:
+        raise HTTPException(status_code=404, detail="用户组不存在")
+    return group
 
 @router.delete("/auth/groups/{group_id}")
 async def delete_group(group_id: str, _admin: dict = Depends(require_admin)):
@@ -170,11 +231,13 @@ async def list_grants(resource_type: Optional[str] = None, resource_id: Optional
 
 @router.post("/auth/grants", status_code=201)
 async def set_grant(req: SetGrantRequest, _admin: dict = Depends(require_admin)):
-    return await storage.set_access_grant(req.resource_type, req.resource_id, req.grant_type, req.grantee_id)
+    try:
+        return await storage.set_access_grant(req.resource_type, req.resource_id, req.grant_type, req.grantee_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 @router.delete("/auth/grants/{grant_id}")
 async def remove_grant(grant_id: str, _admin: dict = Depends(require_admin)):
     if not await storage.remove_access_grant(grant_id):
         raise HTTPException(status_code=404, detail="授权记录不存在")
     return {"ok": True}
-

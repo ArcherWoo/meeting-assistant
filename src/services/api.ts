@@ -4,7 +4,7 @@
  * 支持流式 SSE 和普通 REST 请求
  */
 import type {
-  Role, LLMConfig, LLMConnectionTestResult, PPTParseResult,
+  Role, LLMConfig, LLMConnectionTestResult, LLMProfile, PPTParseResult,
   SkillMeta, SkillMatch,
   KnowhowRule, KnowhowExportData, KnowhowImportResult, KnowhowImportStrategy, KnowledgeStats, IngestResult,
   AgentMatchResult, AgentExecutionEvent, AgentRunCancelResponse, AgentRunRecord,
@@ -125,7 +125,7 @@ export async function deleteConversationRecord(conversationId: string): Promise<
 
 export async function createMessageRecord(
   conversationId: string,
-  payload: Pick<Message, 'role' | 'content'> & Partial<Pick<Message, 'model' | 'tokenInput' | 'tokenOutput' | 'durationMs' | 'metadata'>>
+  payload: Pick<Message, 'role' | 'content'> & Partial<Pick<Message, 'model' | 'tokenInput' | 'tokenOutput' | 'durationMs' | 'metadata' | 'attachments'>>
 ): Promise<Message> {
   const res = await authFetch(`${getBaseUrl()}/conversations/${encodeURIComponent(conversationId)}/messages`, {
     method: 'POST',
@@ -138,6 +138,7 @@ export async function createMessageRecord(
       token_output: payload.tokenOutput ?? 0,
       duration_ms: payload.durationMs ?? 0,
       metadata: payload.metadata ?? {},
+      attachments: payload.attachments ?? [],
     }),
   });
   if (!res.ok) {
@@ -150,7 +151,7 @@ export async function createMessageRecord(
 
 export async function updateMessageRecord(
   messageId: string,
-  payload: Partial<Pick<Message, 'content' | 'model' | 'tokenInput' | 'tokenOutput' | 'durationMs' | 'metadata'>>
+  payload: Partial<Pick<Message, 'content' | 'model' | 'tokenInput' | 'tokenOutput' | 'durationMs' | 'metadata' | 'attachments'>>
 ): Promise<Message> {
   const res = await authFetch(`${getBaseUrl()}/messages/${encodeURIComponent(messageId)}`, {
     method: 'PUT',
@@ -162,6 +163,7 @@ export async function updateMessageRecord(
       ...(payload.tokenOutput !== undefined ? { token_output: payload.tokenOutput } : {}),
       ...(payload.durationMs !== undefined ? { duration_ms: payload.durationMs } : {}),
       ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
+      ...(payload.attachments !== undefined ? { attachments: payload.attachments } : {}),
     }),
   });
   if (!res.ok) {
@@ -277,6 +279,7 @@ export async function streamChat(
         stream: true,
         api_url: config.apiUrl,
         api_key: config.apiKey,
+        llm_profile_id: (config as Partial<LLMProfile>).id ?? '',
         role_id: roleId ?? '',
         rag_query: ragQuery ?? '',
       }),
@@ -345,6 +348,93 @@ export async function testLLMConnection(
     throw new Error(data.detail || data.message || '连接测试失败');
   }
   return data;
+}
+
+export async function listLLMProfiles(): Promise<{ profiles: LLMProfile[]; activeProfileId: string }> {
+  const res = await authFetch(`${getBaseUrl()}/settings/llm-profiles`);
+  if (!res.ok) throw new Error('获取模型配置失败');
+  const data = await res.json();
+  const profiles = Array.isArray(data.profiles) ? data.profiles.map((profile: any) => ({
+    id: profile.id,
+    name: profile.name,
+    apiUrl: profile.api_url ?? '',
+    apiKey: profile.api_key ?? '',
+    hasApiKey: profile.has_api_key ?? Boolean(profile.api_key),
+    model: profile.model ?? 'gpt-4o',
+    temperature: profile.temperature ?? 0.7,
+    maxTokens: profile.max_tokens ?? 4096,
+    stream: profile.stream ?? true,
+    availableModels: Array.isArray(profile.available_models) ? profile.available_models : [],
+  })) : [];
+  return {
+    profiles,
+    activeProfileId: data.active_profile_id ?? '',
+  };
+}
+
+export async function createLLMProfile(profile: LLMProfile): Promise<void> {
+  const res = await authFetch(`${getBaseUrl()}/settings/llm-profiles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: profile.id,
+      name: profile.name,
+      api_url: profile.apiUrl,
+      api_key: profile.apiKey,
+      model: profile.model,
+      temperature: profile.temperature,
+      max_tokens: profile.maxTokens,
+      stream: profile.stream,
+      available_models: profile.availableModels ?? [],
+    }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '创建模型配置失败' }));
+    throw new Error(error.detail || '创建模型配置失败');
+  }
+}
+
+export async function updateLLMProfile(profile: LLMProfile): Promise<void> {
+  const res = await authFetch(`${getBaseUrl()}/settings/llm-profiles/${encodeURIComponent(profile.id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: profile.name,
+      api_url: profile.apiUrl,
+      api_key: profile.apiKey,
+      model: profile.model,
+      temperature: profile.temperature,
+      max_tokens: profile.maxTokens,
+      stream: profile.stream,
+      available_models: profile.availableModels ?? [],
+    }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '更新模型配置失败' }));
+    throw new Error(error.detail || '更新模型配置失败');
+  }
+}
+
+export async function deleteLLMProfile(profileId: string): Promise<void> {
+  const res = await authFetch(`${getBaseUrl()}/settings/llm-profiles/${encodeURIComponent(profileId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '删除模型配置失败' }));
+    throw new Error(error.detail || '删除模型配置失败');
+  }
+}
+
+export async function setActiveLLMProfile(profileId: string): Promise<void> {
+  const res = await authFetch(`${getBaseUrl()}/settings/llm-profiles-active`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: profileId }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '切换默认模型失败' }));
+    throw new Error(error.detail || '切换默认模型失败');
+  }
 }
 
 // ===== PPT 解析 =====
@@ -903,6 +993,7 @@ export async function generateAutoTitle(
       messages: messages.slice(0, 6),
       api_url: config.apiUrl,
       api_key: config.apiKey,
+      llm_profile_id: (config as Partial<LLMProfile>).id ?? '',
       model: config.model,
     }),
   });
@@ -1117,6 +1208,22 @@ export async function createGroup(name: string, description = ''): Promise<Group
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || '创建用户组失败');
+  }
+  return res.json();
+}
+
+export async function updateGroup(
+  groupId: string,
+  data: Partial<Pick<Group, 'name' | 'description'>>
+): Promise<Group> {
+  const res = await authFetch(`${getBaseUrl()}/auth/groups/${encodeURIComponent(groupId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || '更新用户组失败');
   }
   return res.json();
 }

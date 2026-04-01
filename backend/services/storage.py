@@ -270,7 +270,19 @@ CREATE TABLE IF NOT EXISTS access_grants (
 );
 CREATE INDEX IF NOT EXISTS idx_access_grants_resource ON access_grants(resource_type, resource_id);
 CREATE INDEX IF NOT EXISTS idx_access_grants_grantee ON access_grants(grant_type, grantee_id);
+
+-- Skill 元数据表（用于记录自定义 Skill 所有者）
+CREATE TABLE IF NOT EXISTS skill_metadata (
+    skill_id    TEXT PRIMARY KEY,
+    owner_id    TEXT,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_skill_metadata_owner ON skill_metadata(owner_id);
 """
+
+_VALID_RESOURCE_TYPES = {"role", "skill", "knowledge", "knowhow"}
+_VALID_GRANT_TYPES = {"public", "user", "group"}
 
 
 def gen_id() -> str:
@@ -520,6 +532,20 @@ class StorageService:
     async def list_groups(self) -> list[dict]:
         return await self._fetchall("SELECT * FROM groups ORDER BY created_at ASC")
 
+    async def get_group_by_id(self, group_id: str) -> Optional[dict]:
+        return await self._fetchone("SELECT * FROM groups WHERE id=?", (group_id,))
+
+    async def update_group(self, group_id: str, **kwargs) -> Optional[dict]:
+        allowed = {"name", "description"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if not fields:
+            return await self.get_group_by_id(group_id)
+        fields["updated_at"] = utc_now_iso()
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        await self.db.execute(f"UPDATE groups SET {set_clause} WHERE id=?", (*fields.values(), group_id))
+        await self.db.commit()
+        return await self.get_group_by_id(group_id)
+
     async def delete_group(self, group_id: str) -> bool:
         row = await self._fetchone("SELECT id FROM groups WHERE id=?", (group_id,))
         if not row:
@@ -534,6 +560,12 @@ class StorageService:
         self, resource_type: str, resource_id: str, grant_type: str, grantee_id: Optional[str] = None,
     ) -> dict:
         """Set an access grant. grant_type: 'public', 'group', 'user'."""
+        resource_type, resource_id, grant_type, grantee_id = await self.validate_access_grant(
+            resource_type,
+            resource_id,
+            grant_type,
+            grantee_id,
+        )
         # Remove existing grant of same type for this resource+grantee
         await self.db.execute(
             "DELETE FROM access_grants WHERE resource_type=? AND resource_id=? AND grant_type=? AND (grantee_id=? OR grantee_id IS NULL)",
@@ -568,6 +600,54 @@ class StorageService:
             params.append(resource_id)
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         return await self._fetchall(f"SELECT * FROM access_grants{where} ORDER BY created_at ASC", params)
+
+    async def validate_access_grant(
+        self,
+        resource_type: str,
+        resource_id: str,
+        grant_type: str,
+        grantee_id: Optional[str] = None,
+    ) -> tuple[str, str, str, Optional[str]]:
+        resource_type = str(resource_type or "").strip().lower()
+        resource_id = str(resource_id or "").strip()
+        grant_type = str(grant_type or "").strip().lower()
+        grantee_id = self._normalize_optional_id(grantee_id)
+
+        if resource_type not in _VALID_RESOURCE_TYPES:
+            raise ValueError("不支持的 resource_type")
+        if not resource_id:
+            raise ValueError("resource_id 不能为空")
+        if grant_type not in _VALID_GRANT_TYPES:
+            raise ValueError("不支持的 grant_type")
+
+        if grant_type == "public":
+            grantee_id = None
+        elif not grantee_id:
+            raise ValueError("当前 grant_type 需要有效的 grantee_id")
+
+        if grant_type == "user" and grantee_id and not await self.get_user_by_id(grantee_id):
+            raise ValueError("被授权用户不存在")
+        if grant_type == "group" and grantee_id and not await self.get_group_by_id(grantee_id):
+            raise ValueError("被授权用户组不存在")
+        if not await self._resource_exists(resource_type, resource_id):
+            raise ValueError("目标资源不存在")
+
+        return resource_type, resource_id, grant_type, grantee_id
+
+    async def _resource_exists(self, resource_type: str, resource_id: str) -> bool:
+        if resource_type == "role":
+            return await self.get_role(resource_id) is not None
+        if resource_type == "knowledge":
+            return await self.get_ppt_import(resource_id) is not None
+        if resource_type == "knowhow":
+            return await self.get_knowhow_rule(resource_id) is not None
+        if resource_type == "skill":
+            from services.skill_manager import skill_manager
+
+            if not skill_manager._loaded:
+                await skill_manager.initialize()
+            return skill_manager.get_skill(resource_id) is not None
+        return False
 
     async def ensure_default_admin(self) -> None:
         """Ensure at least one admin user exists. Create default admin if none."""
@@ -741,6 +821,31 @@ class StorageService:
 
     async def get_role(self, role_id: str) -> Optional[dict]:
         return await self._fetchone("SELECT * FROM roles WHERE id=?", (role_id,))
+
+    async def get_skill_metadata(self, skill_id: str) -> Optional[dict]:
+        return await self._fetchone("SELECT * FROM skill_metadata WHERE skill_id=?", (skill_id,))
+
+    async def upsert_skill_metadata(self, skill_id: str, owner_id: Optional[str]) -> dict:
+        now = utc_now_iso()
+        owner_id = self._normalize_optional_id(owner_id)
+        await self.db.execute(
+            "INSERT INTO skill_metadata (skill_id, owner_id, created_at, updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(skill_id) DO UPDATE SET owner_id=excluded.owner_id, updated_at=excluded.updated_at",
+            (skill_id, owner_id, now, now),
+        )
+        await self.db.commit()
+        metadata = await self.get_skill_metadata(skill_id)
+        if not metadata:
+            raise RuntimeError("failed to persist skill metadata")
+        return metadata
+
+    async def delete_skill_metadata(self, skill_id: str) -> bool:
+        existing = await self.get_skill_metadata(skill_id)
+        if not existing:
+            return False
+        await self.db.execute("DELETE FROM skill_metadata WHERE skill_id=?", (skill_id,))
+        await self.db.commit()
+        return True
 
     async def create_role(
         self,
@@ -956,6 +1061,10 @@ class StorageService:
         )
         return self._normalize_conversation_row(row) if row else None
 
+    async def get_conversation_owner_id(self, conversation_id: str) -> Optional[str]:
+        row = await self._fetchone("SELECT owner_id FROM conversations WHERE id=?", (conversation_id,))
+        return str(row["owner_id"]) if row and row.get("owner_id") is not None else None
+
     async def update_conversation(self, conversation_id: str, **kwargs: Union[str, int]) -> Optional[dict]:
         """更新对话字段（title, role_id, is_pinned, is_title_customized 等）"""
         allowed = {"title", "surface", "is_pinned", "role_id", "is_title_customized"}
@@ -1055,6 +1164,25 @@ class StorageService:
         elif isinstance(raw_metadata, dict):
             metadata = raw_metadata
 
+        raw_attachments = metadata.get("attachments") if isinstance(metadata, dict) else None
+        attachments: list[dict] = []
+        if isinstance(raw_attachments, list):
+            for item in raw_attachments:
+                if not isinstance(item, dict):
+                    continue
+                attachments.append(
+                    {
+                        "id": str(item.get("id") or ""),
+                        "fileName": str(item.get("fileName") or item.get("filename") or ""),
+                        "fileSize": int(item.get("fileSize") or item.get("file_size") or 0),
+                        "fileType": str(item.get("fileType") or item.get("file_type") or ""),
+                        "text": str(item.get("text") or ""),
+                        "charCount": int(item.get("charCount") or item.get("char_count") or 0),
+                    }
+                )
+
+        metadata = {key: value for key, value in metadata.items() if key != "attachments"}
+
         return {
             "id": row["id"],
             "conversation_id": row["conversation_id"],
@@ -1068,6 +1196,7 @@ class StorageService:
             "tokenOutput": int(row.get("token_output") or 0),
             "duration_ms": int(row.get("duration_ms") or 0),
             "durationMs": int(row.get("duration_ms") or 0),
+            "attachments": attachments,
             "metadata": metadata,
             "created_at": row["created_at"],
             "createdAt": row["created_at"],
@@ -1076,6 +1205,10 @@ class StorageService:
     async def get_message(self, message_id: str) -> Optional[dict]:
         row = await self._fetchone("SELECT * FROM messages WHERE id=?", (message_id,))
         return self._normalize_message_row(row) if row else None
+
+    async def get_message_conversation_id(self, message_id: str) -> Optional[str]:
+        row = await self._fetchone("SELECT conversation_id FROM messages WHERE id=?", (message_id,))
+        return str(row["conversation_id"]) if row and row.get("conversation_id") is not None else None
 
     async def list_messages(self, conversation_id: str) -> list[dict]:
         rows = await self._fetchall(
@@ -1475,12 +1608,20 @@ class StorageService:
 
     # ===== Know-how Rules =====
 
-    async def add_knowhow_rule(self, category: str, rule_text: str, weight: int = 2, source: str = "user") -> str:
+    async def add_knowhow_rule(
+        self,
+        category: str,
+        rule_text: str,
+        weight: int = 2,
+        source: str = "user",
+        owner_id: Optional[str] = None,
+    ) -> str:
         rid = gen_id()
         now = utc_now_iso()
         await self.db.execute(
-            "INSERT INTO knowhow_rules (id, category, rule_text, weight, source, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-            (rid, category, rule_text, weight, source, now, now),
+            "INSERT INTO knowhow_rules (id, category, rule_text, weight, source, owner_id, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (rid, category, rule_text, weight, source, owner_id, now, now),
         )
         await self.db.commit()
         return rid
@@ -1502,9 +1643,6 @@ class StorageService:
 
         if active_only:
             conditions.append("is_active=1")
-        if category:
-            conditions.append("category=?")
-            params.append(category)
 
         if user_id and not is_admin:
             rbac_parts = ["owner_id=?"]
@@ -1525,13 +1663,20 @@ class StorageService:
                 )
                 rbac_params.append(group_id)
             conditions.append(f"({' OR '.join(rbac_parts)})")
-            params = rbac_params + params
+            params.extend(rbac_params)
+
+        if category:
+            conditions.append("category=?")
+            params.append(category)
 
         where = " AND ".join(conditions) if conditions else "1=1"
         return await self._fetchall(
             f"SELECT * FROM knowhow_rules WHERE {where} ORDER BY weight DESC, hit_count DESC",
             params,
         )
+
+    async def get_knowhow_rule(self, rule_id: str) -> Optional[dict]:
+        return await self._fetchone("SELECT * FROM knowhow_rules WHERE id=?", (rule_id,))
 
     async def increment_knowhow_hit(self, rule_id: str) -> None:
         await self.db.execute("UPDATE knowhow_rules SET hit_count = hit_count + 1 WHERE id=?", (rule_id,))
@@ -1568,6 +1713,9 @@ class StorageService:
         )
         await self.db.commit()
         return iid
+
+    async def get_ppt_import(self, import_id: str) -> Optional[dict]:
+        return await self._fetchone("SELECT * FROM ppt_imports WHERE id=?", (import_id,))
 
     async def list_ppt_imports(
         self,
@@ -1775,6 +1923,11 @@ class StorageService:
         if isinstance(value, str):
             return value or default
         return json.dumps(value, ensure_ascii=False)
+
+    @staticmethod
+    def _normalize_optional_id(value: Optional[str]) -> Optional[str]:
+        normalized = str(value or "").strip()
+        return normalized or None
 
 
 # 全局单例

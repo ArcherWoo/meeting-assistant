@@ -102,6 +102,8 @@ export interface MessageMetadata {
   context?: ContextMetadata;
   skillSuggestion?: SkillSuggestionEvent;
   agentResult?: AgentResultSnapshot;
+  generationState?: 'error' | 'stopped';
+  generationError?: string;
 }
 
 export interface Message {
@@ -148,6 +150,8 @@ export interface Attachment {
   fileName: string;
   fileSize: number;
   fileType: string;
+  text?: string;
+  charCount?: number;
   file?: File; // 前端暂存的文件对象
 }
 
@@ -164,6 +168,7 @@ export interface LLMConfig {
 export interface LLMProfile extends LLMConfig {
   id: string;
   name: string;
+  hasApiKey?: boolean;
   availableModels?: string[];
 }
 
@@ -458,6 +463,7 @@ export interface Group {
   name: string;
   description: string;
   created_at: string;
+  updated_at?: string;
 }
 
 export interface AccessGrant {

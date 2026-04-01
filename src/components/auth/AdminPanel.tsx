@@ -1,24 +1,78 @@
 /**
  * 管理员面板 - 用户、用户组和资源授权管理
  */
-import { useState, useEffect, useCallback } from 'react';
-import type { User, Group, AccessGrant, Role, SkillMeta } from '@/types';
+import { useCallback, useEffect, useState } from 'react';
+import type { AccessGrant, Group, Role, SkillMeta, User } from '@/types';
 import {
-  listUsers, registerUser, deleteUser, updateUser,
-  listGroups, createGroup, deleteGroup,
-  listGrants, setGrant, removeGrant,
-  listRoles, listSkills, listKnowledgeImports, listKnowhowRules,
+  createGroup,
+  deleteGroup,
+  deleteUser,
+  listGrants,
+  listGroups,
+  listKnowhowRules,
+  listKnowledgeImports,
+  listRoles,
+  listSkills,
+  listUsers,
+  registerUser,
+  removeGrant,
+  setGrant,
+  updateGroup,
+  updateUser,
 } from '@/services/api';
 
 type Tab = 'users' | 'groups' | 'grants';
 type Toast = { msg: string; ok: boolean };
+type CreateUserFormState = {
+  username: string;
+  display_name: string;
+  password: string;
+  system_role: 'user' | 'admin';
+  group_id: string;
+};
+type EditUserFormState = {
+  display_name: string;
+  group_id: string;
+  password: string;
+};
+type GroupFormState = {
+  name: string;
+  description: string;
+};
+type ResType = 'role' | 'skill' | 'knowledge' | 'knowhow';
+
+const DEFAULT_ADMIN_USERNAME = 'admin';
+const RES_LABELS: Record<ResType, string> = {
+  role: 'AI角色',
+  skill: 'Skill',
+  knowledge: '知识文件',
+  knowhow: 'Know-how规则',
+};
+const EMPTY_NEW_USER: CreateUserFormState = {
+  username: '',
+  display_name: '',
+  password: '',
+  system_role: 'user',
+  group_id: '',
+};
+const EMPTY_EDIT_USER: EditUserFormState = {
+  display_name: '',
+  group_id: '',
+  password: '',
+};
+const EMPTY_GROUP_FORM: GroupFormState = {
+  name: '',
+  description: '',
+};
 
 function useToast() {
   const [toast, setToastState] = useState<Toast | null>(null);
+
   const showToast = (msg: string, ok = true) => {
     setToastState({ msg, ok });
     setTimeout(() => setToastState(null), 3000);
   };
+
   return { toast, showToast };
 }
 
@@ -30,94 +84,251 @@ export default function AdminPanel() {
   const [loading, setLoading] = useState(false);
   const { toast, showToast } = useToast();
 
-  // 新建用户表单
   const [showAddUser, setShowAddUser] = useState(false);
-  const [newUser, setNewUser] = useState({ username: '', display_name: '', password: '', system_role: 'user', group_id: '' });
+  const [newUser, setNewUser] = useState<CreateUserFormState>(EMPTY_NEW_USER);
+  const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [editUserForm, setEditUserForm] = useState<EditUserFormState>(EMPTY_EDIT_USER);
 
-  // 新建用户组表单
   const [showAddGroup, setShowAddGroup] = useState(false);
-  const [newGroup, setNewGroup] = useState({ name: '', description: '' });
+  const [newGroup, setNewGroup] = useState<GroupFormState>(EMPTY_GROUP_FORM);
+  const [editingGroup, setEditingGroup] = useState<Group | null>(null);
+  const [editGroupForm, setEditGroupForm] = useState<GroupFormState>(EMPTY_GROUP_FORM);
 
   const refresh = useCallback(async () => {
     try {
-      const [u, g] = await Promise.all([listUsers(), listGroups()]);
-      setUsers(u);
-      setGroups(g);
+      const [fetchedUsers, fetchedGroups] = await Promise.all([listUsers(), listGroups()]);
+      setUsers(fetchedUsers);
+      setGroups(fetchedGroups);
       setError('');
     } catch (e) {
       setError((e as Error).message);
     }
   }, []);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const inputCls =
+    'w-full rounded-md border border-surface-divider bg-white px-3 py-2 text-sm ' +
+    'focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20 ' +
+    'dark:border-dark-divider dark:bg-dark-sidebar dark:text-text-dark-primary';
 
   const handleAddUser = async () => {
+    const username = newUser.username.trim();
+    const displayName = newUser.display_name.trim();
+    const password = newUser.password.trim();
+    if (!username || !displayName || !password) {
+      showToast('用户名、显示名和密码不能为空', false);
+      return;
+    }
+
     setLoading(true);
     try {
-      await registerUser({ ...newUser, group_id: newUser.group_id || undefined });
+      await registerUser({
+        ...newUser,
+        username,
+        display_name: displayName,
+        password,
+        group_id: newUser.group_id || undefined,
+      });
       setShowAddUser(false);
-      setNewUser({ username: '', display_name: '', password: '', system_role: 'user', group_id: '' });
+      setNewUser(EMPTY_NEW_USER);
       await refresh();
       showToast('用户创建成功');
-    } catch (e) { setError((e as Error).message); showToast((e as Error).message, false); }
-    finally { setLoading(false); }
+    } catch (e) {
+      setError((e as Error).message);
+      showToast((e as Error).message, false);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStartEditUser = (user: User) => {
+    setShowAddUser(false);
+    setEditingUser(user);
+    setEditUserForm({
+      display_name: user.display_name,
+      group_id: user.group_id ?? '',
+      password: '',
+    });
+  };
+
+  const handleCancelEditUser = () => {
+    setEditingUser(null);
+    setEditUserForm(EMPTY_EDIT_USER);
+  };
+
+  const handleSaveUser = async () => {
+    if (!editingUser) return;
+
+    const displayName = editUserForm.display_name.trim();
+    const password = editUserForm.password.trim();
+    if (!displayName) {
+      showToast('显示名不能为空', false);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const payload: Record<string, unknown> = {
+        display_name: displayName,
+        group_id: editUserForm.group_id,
+      };
+      if (password) {
+        payload.password = password;
+      }
+      await updateUser(editingUser.id, payload);
+      await refresh();
+      handleCancelEditUser();
+      showToast('用户修改成功');
+    } catch (e) {
+      setError((e as Error).message);
+      showToast((e as Error).message, false);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleDeleteUser = async (id: string) => {
-    if (!confirm('确定删除此用户？')) return;
-    setLoading(true);
-    try { await deleteUser(id); await refresh(); showToast('用户已删除'); }
-    catch (e) { setError((e as Error).message); showToast((e as Error).message, false); }
-    finally { setLoading(false); }
-  };
+    const targetUser = users.find((user) => user.id === id);
+    if (targetUser?.username === DEFAULT_ADMIN_USERNAME) {
+      showToast('默认 admin 账号不能删除', false);
+      return;
+    }
+    if (!confirm('确定删除此用户吗？')) return;
 
-  const handleToggleRole = async (u: User) => {
     setLoading(true);
     try {
-      const newRole = u.system_role === 'admin' ? 'user' : 'admin';
-      await updateUser(u.id, { system_role: newRole });
+      await deleteUser(id);
+      if (editingUser?.id === id) {
+        handleCancelEditUser();
+      }
       await refresh();
-      showToast(`已${newRole === 'admin' ? '升为管理员' : '降为普通用户'}`);
-    } catch (e) { setError((e as Error).message); showToast((e as Error).message, false); }
-    finally { setLoading(false); }
+      showToast('用户已删除');
+    } catch (e) {
+      setError((e as Error).message);
+      showToast((e as Error).message, false);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleToggleRole = async (user: User) => {
+    if (user.username === DEFAULT_ADMIN_USERNAME && user.system_role === 'admin') {
+      showToast('默认 admin 账号不能降级', false);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const newRole: User['system_role'] = user.system_role === 'admin' ? 'user' : 'admin';
+      await updateUser(user.id, { system_role: newRole });
+      await refresh();
+      showToast(newRole === 'admin' ? '已升为管理员' : '已降为普通用户');
+    } catch (e) {
+      setError((e as Error).message);
+      showToast((e as Error).message, false);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleAddGroup = async () => {
+    const name = newGroup.name.trim();
+    if (!name) {
+      showToast('用户组名称不能为空', false);
+      return;
+    }
+
     setLoading(true);
     try {
-      await createGroup(newGroup.name, newGroup.description);
+      await createGroup(name, newGroup.description.trim());
       setShowAddGroup(false);
-      setNewGroup({ name: '', description: '' });
+      setNewGroup(EMPTY_GROUP_FORM);
       await refresh();
       showToast('用户组创建成功');
-    } catch (e) { setError((e as Error).message); showToast((e as Error).message, false); }
-    finally { setLoading(false); }
+    } catch (e) {
+      setError((e as Error).message);
+      showToast((e as Error).message, false);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStartEditGroup = (group: Group) => {
+    setShowAddGroup(false);
+    setEditingGroup(group);
+    setEditGroupForm({
+      name: group.name,
+      description: group.description ?? '',
+    });
+  };
+
+  const handleCancelEditGroup = () => {
+    setEditingGroup(null);
+    setEditGroupForm(EMPTY_GROUP_FORM);
+  };
+
+  const handleSaveGroup = async () => {
+    if (!editingGroup) return;
+
+    const name = editGroupForm.name.trim();
+    if (!name) {
+      showToast('用户组名称不能为空', false);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await updateGroup(editingGroup.id, {
+        name,
+        description: editGroupForm.description.trim(),
+      });
+      await refresh();
+      handleCancelEditGroup();
+      showToast('用户组修改成功');
+    } catch (e) {
+      setError((e as Error).message);
+      showToast((e as Error).message, false);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleDeleteGroup = async (id: string) => {
-    if (!confirm('确定删除此用户组？')) return;
+    if (!confirm('确定删除此用户组吗？')) return;
+
     setLoading(true);
-    try { await deleteGroup(id); await refresh(); showToast('用户组已删除'); }
-    catch (e) { setError((e as Error).message); showToast((e as Error).message, false); }
-    finally { setLoading(false); }
+    try {
+      await deleteGroup(id);
+      if (editingGroup?.id === id) {
+        handleCancelEditGroup();
+      }
+      await refresh();
+      showToast('用户组已删除');
+    } catch (e) {
+      setError((e as Error).message);
+      showToast((e as Error).message, false);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const inputCls = 'w-full rounded-md border border-surface-divider bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20 dark:border-dark-divider dark:bg-dark-sidebar dark:text-text-dark-primary';
-
   return (
-    <div className="flex-1 overflow-y-auto p-6 relative">
-      <h1 className="text-lg font-semibold text-text-primary dark:text-text-dark-primary mb-4">用户管理</h1>
+    <div className="relative flex-1 overflow-y-auto p-6">
+      <h1 className="mb-4 text-lg font-semibold text-text-primary dark:text-text-dark-primary">用户管理</h1>
 
-      {/* Toast 提示 */}
       {toast && (
-        <div className={`fixed top-4 right-4 z-50 rounded-md px-4 py-2 text-sm text-white shadow-lg transition-all ${
-          toast.ok ? 'bg-green-500' : 'bg-red-500'
-        }`}>
+        <div
+          className={`fixed right-4 top-4 z-50 rounded-md px-4 py-2 text-sm text-white shadow-lg transition-all ${
+            toast.ok ? 'bg-green-500' : 'bg-red-500'
+          }`}
+        >
           {toast.msg}
         </div>
       )}
 
-      {/* 加载遮罩 */}
       {loading && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-white/50 dark:bg-dark-card/50">
           <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
@@ -131,8 +342,7 @@ export default function AdminPanel() {
         </div>
       )}
 
-      {/* Tab 切换 */}
-      <div className="flex gap-1 mb-4 rounded-md border border-surface-divider bg-surface p-1 dark:border-dark-divider dark:bg-dark-sidebar w-fit">
+      <div className="mb-4 flex w-fit gap-1 rounded-md border border-surface-divider bg-surface p-1 dark:border-dark-divider dark:bg-dark-sidebar">
         {([['users', '用户'], ['groups', '用户组'], ['grants', '资源授权']] as const).map(([key, label]) => (
           <button
             key={key}
@@ -150,50 +360,209 @@ export default function AdminPanel() {
 
       {tab === 'users' && (
         <div className="space-y-3">
-          <button onClick={() => setShowAddUser(!showAddUser)} className="win-button-primary px-4 py-2 text-sm">
+          <button
+            onClick={() => {
+              setShowAddUser((value) => !value);
+              if (editingUser) handleCancelEditUser();
+            }}
+            className="win-button-primary px-4 py-2 text-sm"
+          >
             {showAddUser ? '取消' : '+ 添加用户'}
           </button>
 
           {showAddUser && (
-            <div className="rounded-lg border border-surface-divider bg-white p-4 dark:border-dark-divider dark:bg-dark-card space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <input className={inputCls} placeholder="用户名" value={newUser.username} onChange={e => setNewUser({ ...newUser, username: e.target.value })} />
-                <input className={inputCls} placeholder="显示名" value={newUser.display_name} onChange={e => setNewUser({ ...newUser, display_name: e.target.value })} />
-                <input className={inputCls} type="password" placeholder="密码" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} />
-                <select className={inputCls} value={newUser.system_role} onChange={e => setNewUser({ ...newUser, system_role: e.target.value })}>
+            <div className="space-y-3 rounded-lg border border-surface-divider bg-white p-4 dark:border-dark-divider dark:bg-dark-card">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <input
+                  className={inputCls}
+                  placeholder="用户名"
+                  value={newUser.username}
+                  onChange={(e) => setNewUser({ ...newUser, username: e.target.value })}
+                />
+                <input
+                  className={inputCls}
+                  placeholder="显示名"
+                  value={newUser.display_name}
+                  onChange={(e) => setNewUser({ ...newUser, display_name: e.target.value })}
+                />
+                <input
+                  className={inputCls}
+                  type="password"
+                  placeholder="密码"
+                  value={newUser.password}
+                  onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+                />
+                <select
+                  className={inputCls}
+                  value={newUser.system_role}
+                  onChange={(e) => setNewUser({ ...newUser, system_role: e.target.value as 'user' | 'admin' })}
+                >
                   <option value="user">普通用户</option>
                   <option value="admin">管理员</option>
                 </select>
-                <select className={inputCls} value={newUser.group_id} onChange={e => setNewUser({ ...newUser, group_id: e.target.value })}>
+                <select
+                  className={inputCls}
+                  value={newUser.group_id}
+                  onChange={(e) => setNewUser({ ...newUser, group_id: e.target.value })}
+                >
                   <option value="">无分组</option>
-                  {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                  {groups.map((group) => (
+                    <option key={group.id} value={group.id}>{group.name}</option>
+                  ))}
                 </select>
               </div>
-              <button onClick={() => void handleAddUser()} disabled={!newUser.username || !newUser.password || !newUser.display_name} className="win-button-primary px-4 py-2 text-sm disabled:opacity-50">
+              <button
+                onClick={() => void handleAddUser()}
+                disabled={!newUser.username.trim() || !newUser.display_name.trim() || !newUser.password.trim()}
+                className="win-button-primary px-4 py-2 text-sm disabled:opacity-50"
+              >
                 创建
               </button>
             </div>
           )}
 
-          <UserTable users={users} groups={groups} onDelete={handleDeleteUser} onToggleRole={handleToggleRole} />
+          {editingUser && (
+            <div className="space-y-3 rounded-lg border border-surface-divider bg-white p-4 dark:border-dark-divider dark:bg-dark-card">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-text-primary dark:text-text-dark-primary">修改用户</h2>
+                  <p className="text-xs text-text-secondary">当前用户：{editingUser.username}</p>
+                </div>
+                <button onClick={handleCancelEditUser} className="text-sm text-text-secondary hover:text-text-primary">
+                  取消
+                </button>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <input
+                  className={inputCls}
+                  placeholder="显示名"
+                  value={editUserForm.display_name}
+                  onChange={(e) => setEditUserForm({ ...editUserForm, display_name: e.target.value })}
+                />
+                <select
+                  className={inputCls}
+                  value={editUserForm.group_id}
+                  onChange={(e) => setEditUserForm({ ...editUserForm, group_id: e.target.value })}
+                >
+                  <option value="">无分组</option>
+                  {groups.map((group) => (
+                    <option key={group.id} value={group.id}>{group.name}</option>
+                  ))}
+                </select>
+                <input
+                  className={inputCls}
+                  type="password"
+                  placeholder="新密码（留空则不修改）"
+                  value={editUserForm.password}
+                  onChange={(e) => setEditUserForm({ ...editUserForm, password: e.target.value })}
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => void handleSaveUser()}
+                  disabled={!editUserForm.display_name.trim()}
+                  className="win-button-primary px-4 py-2 text-sm disabled:opacity-50"
+                >
+                  保存
+                </button>
+                <button
+                  onClick={handleCancelEditUser}
+                  className="rounded-md border border-surface-divider px-4 py-2 text-sm text-text-secondary transition-colors hover:text-text-primary dark:border-dark-divider"
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+          )}
+
+          <UserTable
+            users={users}
+            groups={groups}
+            onEdit={handleStartEditUser}
+            onDelete={handleDeleteUser}
+            onToggleRole={handleToggleRole}
+          />
         </div>
       )}
 
       {tab === 'groups' && (
         <div className="space-y-3">
-          <button onClick={() => setShowAddGroup(!showAddGroup)} className="win-button-primary px-4 py-2 text-sm">
+          <button
+            onClick={() => {
+              setShowAddGroup((value) => !value);
+              if (editingGroup) handleCancelEditGroup();
+            }}
+            className="win-button-primary px-4 py-2 text-sm"
+          >
             {showAddGroup ? '取消' : '+ 添加用户组'}
           </button>
 
           {showAddGroup && (
-            <div className="rounded-lg border border-surface-divider bg-white p-4 dark:border-dark-divider dark:bg-dark-card space-y-3">
-              <input className={inputCls} placeholder="组名" value={newGroup.name} onChange={e => setNewGroup({ ...newGroup, name: e.target.value })} />
-              <input className={inputCls} placeholder="描述（可选）" value={newGroup.description} onChange={e => setNewGroup({ ...newGroup, description: e.target.value })} />
-              <button onClick={() => void handleAddGroup()} disabled={!newGroup.name} className="win-button-primary px-4 py-2 text-sm disabled:opacity-50">创建</button>
+            <div className="space-y-3 rounded-lg border border-surface-divider bg-white p-4 dark:border-dark-divider dark:bg-dark-card">
+              <input
+                className={inputCls}
+                placeholder="组名"
+                value={newGroup.name}
+                onChange={(e) => setNewGroup({ ...newGroup, name: e.target.value })}
+              />
+              <input
+                className={inputCls}
+                placeholder="描述（可选）"
+                value={newGroup.description}
+                onChange={(e) => setNewGroup({ ...newGroup, description: e.target.value })}
+              />
+              <button
+                onClick={() => void handleAddGroup()}
+                disabled={!newGroup.name.trim()}
+                className="win-button-primary px-4 py-2 text-sm disabled:opacity-50"
+              >
+                创建
+              </button>
             </div>
           )}
 
-          <GroupTable groups={groups} onDelete={handleDeleteGroup} />
+          {editingGroup && (
+            <div className="space-y-3 rounded-lg border border-surface-divider bg-white p-4 dark:border-dark-divider dark:bg-dark-card">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-text-primary dark:text-text-dark-primary">修改用户组</h2>
+                  <p className="text-xs text-text-secondary">当前用户组：{editingGroup.name}</p>
+                </div>
+                <button onClick={handleCancelEditGroup} className="text-sm text-text-secondary hover:text-text-primary">
+                  取消
+                </button>
+              </div>
+              <input
+                className={inputCls}
+                placeholder="组名"
+                value={editGroupForm.name}
+                onChange={(e) => setEditGroupForm({ ...editGroupForm, name: e.target.value })}
+              />
+              <input
+                className={inputCls}
+                placeholder="描述（可选）"
+                value={editGroupForm.description}
+                onChange={(e) => setEditGroupForm({ ...editGroupForm, description: e.target.value })}
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={() => void handleSaveGroup()}
+                  disabled={!editGroupForm.name.trim()}
+                  className="win-button-primary px-4 py-2 text-sm disabled:opacity-50"
+                >
+                  保存
+                </button>
+                <button
+                  onClick={handleCancelEditGroup}
+                  className="rounded-md border border-surface-divider px-4 py-2 text-sm text-text-secondary transition-colors hover:text-text-primary dark:border-dark-divider"
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+          )}
+
+          <GroupTable groups={groups} onEdit={handleStartEditGroup} onDelete={handleDeleteGroup} />
         </div>
       )}
 
@@ -204,22 +573,29 @@ export default function AdminPanel() {
   );
 }
 
-function UserTable({ users, groups, onDelete, onToggleRole }: {
+function UserTable({
+  users,
+  groups,
+  onEdit,
+  onDelete,
+  onToggleRole,
+}: {
   users: User[];
   groups: Group[];
+  onEdit: (user: User) => void;
   onDelete: (id: string) => Promise<void>;
-  onToggleRole: (u: User) => Promise<void>;
+  onToggleRole: (user: User) => Promise<void>;
 }) {
-  const getGroupName = (gid: string | null) => {
-    if (!gid) return '-';
-    return groups.find(g => g.id === gid)?.name ?? gid;
+  const getGroupName = (groupId: string | null) => {
+    if (!groupId) return '-';
+    return groups.find((group) => group.id === groupId)?.name ?? groupId;
   };
 
   return (
-    <div className="rounded-lg border border-surface-divider dark:border-dark-divider overflow-hidden">
+    <div className="overflow-hidden rounded-lg border border-surface-divider dark:border-dark-divider">
       <table className="w-full text-sm">
         <thead>
-          <tr className="bg-surface dark:bg-dark-sidebar text-text-secondary">
+          <tr className="bg-surface text-text-secondary dark:bg-dark-sidebar">
             <th className="px-4 py-2 text-left font-medium">用户名</th>
             <th className="px-4 py-2 text-left font-medium">显示名</th>
             <th className="px-4 py-2 text-left font-medium">角色</th>
@@ -228,38 +604,63 @@ function UserTable({ users, groups, onDelete, onToggleRole }: {
           </tr>
         </thead>
         <tbody>
-          {users.map(u => (
-            <tr key={u.id} className="border-t border-surface-divider dark:border-dark-divider bg-white dark:bg-dark-card">
-              <td className="px-4 py-2 text-text-primary dark:text-text-dark-primary">{u.username}</td>
-              <td className="px-4 py-2 text-text-primary dark:text-text-dark-primary">{u.display_name}</td>
-              <td className="px-4 py-2">
-                <span className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${
-                  u.system_role === 'admin'
-                    ? 'bg-primary/10 text-primary'
-                    : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
-                }`}>
-                  {u.system_role === 'admin' ? '管理员' : '用户'}
-                </span>
-              </td>
-              <td className="px-4 py-2 text-text-secondary">{getGroupName(u.group_id)}</td>
-              <td className="px-4 py-2 text-right space-x-2">
-                <button
-                  onClick={() => void onToggleRole(u)}
-                  className="text-xs text-text-secondary hover:text-primary transition-colors"
-                >
-                  {u.system_role === 'admin' ? '降为用户' : '升为管理员'}
-                </button>
-                <button
-                  onClick={() => void onDelete(u.id)}
-                  className="text-xs text-text-secondary hover:text-red-500 transition-colors"
-                >
-                  删除
-                </button>
-              </td>
-            </tr>
-          ))}
+          {users.map((user) => {
+            const isDefaultAdmin = user.username === DEFAULT_ADMIN_USERNAME && user.system_role === 'admin';
+            return (
+              <tr
+                key={user.id}
+                className="border-t border-surface-divider bg-white dark:border-dark-divider dark:bg-dark-card"
+              >
+                <td className="px-4 py-2 text-text-primary dark:text-text-dark-primary">{user.username}</td>
+                <td className="px-4 py-2 text-text-primary dark:text-text-dark-primary">{user.display_name}</td>
+                <td className="px-4 py-2">
+                  <span
+                    className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${
+                      user.system_role === 'admin'
+                        ? 'bg-primary/10 text-primary'
+                        : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+                    }`}
+                  >
+                    {user.system_role === 'admin' ? '管理员' : '用户'}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-text-secondary">{getGroupName(user.group_id)}</td>
+                <td className="px-4 py-2 text-right">
+                  <div className="flex flex-wrap justify-end gap-3">
+                    <button
+                      onClick={() => onEdit(user)}
+                      className="text-xs text-text-secondary transition-colors hover:text-primary"
+                    >
+                      修改
+                    </button>
+                    {!isDefaultAdmin && (
+                      <button
+                        onClick={() => void onToggleRole(user)}
+                        className="text-xs text-text-secondary transition-colors hover:text-primary"
+                      >
+                        {user.system_role === 'admin' ? '降为用户' : '升为管理员'}
+                      </button>
+                    )}
+                    {isDefaultAdmin && (
+                      <span className="text-xs text-text-secondary">默认 admin 不可降级或删除</span>
+                    )}
+                    {!isDefaultAdmin && (
+                      <button
+                        onClick={() => void onDelete(user.id)}
+                        className="text-xs text-text-secondary transition-colors hover:text-red-500"
+                      >
+                        删除
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
           {users.length === 0 && (
-            <tr><td colSpan={5} className="px-4 py-8 text-center text-text-secondary">暂无用户</td></tr>
+            <tr>
+              <td colSpan={5} className="px-4 py-8 text-center text-text-secondary">暂无用户</td>
+            </tr>
           )}
         </tbody>
       </table>
@@ -267,47 +668,61 @@ function UserTable({ users, groups, onDelete, onToggleRole }: {
   );
 }
 
-function GroupTable({ groups, onDelete }: {
+function GroupTable({
+  groups,
+  onEdit,
+  onDelete,
+}: {
   groups: Group[];
+  onEdit: (group: Group) => void;
   onDelete: (id: string) => Promise<void>;
 }) {
   return (
-    <div className="rounded-lg border border-surface-divider dark:border-dark-divider overflow-hidden">
+    <div className="overflow-hidden rounded-lg border border-surface-divider dark:border-dark-divider">
       <table className="w-full text-sm">
         <thead>
-          <tr className="bg-surface dark:bg-dark-sidebar text-text-secondary">
+          <tr className="bg-surface text-text-secondary dark:bg-dark-sidebar">
             <th className="px-4 py-2 text-left font-medium">组名</th>
             <th className="px-4 py-2 text-left font-medium">描述</th>
             <th className="px-4 py-2 text-right font-medium">操作</th>
           </tr>
         </thead>
         <tbody>
-          {groups.map(g => (
-            <tr key={g.id} className="border-t border-surface-divider dark:border-dark-divider bg-white dark:bg-dark-card">
-              <td className="px-4 py-2 text-text-primary dark:text-text-dark-primary">{g.name}</td>
-              <td className="px-4 py-2 text-text-secondary">{g.description || '-'}</td>
+          {groups.map((group) => (
+            <tr
+              key={group.id}
+              className="border-t border-surface-divider bg-white dark:border-dark-divider dark:bg-dark-card"
+            >
+              <td className="px-4 py-2 text-text-primary dark:text-text-dark-primary">{group.name}</td>
+              <td className="px-4 py-2 text-text-secondary">{group.description || '-'}</td>
               <td className="px-4 py-2 text-right">
-                <button
-                  onClick={() => void onDelete(g.id)}
-                  className="text-xs text-text-secondary hover:text-red-500 transition-colors"
-                >
-                  删除
-                </button>
+                <div className="flex flex-wrap justify-end gap-3">
+                  <button
+                    onClick={() => onEdit(group)}
+                    className="text-xs text-text-secondary transition-colors hover:text-primary"
+                  >
+                    修改
+                  </button>
+                  <button
+                    onClick={() => void onDelete(group.id)}
+                    className="text-xs text-text-secondary transition-colors hover:text-red-500"
+                  >
+                    删除
+                  </button>
+                </div>
               </td>
             </tr>
           ))}
           {groups.length === 0 && (
-            <tr><td colSpan={3} className="px-4 py-8 text-center text-text-secondary">暂无用户组</td></tr>
+            <tr>
+              <td colSpan={3} className="px-4 py-8 text-center text-text-secondary">暂无用户组</td>
+            </tr>
           )}
         </tbody>
       </table>
     </div>
   );
 }
-
-// ===== 资源授权 Tab =====
-type ResType = 'role' | 'skill' | 'knowledge' | 'knowhow';
-const RES_LABELS: Record<ResType, string> = { role: 'AI角色', skill: 'Skill', knowledge: '知识文件', knowhow: 'Know-how规则' };
 
 function GrantsTab({ users, groups }: { users: User[]; groups: Group[] }) {
   const [resType, setResType] = useState<ResType>('role');
@@ -325,19 +740,27 @@ function GrantsTab({ users, groups }: { users: User[]; groups: Group[] }) {
     try {
       if (resType === 'role') {
         const roles: Role[] = await listRoles();
-        setResources(roles.map(r => ({ id: r.id, name: r.name })));
+        setResources(roles.map((role) => ({ id: role.id, name: role.name })));
       } else if (resType === 'skill') {
         const skills: SkillMeta[] = await listSkills();
-        setResources(skills.map(s => ({ id: s.id, name: s.name })));
+        setResources(skills.map((skill) => ({ id: skill.id, name: skill.name })));
       } else if (resType === 'knowledge') {
         const { imports } = await listKnowledgeImports();
-        setResources(imports.map(i => ({ id: i.id, name: i.file_name })));
+        setResources(imports.map((item) => ({ id: item.id, name: item.file_name })));
       } else {
         const rules = await listKnowhowRules();
-        setResources(rules.map(r => ({ id: r.id, name: `[${r.category}] ${r.rule_text.slice(0, 40)}` })));
+        setResources(
+          rules.map((rule) => ({
+            id: rule.id,
+            name: `[${rule.category}] ${rule.rule_text.slice(0, 40)}`,
+          })),
+        );
       }
-    } catch (e) { setError((e as Error).message); }
-    finally { setLoading(false); }
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
   }, [resType]);
 
   useEffect(() => {
@@ -350,14 +773,18 @@ function GrantsTab({ users, groups }: { users: User[]; groups: Group[] }) {
     setSelectedId(id);
     setLoading(true);
     try {
-      const g = await listGrants(resType, id);
-      setGrants(g);
-    } catch (e) { setError((e as Error).message); }
-    finally { setLoading(false); }
+      const fetchedGrants = await listGrants(resType, id);
+      setGrants(fetchedGrants);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleAddGrant = async () => {
     if (!selectedId) return;
+
     setLoading(true);
     try {
       await setGrant({
@@ -366,12 +793,16 @@ function GrantsTab({ users, groups }: { users: User[]; groups: Group[] }) {
         grant_type: newGrantType,
         grantee_id: newGrantType === 'public' ? undefined : newGrantee || undefined,
       });
-      const g = await listGrants(resType, selectedId);
-      setGrants(g);
+      const fetchedGrants = await listGrants(resType, selectedId);
+      setGrants(fetchedGrants);
       setNewGrantee('');
       showToast('授权成功');
-    } catch (e) { setError((e as Error).message); showToast((e as Error).message, false); }
-    finally { setLoading(false); }
+    } catch (e) {
+      setError((e as Error).message);
+      showToast((e as Error).message, false);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleRemoveGrant = async (grantId: string) => {
@@ -379,38 +810,44 @@ function GrantsTab({ users, groups }: { users: User[]; groups: Group[] }) {
     try {
       await removeGrant(grantId);
       if (selectedId) {
-        const g = await listGrants(resType, selectedId);
-        setGrants(g);
+        const fetchedGrants = await listGrants(resType, selectedId);
+        setGrants(fetchedGrants);
       }
       showToast('授权已撤销');
-    } catch (e) { setError((e as Error).message); showToast((e as Error).message, false); }
-    finally { setLoading(false); }
+    } catch (e) {
+      setError((e as Error).message);
+      showToast((e as Error).message, false);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const formatGrantee = (grant: AccessGrant) => {
     if (grant.grant_type === 'public') return '所有人（公开）';
     if (grant.grant_type === 'group') {
-      const g = groups.find(g => g.id === grant.grantee_id);
-      return `组: ${g ? g.name : grant.grantee_id}`;
+      const group = groups.find((item) => item.id === grant.grantee_id);
+      return `组: ${group ? group.name : grant.grantee_id}`;
     }
-    const u = users.find(u => u.id === grant.grantee_id);
-    return `用户: ${u ? u.display_name : grant.grantee_id}`;
+    const user = users.find((item) => item.id === grant.grantee_id);
+    return `用户: ${user ? user.display_name : grant.grantee_id}`;
   };
 
-  const selectCls = 'rounded border border-surface-divider bg-white px-2 py-1.5 text-sm dark:border-dark-divider dark:bg-dark-sidebar dark:text-text-dark-primary';
+  const selectCls =
+    'rounded border border-surface-divider bg-white px-2 py-1.5 text-sm ' +
+    'dark:border-dark-divider dark:bg-dark-sidebar dark:text-text-dark-primary';
 
   return (
-    <div className="space-y-4 relative">
-      {/* Toast 提示 */}
+    <div className="relative space-y-4">
       {toast && (
-        <div className={`fixed top-4 right-4 z-50 rounded-md px-4 py-2 text-sm text-white shadow-lg transition-all ${
-          toast.ok ? 'bg-green-500' : 'bg-red-500'
-        }`}>
+        <div
+          className={`fixed right-4 top-4 z-50 rounded-md px-4 py-2 text-sm text-white shadow-lg transition-all ${
+            toast.ok ? 'bg-green-500' : 'bg-red-500'
+          }`}
+        >
           {toast.msg}
         </div>
       )}
 
-      {/* 加载遮罩 */}
       {loading && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-white/50 dark:bg-dark-card/50">
           <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
@@ -424,67 +861,68 @@ function GrantsTab({ users, groups }: { users: User[]; groups: Group[] }) {
         </div>
       )}
 
-      {/* 资源类型选择器 */}
       <div className="flex gap-2">
-        {(['role', 'skill', 'knowledge', 'knowhow'] as ResType[]).map(t => (
+        {(['role', 'skill', 'knowledge', 'knowhow'] as ResType[]).map((type) => (
           <button
-            key={t}
-            onClick={() => setResType(t)}
+            key={type}
+            onClick={() => setResType(type)}
             className={`rounded px-3 py-1.5 text-sm transition-colors ${
-              resType === t
+              resType === type
                 ? 'bg-primary text-white'
-                : 'border border-surface-divider dark:border-dark-divider text-text-secondary hover:text-text-primary'
+                : 'border border-surface-divider text-text-secondary hover:text-text-primary dark:border-dark-divider'
             }`}
           >
-            {RES_LABELS[t]}
+            {RES_LABELS[type]}
           </button>
         ))}
       </div>
 
       <div className="grid grid-cols-2 gap-4">
-        {/* 左：资源列表 */}
-        <div className="rounded-lg border border-surface-divider dark:border-dark-divider overflow-hidden">
-          <div className="bg-surface dark:bg-dark-sidebar px-4 py-2 text-xs font-medium text-text-secondary">
+        <div className="overflow-hidden rounded-lg border border-surface-divider dark:border-dark-divider">
+          <div className="bg-surface px-4 py-2 text-xs font-medium text-text-secondary dark:bg-dark-sidebar">
             选择{RES_LABELS[resType]}
           </div>
           <div className="max-h-80 overflow-y-auto">
             {resources.length === 0 && (
               <div className="px-4 py-8 text-center text-sm text-text-secondary">暂无资源</div>
             )}
-            {resources.map(r => (
+            {resources.map((resource) => (
               <button
-                key={r.id}
-                onClick={() => void handleSelectResource(r.id)}
-                className={`w-full text-left px-4 py-2.5 text-sm border-t border-surface-divider dark:border-dark-divider transition-colors ${
-                  selectedId === r.id
+                key={resource.id}
+                onClick={() => void handleSelectResource(resource.id)}
+                className={`w-full border-t border-surface-divider px-4 py-2.5 text-left text-sm transition-colors dark:border-dark-divider ${
+                  selectedId === resource.id
                     ? 'bg-primary/10 text-primary'
-                    : 'bg-white dark:bg-dark-card text-text-primary dark:text-text-dark-primary hover:bg-surface dark:hover:bg-dark-sidebar'
+                    : 'bg-white text-text-primary hover:bg-surface dark:bg-dark-card dark:text-text-dark-primary dark:hover:bg-dark-sidebar'
                 }`}
               >
-                {r.name}
+                {resource.name}
               </button>
             ))}
           </div>
         </div>
 
-        {/* 右：授权管理 */}
-        <div className="rounded-lg border border-surface-divider dark:border-dark-divider overflow-hidden">
-          <div className="bg-surface dark:bg-dark-sidebar px-4 py-2 text-xs font-medium text-text-secondary">
+        <div className="overflow-hidden rounded-lg border border-surface-divider dark:border-dark-divider">
+          <div className="bg-surface px-4 py-2 text-xs font-medium text-text-secondary dark:bg-dark-sidebar">
             {selectedId ? '授权管理' : '请先选择资源'}
           </div>
 
           {!selectedId && (
-            <div className="px-4 py-8 text-center text-sm text-text-secondary">在左侧选择一个资源后，可在此设置其访问权限</div>
+            <div className="px-4 py-8 text-center text-sm text-text-secondary">
+              在左侧选择一个资源后，可在此设置其访问权限
+            </div>
           )}
 
           {selectedId && (
-            <div className="p-3 space-y-3">
-              {/* 添加授权表单 */}
-              <div className="flex gap-2 flex-wrap items-center">
+            <div className="space-y-3 p-3">
+              <div className="flex flex-wrap items-center gap-2">
                 <select
                   className={selectCls}
                   value={newGrantType}
-                  onChange={e => { setNewGrantType(e.target.value as 'public' | 'group' | 'user'); setNewGrantee(''); }}
+                  onChange={(e) => {
+                    setNewGrantType(e.target.value as 'public' | 'group' | 'user');
+                    setNewGrantee('');
+                  }}
                 >
                   <option value="public">公开（所有人）</option>
                   <option value="group">指定用户组</option>
@@ -492,16 +930,20 @@ function GrantsTab({ users, groups }: { users: User[]; groups: Group[] }) {
                 </select>
 
                 {newGrantType === 'group' && (
-                  <select className={selectCls} value={newGrantee} onChange={e => setNewGrantee(e.target.value)}>
+                  <select className={selectCls} value={newGrantee} onChange={(e) => setNewGrantee(e.target.value)}>
                     <option value="">选择用户组</option>
-                    {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                    {groups.map((group) => (
+                      <option key={group.id} value={group.id}>{group.name}</option>
+                    ))}
                   </select>
                 )}
 
                 {newGrantType === 'user' && (
-                  <select className={selectCls} value={newGrantee} onChange={e => setNewGrantee(e.target.value)}>
+                  <select className={selectCls} value={newGrantee} onChange={(e) => setNewGrantee(e.target.value)}>
                     <option value="">选择用户</option>
-                    {users.map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}
+                    {users.map((user) => (
+                      <option key={user.id} value={user.id}>{user.display_name}</option>
+                    ))}
                   </select>
                 )}
 
@@ -514,17 +956,19 @@ function GrantsTab({ users, groups }: { users: User[]; groups: Group[] }) {
                 </button>
               </div>
 
-              {/* 已有授权列表 */}
-              <div className="space-y-1 max-h-56 overflow-y-auto">
+              <div className="max-h-56 space-y-1 overflow-y-auto">
                 {grants.length === 0 && (
                   <p className="py-4 text-center text-sm text-text-secondary">暂无授权，默认仅创建者可见</p>
                 )}
-                {grants.map(grant => (
-                  <div key={grant.id} className="flex items-center justify-between rounded bg-surface dark:bg-dark-sidebar px-3 py-1.5 text-sm">
+                {grants.map((grant) => (
+                  <div
+                    key={grant.id}
+                    className="flex items-center justify-between rounded bg-surface px-3 py-1.5 text-sm dark:bg-dark-sidebar"
+                  >
                     <span className="text-text-primary dark:text-text-dark-primary">{formatGrantee(grant)}</span>
                     <button
                       onClick={() => void handleRemoveGrant(grant.id)}
-                      className="text-xs text-text-secondary hover:text-red-500 transition-colors ml-4 flex-shrink-0"
+                      className="ml-4 flex-shrink-0 text-xs text-text-secondary transition-colors hover:text-red-500"
                     >
                       撤销
                     </button>

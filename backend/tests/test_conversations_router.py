@@ -2,8 +2,10 @@ import os
 import sqlite3
 import sys
 import unittest
+import uuid
 from pathlib import Path
-from tempfile import TemporaryDirectory
+
+from fastapi import HTTPException
 
 
 BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -16,23 +18,32 @@ from services.storage import storage
 
 class ConversationsRouterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.temp_dir = TemporaryDirectory()
+        self.temp_root = Path(BACKEND_ROOT) / ".tmp-test-data"
+        self.temp_root.mkdir(parents=True, exist_ok=True)
+        self.temp_db_path = self.temp_root / f"test-conversations-{uuid.uuid4().hex}.db"
         self.original_db_path = storage._db_path
 
         if storage._db is not None:
             await storage.close()
 
-        storage._db_path = Path(self.temp_dir.name) / "test.db"
+        storage._db_path = self.temp_db_path
         await storage.initialize()
+        self.user = await storage.create_user("alice", "Alice", "hashed")
+        self.other_user = await storage.create_user("bob", "Bob", "hashed")
+        self.admin = await storage.get_user_by_username("admin")
+        self.assertIsNotNone(self.admin)
 
     async def asyncTearDown(self):
         await storage.close()
         storage._db_path = self.original_db_path
-        self.temp_dir.cleanup()
+        for suffix in ("", "-wal", "-shm"):
+            target = Path(f"{self.temp_db_path}{suffix}")
+            target.unlink(missing_ok=True)
 
     async def test_chat_state_roundtrip_uses_database_conversations_and_messages(self):
         created = await conversations_router.create_conversation(
-            conversations_router.ConversationCreateRequest(role_id="copilot")
+            conversations_router.ConversationCreateRequest(role_id="copilot"),
+            user=self.user,
         )
         conversation = created["conversation"]
 
@@ -43,9 +54,10 @@ class ConversationsRouterTests(unittest.IsolatedAsyncioTestCase):
                 content="请帮我总结今天的会议",
                 metadata={"context": {"summary": "测试"}},
             ),
+            user=self.user,
         )
 
-        state = await conversations_router.get_chat_state()
+        state = await conversations_router.get_chat_state(user=self.user)
         self.assertEqual(len(state["conversations"]), 1)
         self.assertEqual(state["conversations"][0]["roleId"], "copilot")
         self.assertEqual(state["conversations"][0]["surface"], "chat")
@@ -60,7 +72,8 @@ class ConversationsRouterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_update_conversation_tracks_title_customization(self):
         created = await conversations_router.create_conversation(
-            conversations_router.ConversationCreateRequest(role_id="copilot")
+            conversations_router.ConversationCreateRequest(role_id="copilot"),
+            user=self.user,
         )
         conversation = created["conversation"]
 
@@ -70,6 +83,7 @@ class ConversationsRouterTests(unittest.IsolatedAsyncioTestCase):
                 title="采购预审讨论",
                 is_title_customized=True,
             ),
+            user=self.user,
         )
 
         self.assertEqual(updated["conversation"]["title"], "采购预审讨论")
@@ -77,7 +91,8 @@ class ConversationsRouterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_create_agent_surface_conversation_roundtrip(self):
         created = await conversations_router.create_conversation(
-            conversations_router.ConversationCreateRequest(role_id="executor", surface="agent")
+            conversations_router.ConversationCreateRequest(role_id="executor", surface="agent"),
+            user=self.user,
         )
         conversation = created["conversation"]
 
@@ -88,14 +103,14 @@ class ConversationsRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_get_chat_state_injects_compensation_message_for_unwritten_agent_run(self):
         """completed agent_run 尚未写回 messages 表时，get_chat_state 应补出一条 assistant 消息。"""
         created = await conversations_router.create_conversation(
-            conversations_router.ConversationCreateRequest(role_id="executor", surface="agent")
+            conversations_router.ConversationCreateRequest(role_id="executor", surface="agent"),
+            user=self.user,
         )
         conversation = created["conversation"]
 
         # 创建一个 completed agent_run，不写回 messages 表
-        from services.storage import gen_id, utc_now_iso
+        from services.storage import gen_id
         run_id = gen_id()
-        import json
         final_result = {
             "summary": "预审完成",
             "raw_text": "采购预审完成，共发现 2 个注意事项。",
@@ -117,7 +132,7 @@ class ConversationsRouterTests(unittest.IsolatedAsyncioTestCase):
             final_result=final_result,
         )
 
-        state = await conversations_router.get_chat_state()
+        state = await conversations_router.get_chat_state(user=self.user)
         msgs = state["messages_by_conversation"][conversation["id"]]
         self.assertEqual(len(msgs), 1)
         comp = msgs[0]
@@ -129,7 +144,8 @@ class ConversationsRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_get_chat_state_skips_compensation_when_already_written_back(self):
         """如果 messages 已包含该 runId，不应再注入补偿消息。"""
         created = await conversations_router.create_conversation(
-            conversations_router.ConversationCreateRequest(role_id="executor", surface="agent")
+            conversations_router.ConversationCreateRequest(role_id="executor", surface="agent"),
+            user=self.user,
         )
         conversation = created["conversation"]
 
@@ -153,7 +169,6 @@ class ConversationsRouterTests(unittest.IsolatedAsyncioTestCase):
         await storage.update_agent_run(run_id, status="completed", final_result=final_result)
 
         # 写回一条已包含 runId 的消息
-        import json
         await conversations_router.create_message(
             conversation["id"],
             conversations_router.MessageCreateRequest(
@@ -161,13 +176,101 @@ class ConversationsRouterTests(unittest.IsolatedAsyncioTestCase):
                 content="采购预审完成。",
                 metadata={"agentResult": {"runId": run_id, "summary": "预审完成"}},
             ),
+            user=self.user,
         )
 
-        state = await conversations_router.get_chat_state()
+        state = await conversations_router.get_chat_state(user=self.user)
         msgs = state["messages_by_conversation"][conversation["id"]]
         # 只有真实写回的那一条，补偿消息不应被注入
         self.assertEqual(len(msgs), 1)
         self.assertFalse(msgs[0]["id"].startswith("compensated-"))
+
+    async def test_admin_chat_state_uses_system_role_and_sees_all_conversations(self):
+        first = await conversations_router.create_conversation(
+            conversations_router.ConversationCreateRequest(role_id="copilot"),
+            user=self.user,
+        )
+        second = await conversations_router.create_conversation(
+            conversations_router.ConversationCreateRequest(role_id="copilot"),
+            user=self.other_user,
+        )
+
+        state = await conversations_router.get_chat_state(user=self.admin)
+        ids = {conversation["id"] for conversation in state["conversations"]}
+        self.assertIn(first["conversation"]["id"], ids)
+        self.assertIn(second["conversation"]["id"], ids)
+
+    async def test_cross_user_message_update_is_forbidden(self):
+        created = await conversations_router.create_conversation(
+            conversations_router.ConversationCreateRequest(role_id="copilot"),
+            user=self.user,
+        )
+        conversation = created["conversation"]
+        message = await conversations_router.create_message(
+            conversation["id"],
+            conversations_router.MessageCreateRequest(
+                role="user",
+                content="原始内容",
+            ),
+            user=self.user,
+        )
+
+        with self.assertRaises(HTTPException) as ctx:
+            await conversations_router.update_message(
+                message["message"]["id"],
+                conversations_router.MessageUpdateRequest(content="被篡改"),
+                user=self.other_user,
+            )
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    async def test_private_role_cannot_be_used_by_other_user(self):
+        role = await storage.create_role(
+            name="私人角色",
+            owner_id=self.user["id"],
+        )
+
+        with self.assertRaises(HTTPException) as ctx:
+            await conversations_router.create_conversation(
+                conversations_router.ConversationCreateRequest(role_id=role["id"]),
+                user=self.other_user,
+            )
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    async def test_update_message_merges_metadata_without_losing_attachments(self):
+        created = await conversations_router.create_conversation(
+            conversations_router.ConversationCreateRequest(role_id="copilot"),
+            user=self.user,
+        )
+        conversation = created["conversation"]
+        message = await conversations_router.create_message(
+            conversation["id"],
+            conversations_router.MessageCreateRequest(
+                role="user",
+                content="请分析附件",
+                metadata={"context": {"summary": "旧摘要"}},
+                attachments=[{
+                    "id": "att-1",
+                    "fileName": "报价单.pdf",
+                    "fileType": "pdf",
+                    "fileSize": 128,
+                    "text": "附件内容",
+                    "charCount": 4,
+                }],
+            ),
+            user=self.user,
+        )
+
+        updated = await conversations_router.update_message(
+            message["message"]["id"],
+            conversations_router.MessageUpdateRequest(
+                metadata={"generationState": "stopped"},
+            ),
+            user=self.user,
+        )
+
+        self.assertEqual(updated["message"]["attachments"][0]["fileName"], "报价单.pdf")
+        self.assertEqual(updated["message"]["metadata"]["context"]["summary"], "旧摘要")
+        self.assertEqual(updated["message"]["metadata"]["generationState"], "stopped")
 
     async def test_initialize_migrates_legacy_conversations_before_role_index_creation(self):
         await storage.close()

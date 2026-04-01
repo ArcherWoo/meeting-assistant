@@ -13,7 +13,7 @@ import {
   updateMessageRecord,
 } from '@/services/api';
 import { useAppStore } from '@/stores/appStore';
-import type { Attachment, Conversation, Message, MessageMetadata } from '@/types';
+import type { Conversation, Message, MessageMetadata } from '@/types';
 
 export const DEFAULT_CONVERSATION_TITLE = '新对话';
 
@@ -37,7 +37,6 @@ interface ChatState {
   streamingContentByConversation: Record<string, string>;
   isStreaming: boolean;
   streamingContent: string;
-  pendingAttachments: Attachment[];
   hydrated: boolean;
 
   bootstrap: () => Promise<void>;
@@ -63,10 +62,6 @@ interface ChatState {
   setStreaming: (streaming: boolean, conversationId?: string) => void;
   appendStreamContent: (chunk: string, conversationId?: string) => void;
   resetStreamContent: (conversationId?: string) => void;
-
-  addAttachment: (attachment: Attachment) => void;
-  removeAttachment: (id: string) => void;
-  clearAttachments: () => void;
 }
 
 export const useChatStore = create<ChatState>()((set, get) => ({
@@ -78,7 +73,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   streamingContentByConversation: {},
   isStreaming: false,
   streamingContent: '',
-  pendingAttachments: [],
   hydrated: false,
 
   bootstrap: async () => {
@@ -301,10 +295,4 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       };
     });
   },
-
-  addAttachment: (attachment) =>
-    set((state) => ({ pendingAttachments: [...state.pendingAttachments, attachment] })),
-  removeAttachment: (id) =>
-    set((state) => ({ pendingAttachments: state.pendingAttachments.filter((attachment) => attachment.id !== id) })),
-  clearAttachments: () => set({ pendingAttachments: [] }),
 }));

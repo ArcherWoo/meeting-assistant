@@ -71,10 +71,21 @@ class KnowhowService:
         )
 
     async def add_rule(
-        self, category: str, rule_text: str, weight: int = 2, source: str = "user",
+        self,
+        category: str,
+        rule_text: str,
+        weight: int = 2,
+        source: str = "user",
+        owner_id: Optional[str] = None,
     ) -> str:
         """添加新规则"""
-        return await storage.add_knowhow_rule(category, rule_text, weight, source)
+        return await storage.add_knowhow_rule(
+            category,
+            rule_text,
+            weight,
+            source,
+            owner_id=owner_id,
+        )
 
     async def update_rule(self, rule_id: str, updates: dict) -> bool:
         """更新规则字段"""

@@ -24,6 +24,8 @@ class KnowhowRouterTests(unittest.IsolatedAsyncioTestCase):
 
         storage._db_path = Path(self.temp_dir.name) / "test.db"
         await storage.initialize()
+        self.admin = await storage.get_user_by_username("admin")
+        self.assertIsNotNone(self.admin)
 
     async def asyncTearDown(self):
         await storage.close()
@@ -37,10 +39,11 @@ class KnowhowRouterTests(unittest.IsolatedAsyncioTestCase):
                 rule_text="需要检查供应商资质",
                 weight=3,
                 source="user",
-            )
+            ),
+            user=self.admin,
         )
 
-        response = await knowhow_router.export_rules()
+        response = await knowhow_router.export_rules(user=self.admin)
         payload = json.loads(response.body.decode("utf-8"))
 
         self.assertEqual(payload["kind"], "knowhow_rules_export")
@@ -56,7 +59,8 @@ class KnowhowRouterTests(unittest.IsolatedAsyncioTestCase):
                 rule_text="需要检查供应商资质",
                 weight=3,
                 source="user",
-            )
+            ),
+            user=self.admin,
         )
 
         result = await knowhow_router.import_rules(
@@ -67,8 +71,9 @@ class KnowhowRouterTests(unittest.IsolatedAsyncioTestCase):
                 ]
             },
             strategy="append",
+            user=self.admin,
         )
-        listed = await knowhow_router.list_rules()
+        listed = await knowhow_router.list_rules(user=self.admin)
 
         self.assertEqual(result["strategy"], "append")
         self.assertEqual(result["total_in_file"], 2)
@@ -88,7 +93,8 @@ class KnowhowRouterTests(unittest.IsolatedAsyncioTestCase):
                 rule_text="老规则",
                 weight=3,
                 source="user",
-            )
+            ),
+            user=self.admin,
         )
 
         result = await knowhow_router.import_rules(
@@ -104,8 +110,9 @@ class KnowhowRouterTests(unittest.IsolatedAsyncioTestCase):
                 ]
             },
             strategy="replace",
+            user=self.admin,
         )
-        listed = await knowhow_router.list_rules()
+        listed = await knowhow_router.list_rules(user=self.admin)
 
         self.assertEqual(result["strategy"], "replace")
         self.assertEqual(result["deleted_count"], 1)

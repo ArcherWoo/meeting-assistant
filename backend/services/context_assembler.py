@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Protocol
 
+from services.access_control import filter_accessible_skills, is_admin
 from services.hybrid_search import hybrid_search
 from services.knowhow_service import knowhow_service
 from services.retrieval_planner import (
@@ -458,6 +459,7 @@ class ContextAssembler:
         planner_settings: RetrievalPlannerSettings | None = None,
         enabled_surfaces: set[RetrievalSurface] | None = None,
         trace_handler: RetrievalTraceHandler | None = None,
+        user: Optional[dict] = None,
     ) -> AssembledContext:
         ctx = AssembledContext()
         normalized_query = " ".join((user_query or "").split())
@@ -484,6 +486,7 @@ class ContextAssembler:
                 actions=knowledge_actions,
                 category=category,
                 trace_handler=trace_handler,
+                user=user,
             )
         )
         knowhow_task = asyncio.create_task(
@@ -491,6 +494,7 @@ class ContextAssembler:
                 surface="knowhow",
                 actions=knowhow_actions,
                 trace_handler=trace_handler,
+                user=user,
             )
         )
         skills_task = asyncio.create_task(
@@ -498,6 +502,7 @@ class ContextAssembler:
                 surface="skill",
                 actions=skill_actions,
                 trace_handler=trace_handler,
+                user=user,
             )
         )
 
@@ -567,6 +572,7 @@ class ContextAssembler:
         actions: list[RetrievalPlanAction],
         trace_handler: RetrievalTraceHandler | None,
         category: Optional[str] = None,
+        user: Optional[dict] = None,
     ) -> list[dict]:
         if not actions:
             return []
@@ -593,14 +599,14 @@ class ContextAssembler:
             elif surface == "knowhow":
                 result_sets = await asyncio.gather(
                     *[
-                        self.get_knowhow_rules(action.query, limit=action.limit)
+                        self.get_knowhow_rules(action.query, limit=action.limit, user=user)
                         for action in actions
                     ]
                 )
             else:
                 result_sets = await asyncio.gather(
                     *[
-                        self.match_skills(action.query, limit=action.limit)
+                        self.match_skills(action.query, limit=action.limit, user=user)
                         for action in actions
                     ]
                 )
@@ -933,12 +939,20 @@ class ContextAssembler:
             logger.warning("[ContextAssembler] knowledge search failed: %s", exc, exc_info=True)
             return []
 
-    async def get_knowhow_rules(self, query: str, *, limit: int = 5) -> List[dict]:
-        return await self._get_knowhow_rules(query, limit=limit)
+    async def get_knowhow_rules(self, query: str, *, limit: int = 5, user: Optional[dict] = None) -> List[dict]:
+        return await self._get_knowhow_rules(query, limit=limit, user=user)
 
-    async def _get_knowhow_rules(self, query: str, limit: int = 5) -> List[dict]:
+    async def _get_knowhow_rules(self, query: str, limit: int = 5, user: Optional[dict] = None) -> List[dict]:
         try:
-            rules = await knowhow_service.list_rules(active_only=True)
+            if isinstance(user, dict):
+                rules = await knowhow_service.list_rules(
+                    active_only=True,
+                    user_id=user.get("id"),
+                    group_id=user.get("group_id"),
+                    is_admin=is_admin(user),
+                )
+            else:
+                rules = await knowhow_service.list_rules(active_only=True)
             query_terms = self._extract_query_terms(query)
             query_text = self._normalize_rule_text(query)
             if not rules or not query_terms:
@@ -976,15 +990,16 @@ class ContextAssembler:
             logger.warning("[ContextAssembler] knowhow fetch failed: %s", exc, exc_info=True)
             return []
 
-    async def match_skills(self, query: str, *, limit: int = 3) -> List[dict]:
-        return await self._match_skills(query, limit=limit)
+    async def match_skills(self, query: str, *, limit: int = 3, user: Optional[dict] = None) -> List[dict]:
+        return await self._match_skills(query, limit=limit, user=user)
 
-    async def _match_skills(self, query: str, limit: int = 3) -> List[dict]:
+    async def _match_skills(self, query: str, limit: int = 3, user: Optional[dict] = None) -> List[dict]:
         try:
             if not skill_manager._loaded:
                 await skill_manager.initialize()
 
             skills = skill_manager.list_skills()
+            skills = await filter_accessible_skills(skills, user if isinstance(user, dict) else None)
             if not skills:
                 logger.debug("[ContextAssembler] no loaded skills, skip skill matching")
                 return []

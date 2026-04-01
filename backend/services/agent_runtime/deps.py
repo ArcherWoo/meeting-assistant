@@ -13,6 +13,7 @@ from services.agent_runtime.role_policy import load_agent_role_policy
 from services.context_assembler import context_assembler
 from services.knowhow_service import knowhow_service
 from services.knowledge_service import knowledge_service
+from services.llm_profiles import get_runtime_llm_config
 from services.skill_manager import skill_manager
 from services.storage import gen_id, storage
 
@@ -50,8 +51,14 @@ def _apply_skill_profile(policy, skill):
 
 
 async def build_agent_deps(request: AgentExecuteRequest) -> AgentDeps:
-    if not request.api_url.strip() or not request.api_key.strip():
-        raise AgentConfigurationError("Agent 执行需要可用的模型 API 配置")
+    llm_config = await get_runtime_llm_config(
+        profile_id=request.llm_profile_id,
+        api_url=request.api_url,
+        api_key=request.api_key,
+        model=request.model,
+    )
+    if not llm_config["api_url"] or not llm_config["api_key"]:
+        raise AgentConfigurationError("Agent 执行需要可用的模型配置，请先由管理员完成配置")
 
     role, policy = await load_agent_role_policy(storage, request.role_id)
     run_id = request.run_id or gen_id()
@@ -75,13 +82,13 @@ async def build_agent_deps(request: AgentExecuteRequest) -> AgentDeps:
         knowhow_service=knowhow_service,
         skill_manager=skill_manager,
         context_assembler=context_assembler,
-        api_url=request.api_url.strip(),
-        api_key=request.api_key.strip(),
-        model=request.model.strip() or "gpt-4o",
+        api_url=llm_config["api_url"],
+        api_key=llm_config["api_key"],
+        model=llm_config["model"],
         run_id=run_id,
         request_params=dict(request.params),
         conversation_id=request.conversation_id,
-        llm_profile_id=request.llm_profile_id,
+        llm_profile_id=llm_config["profile_id"],
         skill=active_skill,
         skill_execution_profile=skill_execution_profile,
         memory=AgentRuntimeMemory(),

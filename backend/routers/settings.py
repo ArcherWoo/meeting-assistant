@@ -18,7 +18,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from routers.auth import get_current_user
+from services.access_control import is_admin
 
+from services.llm_profiles import (
+    StoredLLMProfile,
+    get_active_llm_profile_id,
+    list_llm_profiles,
+    save_llm_profiles,
+    serialize_llm_profile,
+)
 from services.role_config import (
     VALID_AGENT_PREFLIGHT,
     VALID_AGENT_TOOLS,
@@ -90,8 +98,29 @@ class EmbeddingConfigRequest(BaseModel):
     model: str = _EMB_MODEL_DEFAULT
 
 
+class LLMProfileUpsertRequest(BaseModel):
+    id: str = ""
+    name: str
+    api_url: str = ""
+    api_key: str = ""
+    model: str = "gpt-4o"
+    temperature: float = 0.7
+    max_tokens: int = 4096
+    stream: bool = True
+    available_models: list[str] = Field(default_factory=list)
+
+
+class LLMProfileSelectionRequest(BaseModel):
+    profile_id: str
+
+
 def _settings_key(role_id: str) -> str:
     return f"system_prompt_{role_id}"
+
+
+def _require_admin(user: dict) -> None:
+    if not is_admin(user):
+        raise HTTPException(status_code=403, detail="仅管理员可以修改系统 LLM 配置")
 
 
 def _ensure_role_id(role_id: str) -> str:
@@ -322,6 +351,18 @@ async def _save_system_prompt_presets(presets: list[dict]) -> None:
     )
 
 
+async def _build_llm_profiles_response() -> dict:
+    profiles = await list_llm_profiles()
+    active_profile_id = await get_active_llm_profile_id()
+    if not active_profile_id and profiles:
+        active_profile_id = profiles[0].id
+    return {
+        "profiles": [serialize_llm_profile(profile) for profile in profiles],
+        "active_profile_id": active_profile_id,
+        "total": len(profiles),
+    }
+
+
 @router.get("/settings/roles")
 async def list_roles(user: dict = Depends(get_current_user)) -> dict:
     is_admin = user.get("system_role") == "admin"
@@ -331,6 +372,105 @@ async def list_roles(user: dict = Depends(get_current_user)) -> dict:
         is_admin=is_admin,
     )
     return {"roles": [_normalize_role_row(row) for row in rows]}
+
+
+@router.get("/settings/llm-profiles")
+async def list_llm_profiles_route(user: dict = Depends(get_current_user)) -> dict:
+    return await _build_llm_profiles_response()
+
+
+@router.post("/settings/llm-profiles")
+async def create_llm_profile(request: LLMProfileUpsertRequest, user: dict = Depends(get_current_user)) -> dict:
+    _require_admin(user)
+    profiles = await list_llm_profiles()
+    profile = StoredLLMProfile(
+        id=request.id.strip() or f"llm-{utc_now_iso()}",
+        name=request.name.strip() or f"模型 {len(profiles) + 1}",
+        api_url=request.api_url.strip(),
+        api_key=request.api_key.strip(),
+        model=request.model.strip() or "gpt-4o",
+        temperature=request.temperature,
+        max_tokens=request.max_tokens,
+        stream=request.stream,
+        available_models=request.available_models,
+    )
+    profiles.append(profile)
+    active_profile_id = await get_active_llm_profile_id() or profile.id
+    await save_llm_profiles(profiles, active_profile_id)
+    return {
+        "profile": serialize_llm_profile(profile),
+        "active_profile_id": active_profile_id,
+        "message": f"模型配置“{profile.name}”已创建",
+    }
+
+
+@router.put("/settings/llm-profiles/{profile_id}")
+async def update_llm_profile(profile_id: str, request: LLMProfileUpsertRequest, user: dict = Depends(get_current_user)) -> dict:
+    _require_admin(user)
+    profiles = await list_llm_profiles()
+    existing = next((profile for profile in profiles if profile.id == profile_id), None)
+    if not existing:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+
+    next_api_key = request.api_key.strip() or existing.api_key
+    updated_profile = existing.model_copy(
+        update={
+            "name": request.name.strip() or existing.name,
+            "api_url": request.api_url.strip(),
+            "api_key": next_api_key,
+            "model": request.model.strip() or "gpt-4o",
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+            "stream": request.stream,
+            "available_models": [
+                item.strip()
+                for item in request.available_models
+                if item.strip()
+            ],
+        }
+    )
+    next_profiles = [
+        updated_profile if profile.id == profile_id else profile
+        for profile in profiles
+    ]
+    active_profile_id = await get_active_llm_profile_id()
+    await save_llm_profiles(next_profiles, active_profile_id)
+    return {
+        "profile": serialize_llm_profile(updated_profile),
+        "active_profile_id": active_profile_id,
+        "message": f"模型配置“{updated_profile.name}”已更新",
+    }
+
+
+@router.delete("/settings/llm-profiles/{profile_id}")
+async def delete_llm_profile(profile_id: str, user: dict = Depends(get_current_user)) -> dict:
+    _require_admin(user)
+    profiles = await list_llm_profiles()
+    next_profiles = [profile for profile in profiles if profile.id != profile_id]
+    if len(next_profiles) == len(profiles):
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+
+    active_profile_id = await get_active_llm_profile_id()
+    if active_profile_id == profile_id:
+        active_profile_id = next_profiles[0].id if next_profiles else ""
+    await save_llm_profiles(next_profiles, active_profile_id)
+    return {
+        "id": profile_id,
+        "active_profile_id": active_profile_id,
+        "message": "模型配置已删除",
+    }
+
+
+@router.put("/settings/llm-profiles-active")
+async def set_active_llm_profile(request: LLMProfileSelectionRequest, user: dict = Depends(get_current_user)) -> dict:
+    _require_admin(user)
+    profile_id = request.profile_id.strip()
+    profiles = await list_llm_profiles()
+    if not any(profile.id == profile_id for profile in profiles):
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+
+    await save_llm_profiles(profiles, profile_id)
+    return {"active_profile_id": profile_id, "message": "默认模型已切换"}
 
 
 @router.post("/settings/roles")
@@ -520,6 +660,7 @@ async def delete_system_prompt_preset(preset_id: str, user: dict = Depends(get_c
 
 @router.get("/settings/embedding")
 async def get_embedding_config(user: dict = Depends(get_current_user)) -> dict:
+    _require_admin(user)
     api_url = await storage.get_setting(_EMB_URL_KEY, default="")
     api_key = await storage.get_setting(_EMB_KEY_KEY, default="")
     model = await storage.get_setting(_EMB_MODEL_KEY, default=_EMB_MODEL_DEFAULT)
@@ -533,6 +674,7 @@ async def get_embedding_config(user: dict = Depends(get_current_user)) -> dict:
 
 @router.put("/settings/embedding")
 async def update_embedding_config(request: EmbeddingConfigRequest, user: dict = Depends(get_current_user)) -> dict:
+    _require_admin(user)
     await storage.set_setting(_EMB_URL_KEY, request.api_url.strip())
     await storage.set_setting(_EMB_KEY_KEY, request.api_key.strip())
     await storage.set_setting(_EMB_MODEL_KEY, request.model.strip() or _EMB_MODEL_DEFAULT)
@@ -544,6 +686,7 @@ async def update_embedding_config(request: EmbeddingConfigRequest, user: dict = 
 
 @router.delete("/settings/embedding")
 async def reset_embedding_config(user: dict = Depends(get_current_user)) -> dict:
+    _require_admin(user)
     await storage.set_setting(_EMB_URL_KEY, "")
     await storage.set_setting(_EMB_KEY_KEY, "")
     await storage.set_setting(_EMB_MODEL_KEY, "")
@@ -552,6 +695,7 @@ async def reset_embedding_config(user: dict = Depends(get_current_user)) -> dict
 
 @router.post("/settings/embedding/test")
 async def test_embedding_config(request: EmbeddingConfigRequest, user: dict = Depends(get_current_user)) -> dict:
+    _require_admin(user)
     if not request.api_url.strip() or not request.api_key.strip():
         raise HTTPException(status_code=400, detail="请填写 API Base URL 和 API Key")
 

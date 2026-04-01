@@ -15,6 +15,8 @@ interface Props {
   isStreaming?: boolean;
   onApplySkillSuggestion?: (message: Message, suggestion: SkillSuggestionEvent) => void;
   onDismissSkillSuggestion?: (message: Message) => void;
+  onRetryGeneration?: (message: Message) => void;
+  canRetryGeneration?: boolean;
 }
 
 function renderContextBadge(label: string, value: number, tone: 'blue' | 'emerald' | 'amber') {
@@ -101,18 +103,42 @@ function getContextCountSummary(context: ContextMetadata, kind: 'injected' | 're
   return parts.length > 0 ? parts.join(' / ') : '无引用来源';
 }
 
+function getAttachmentSummary(message: Message): string[] {
+  return (message.attachments ?? []).map((attachment) => {
+    const parts = [attachment.fileType.toUpperCase()];
+    if (attachment.fileSize) {
+      const size = attachment.fileSize < 1024
+        ? `${attachment.fileSize}B`
+        : attachment.fileSize < 1024 * 1024
+          ? `${(attachment.fileSize / 1024).toFixed(1)}KB`
+          : `${(attachment.fileSize / (1024 * 1024)).toFixed(1)}MB`;
+      parts.push(size);
+    }
+    if (attachment.charCount) {
+      parts.push(`${attachment.charCount} 字符`);
+    }
+    return parts.filter(Boolean).join(' · ');
+  });
+}
+
 function MessageBubble({
   message,
   isStreaming = false,
   onApplySkillSuggestion,
   onDismissSkillSuggestion,
+  onRetryGeneration,
+  canRetryGeneration = false,
 }: Props) {
   const isUser = message.role === 'user';
-  const isError = message.content.startsWith('⚠️');
+  const generationState = message.metadata?.generationState;
+  const generationError = message.metadata?.generationError;
+  const isError = generationState === 'error' && message.content.trim() === '本次生成失败，请重试。';
   const senderLabel = isUser ? '你' : '智枢';
   const context = message.metadata?.context;
   const agentResult = message.metadata?.agentResult;
   const skillSuggestion = message.metadata?.skillSuggestion;
+  const attachments = message.attachments ?? [];
+  const attachmentSummaries = getAttachmentSummary(message);
   const citations = context?.citations ?? [];
   const retrievedCitations = context?.retrieved_citations?.length
     ? context.retrieved_citations
@@ -364,7 +390,21 @@ function MessageBubble({
           )}
         >
           {isUser ? (
-            <p className="whitespace-pre-wrap">{message.content}</p>
+            <>
+              <p className="whitespace-pre-wrap">{message.content}</p>
+              {attachments.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {attachments.map((attachment, index) => (
+                    <div key={attachment.id || `${attachment.fileName}-${index}`} className="rounded-lg border border-white/20 bg-white/10 px-3 py-2">
+                      <p className="truncate text-xs font-medium">{attachment.fileName}</p>
+                      {attachmentSummaries[index] && (
+                        <p className="mt-1 text-[11px] text-white/80">{attachmentSummaries[index]}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
           ) : isStreaming ? (
             <p className="whitespace-pre-wrap">{message.content}</p>
           ) : message.content ? (
@@ -422,6 +462,57 @@ function MessageBubble({
                   忽略
                 </button>
               </div>
+            </div>
+          )}
+
+          {!isUser && generationState && (
+            <div
+              className={clsx(
+                'mt-4 rounded-lg border p-3',
+                generationState === 'error'
+                  ? 'border-red-200 bg-red-50/80 dark:border-red-800 dark:bg-red-900/20'
+                  : 'border-amber-200 bg-amber-50/80 dark:border-amber-800 dark:bg-amber-900/20',
+              )}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={clsx(
+                    'win-badge px-2 py-1 text-[10px]',
+                    generationState === 'error'
+                      ? 'border-red-200 bg-white/90 text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300'
+                      : 'border-amber-200 bg-white/90 text-amber-700 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300',
+                  )}
+                >
+                  {generationState === 'error' ? '生成失败' : '已停止生成'}
+                </span>
+              </div>
+              <p
+                className={clsx(
+                  'mt-2 text-[12px] leading-5',
+                  generationState === 'error'
+                    ? 'text-red-700 dark:text-red-300'
+                    : 'text-amber-800 dark:text-amber-300',
+                )}
+              >
+                {generationState === 'error'
+                  ? '这次回答没有完整生成，你可以直接重新生成。'
+                  : '这次回答已按你的操作停止，当前内容已经保留。'}
+              </p>
+              {generationError && (
+                <p className="mt-2 whitespace-pre-wrap text-[11px] leading-5 text-text-secondary dark:text-text-dark-secondary">
+                  详情：{generationError}
+                </p>
+              )}
+              {onRetryGeneration && canRetryGeneration && (
+                <div className="mt-3">
+                  <button
+                    onClick={() => onRetryGeneration(message)}
+                    className="win-button h-8 px-3 text-xs"
+                  >
+                    重新生成
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

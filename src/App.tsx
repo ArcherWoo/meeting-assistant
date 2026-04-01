@@ -2,9 +2,10 @@
  * 应用根组件
  * 负责：主题管理、布局渲染、后端连接状态监控
  */
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useAppStore } from './stores/appStore';
 import { useAuthStore } from './stores/authStore';
+import { initBackend } from './bootstrap/backend';
 import MainLayout from './components/layout/MainLayout';
 import LoginPage from './components/auth/LoginPage';
 
@@ -27,11 +28,27 @@ function darkenHexParts(hex: string, factor = 0.82): string {
 export default function App() {
   const { theme, accentColor } = useAppStore();
   const { user, initialized, init } = useAuthStore();
+  const lastBackendInitKeyRef = useRef<string | null>(null);
 
   // 初始化认证状态
   useEffect(() => {
     void init();
   }, [init]);
+
+  // 认证状态完成后初始化后端；登录后会自动重新拉取角色/会话数据。
+  useEffect(() => {
+    if (!initialized) {
+      return;
+    }
+
+    const initKey = user?.id ? `user:${user.id}` : 'guest';
+    if (lastBackendInitKeyRef.current === initKey) {
+      return;
+    }
+    lastBackendInitKeyRef.current = initKey;
+
+    void initBackend({ loadProtectedData: Boolean(user) });
+  }, [initialized, user?.id]);
 
   // 主题色 CSS 变量注入
   useEffect(() => {

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from routers.auth import get_current_user
+from services.access_control import can_access_role, is_admin
 from services.storage import storage
 
 router = APIRouter()
@@ -36,6 +37,7 @@ class MessageCreateRequest(BaseModel):
     token_output: int = 0
     duration_ms: int = 0
     metadata: dict = Field(default_factory=dict)
+    attachments: list[dict] = Field(default_factory=list)
 
 
 class MessageUpdateRequest(BaseModel):
@@ -45,6 +47,7 @@ class MessageUpdateRequest(BaseModel):
     token_output: Optional[int] = None
     duration_ms: Optional[int] = None
     metadata: Optional[dict] = None
+    attachments: Optional[list[dict]] = None
 
 
 def _parse_string_list(raw_value) -> list[str]:
@@ -62,21 +65,86 @@ def _parse_string_list(raw_value) -> list[str]:
     return [str(item).strip() for item in parsed if str(item).strip()]
 
 
-async def _ensure_role_allows_surface(role_id: str, surface: str) -> None:
+def _normalize_attachments(raw_attachments: Optional[list[dict]]) -> list[dict]:
+    normalized: list[dict] = []
+    for index, item in enumerate(raw_attachments or []):
+        if not isinstance(item, dict):
+            continue
+        file_name = str(item.get("fileName") or item.get("filename") or "").strip()
+        if not file_name:
+            file_name = f"attachment-{index + 1}"
+        normalized.append(
+            {
+                "id": str(item.get("id") or f"attachment-{index + 1}"),
+                "fileName": file_name,
+                "fileSize": int(item.get("fileSize") or item.get("file_size") or 0),
+                "fileType": str(item.get("fileType") or item.get("file_type") or "").strip(),
+                "text": str(item.get("text") or ""),
+                "charCount": int(item.get("charCount") or item.get("char_count") or 0),
+            }
+        )
+    return normalized
+
+
+def _merge_message_metadata(
+    base_metadata: Optional[dict],
+    next_metadata: Optional[dict],
+    attachments: Optional[list[dict]],
+) -> dict:
+    merged = dict(base_metadata or {})
+    if next_metadata:
+        merged.update(next_metadata)
+
+    if attachments is not None:
+        normalized_attachments = _normalize_attachments(attachments)
+        if normalized_attachments:
+            merged["attachments"] = normalized_attachments
+        else:
+            merged.pop("attachments", None)
+
+    return merged
+
+
+async def _ensure_role_allows_surface(role_id: str, surface: str, user: dict) -> dict:
     role = await storage.get_role(role_id)
     if not role:
         raise HTTPException(status_code=400, detail="角色不存在")
+    if not await can_access_role(role, user):
+        raise HTTPException(status_code=403, detail="无权使用该角色")
 
     allowed_surfaces = _parse_string_list(role.get("allowed_surfaces")) or ["chat"]
     if surface not in allowed_surfaces:
         raise HTTPException(status_code=400, detail=f"角色 {role_id} 不允许在 {surface} surface 下创建会话")
+    return role
+
+
+async def _ensure_conversation_access(conversation_id: str, user: dict) -> dict:
+    conversation = await storage.get_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="对话不存在")
+
+    if is_admin(user):
+        return conversation
+
+    owner_id = await storage.get_conversation_owner_id(conversation_id)
+    if owner_id != user.get("id"):
+        raise HTTPException(status_code=403, detail="无权访问该对话")
+    return conversation
+
+
+async def _ensure_message_access(message_id: str, user: dict) -> dict:
+    message = await storage.get_message(message_id)
+    if not message:
+        raise HTTPException(status_code=404, detail="消息不存在")
+    await _ensure_conversation_access(message["conversationId"], user)
+    return message
 
 
 @router.get("/chat/state")
 async def get_chat_state(user: dict = Depends(get_current_user)) -> dict:
     """一次性返回默认工作区下的所有会话与消息。"""
     workspace_id = await storage.get_default_workspace_id()
-    owner_id = None if user.get("role") == "admin" else user["id"]
+    owner_id = None if is_admin(user) else user["id"]
     conversations = await storage.list_conversations(workspace_id, owner_id=owner_id)
     messages_by_conversation: dict[str, list[dict]] = {}
 
@@ -155,7 +223,7 @@ async def create_conversation(request: ConversationCreateRequest, user: dict = D
     surface = (request.surface or "chat").strip() or "chat"
     if surface not in {"chat", "agent"}:
         raise HTTPException(status_code=400, detail="surface 必须是 chat 或 agent")
-    await _ensure_role_allows_surface(role_id, surface)
+    await _ensure_role_allows_surface(role_id, surface, user)
 
     workspace_id = await storage.get_default_workspace_id()
     conversation = await storage.create_conversation(
@@ -171,9 +239,7 @@ async def create_conversation(request: ConversationCreateRequest, user: dict = D
 
 @router.put("/conversations/{conversation_id}")
 async def update_conversation(conversation_id: str, request: ConversationUpdateRequest, user: dict = Depends(get_current_user)) -> dict:
-    existing = await storage.get_conversation(conversation_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="对话不存在")
+    existing = await _ensure_conversation_access(conversation_id, user)
 
     updates: dict = {}
     if request.title is not None:
@@ -195,7 +261,7 @@ async def update_conversation(conversation_id: str, request: ConversationUpdateR
 
     next_role_id = updates.get("role_id", existing["roleId"])
     next_surface = updates.get("surface", existing["surface"])
-    await _ensure_role_allows_surface(str(next_role_id), str(next_surface))
+    await _ensure_role_allows_surface(str(next_role_id), str(next_surface), user)
 
     conversation = await storage.update_conversation(conversation_id, **updates)
     if not conversation:
@@ -205,9 +271,7 @@ async def update_conversation(conversation_id: str, request: ConversationUpdateR
 
 @router.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, user: dict = Depends(get_current_user)) -> dict:
-    existing = await storage.get_conversation(conversation_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="对话不存在")
+    await _ensure_conversation_access(conversation_id, user)
 
     await storage.delete_conversation(conversation_id)
     return {"id": conversation_id, "message": "对话已删除"}
@@ -215,9 +279,7 @@ async def delete_conversation(conversation_id: str, user: dict = Depends(get_cur
 
 @router.get("/conversations/{conversation_id}/messages")
 async def list_messages(conversation_id: str, user: dict = Depends(get_current_user)) -> dict:
-    conversation = await storage.get_conversation(conversation_id)
-    if not conversation:
-        raise HTTPException(status_code=404, detail="对话不存在")
+    await _ensure_conversation_access(conversation_id, user)
 
     messages = await storage.list_messages(conversation_id)
     return {"messages": messages, "total": len(messages)}
@@ -225,9 +287,8 @@ async def list_messages(conversation_id: str, user: dict = Depends(get_current_u
 
 @router.post("/conversations/{conversation_id}/messages")
 async def create_message(conversation_id: str, request: MessageCreateRequest, user: dict = Depends(get_current_user)) -> dict:
-    conversation = await storage.get_conversation(conversation_id)
-    if not conversation:
-        raise HTTPException(status_code=404, detail="对话不存在")
+    await _ensure_conversation_access(conversation_id, user)
+    metadata = _merge_message_metadata({}, request.metadata, request.attachments)
 
     message = await storage.add_message(
         conversation_id=conversation_id,
@@ -237,14 +298,22 @@ async def create_message(conversation_id: str, request: MessageCreateRequest, us
         token_input=request.token_input,
         token_output=request.token_output,
         duration_ms=request.duration_ms,
-        metadata=json.dumps(request.metadata, ensure_ascii=False),
+        metadata=json.dumps(metadata, ensure_ascii=False),
     )
     return {"message": message}
 
 
 @router.put("/messages/{message_id}")
 async def update_message(message_id: str, request: MessageUpdateRequest, user: dict = Depends(get_current_user)) -> dict:
-    updates = request.model_dump(exclude_none=True)
+    existing = await _ensure_message_access(message_id, user)
+    updates = request.model_dump(exclude_none=True, exclude={"metadata", "attachments"})
+    if request.metadata is not None or request.attachments is not None:
+        attachments = request.attachments if request.attachments is not None else existing.get("attachments")
+        updates["metadata"] = _merge_message_metadata(
+            existing.get("metadata"),
+            request.metadata,
+            attachments,
+        )
     message = await storage.update_message(message_id, **updates)
     if not message:
         raise HTTPException(status_code=404, detail="消息不存在")

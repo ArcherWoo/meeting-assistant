@@ -18,8 +18,10 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from services.access_control import filter_accessible_skills, get_accessible_skill
 from services.skill_manager import _BACKEND_SKILLS_DIR, _USER_SKILLS_DIR, skill_manager
 from services.skill_matcher import skill_matcher
+from services.storage import storage
 from routers.auth import get_current_user
 
 router = APIRouter()
@@ -35,32 +37,20 @@ class SaveSkillRequest(BaseModel):
     filename: Optional[str] = None
 
 
-@router.get("/skills")
-async def list_skills(builtin_only: bool = False, user: dict = Depends(get_current_user)) -> dict:
-    skills = skill_manager.list_skills(builtin_only=builtin_only)
+def _serialize_skill_summary(skill) -> dict:
     return {
-        "skills": [
-            {
-                "id": s.id,
-                "name": s.name,
-                "description": s.description,
-                "keywords": s.keywords,
-                "input_types": s.input_types,
-                "is_builtin": s.is_builtin,
-                "parameters": s.parameters,
-                "execution_profile": asdict(s.execution_profile),
-            }
-            for s in skills
-        ],
-        "total": len(skills),
+        "id": skill.id,
+        "name": skill.name,
+        "description": skill.description,
+        "keywords": skill.keywords,
+        "input_types": skill.input_types,
+        "is_builtin": skill.is_builtin,
+        "parameters": skill.parameters,
+        "execution_profile": asdict(skill.execution_profile),
     }
 
 
-@router.get("/skills/{skill_id}")
-async def get_skill(skill_id: str, user: dict = Depends(get_current_user)) -> dict:
-    skill = skill_manager.get_skill(skill_id)
-    if not skill:
-        raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' 未找到")
+def _serialize_skill_detail(skill) -> dict:
     return {
         "id": skill.id,
         "name": skill.name,
@@ -77,9 +67,34 @@ async def get_skill(skill_id: str, user: dict = Depends(get_current_user)) -> di
     }
 
 
+async def _resolve_skill_for_user(skill_id: str, user: object):
+    if isinstance(user, dict):
+        return await get_accessible_skill(skill_id, user)
+    return skill_manager.get_skill(skill_id)
+
+
+@router.get("/skills")
+async def list_skills(builtin_only: bool = False, user: dict = Depends(get_current_user)) -> dict:
+    skills = skill_manager.list_skills(builtin_only=builtin_only)
+    if isinstance(user, dict):
+        skills = await filter_accessible_skills(skills, user)
+    return {
+        "skills": [_serialize_skill_summary(skill) for skill in skills],
+        "total": len(skills),
+    }
+
+
+@router.get("/skills/{skill_id}")
+async def get_skill(skill_id: str, user: dict = Depends(get_current_user)) -> dict:
+    skill = await _resolve_skill_for_user(skill_id, user)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' 未找到")
+    return _serialize_skill_detail(skill)
+
+
 @router.get("/skills/{skill_id}/content")
 async def get_skill_content(skill_id: str, user: dict = Depends(get_current_user)) -> dict:
-    skill = skill_manager.get_skill(skill_id)
+    skill = await _resolve_skill_for_user(skill_id, user)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' 未找到")
     if not skill.source_path:
@@ -124,6 +139,8 @@ async def save_skill(request: SaveSkillRequest, user: dict = Depends(get_current
 
     await skill_manager.reload()
     skill = skill_manager.get_skill(slug)
+    if isinstance(user, dict) and skill and not skill.is_builtin:
+        await storage.upsert_skill_metadata(skill.id, user["id"])
     return {
         "id": slug,
         "name": skill.name if skill else skill_name,
@@ -138,7 +155,7 @@ async def update_skill(skill_id: str, request: SaveSkillRequest, user: dict = De
     if not content:
         raise HTTPException(status_code=400, detail="Skill 内容不能为空")
 
-    skill = skill_manager.get_skill(skill_id)
+    skill = await _resolve_skill_for_user(skill_id, user)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' 未找到")
 
@@ -150,6 +167,8 @@ async def update_skill(skill_id: str, request: SaveSkillRequest, user: dict = De
         await skill_manager.clear_builtin_deleted(skill_id)
         await skill_manager.reload()
         updated = skill_manager.get_skill(skill_id)
+        if isinstance(user, dict) and updated and not updated.is_builtin:
+            await storage.upsert_skill_metadata(updated.id, user["id"])
         return {
             "id": skill_id,
             "name": updated.name if updated else skill_id,
@@ -164,6 +183,8 @@ async def update_skill(skill_id: str, request: SaveSkillRequest, user: dict = De
     await skill_manager.reload()
 
     updated = skill_manager.get_skill(skill_id)
+    if isinstance(user, dict) and updated and not updated.is_builtin:
+        await storage.upsert_skill_metadata(updated.id, user["id"])
     return {
         "id": skill_id,
         "name": updated.name if updated else skill_id,
@@ -181,7 +202,7 @@ async def delete_skill(skill_id: str, user: dict = Depends(get_current_user)) ->
     - 用户覆盖的内置 Skill：删除用户目录下的覆盖文件，并写入墓碑隐藏内置版。
     - 纯内置 Skill：仅写入墓碑隐藏，不修改内置源文件。
     """
-    skill = skill_manager.get_skill(skill_id)
+    skill = await _resolve_skill_for_user(skill_id, user)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' 未找到")
     if not skill.source_path:
@@ -213,6 +234,8 @@ async def delete_skill(skill_id: str, user: dict = Depends(get_current_user)) ->
     if in_builtin_dir:
         await skill_manager.mark_builtin_deleted(skill_id)
         await skill_manager.reload()
+        if isinstance(user, dict):
+            await storage.delete_skill_metadata(skill_id)
         return {
             "id": skill_id,
             "message": f"Skill '{skill_id}' 已从列表隐藏（未修改内置源文件）",
@@ -232,12 +255,16 @@ async def delete_skill(skill_id: str, user: dict = Depends(get_current_user)) ->
         deletion_mode = "user_delete"
 
     await skill_manager.reload()
+    if isinstance(user, dict):
+        await storage.delete_skill_metadata(skill_id)
     return {"id": skill_id, "message": message, "deletion_mode": deletion_mode}
 
 
 @router.post("/skills/match")
 async def match_skill(request: MatchRequest, user: dict = Depends(get_current_user)) -> dict:
     skills = skill_manager.list_skills()
+    if isinstance(user, dict):
+        skills = await filter_accessible_skills(skills, user)
     if not skills:
         return {"matches": [], "total": 0}
 

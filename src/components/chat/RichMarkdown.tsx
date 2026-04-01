@@ -1,24 +1,26 @@
-import { Children, Fragment, cloneElement, isValidElement, memo, type ReactNode } from 'react';
+import { Children, Fragment, cloneElement, isValidElement, memo, type CSSProperties, type ReactNode } from 'react';
 import clsx from 'clsx';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import ReactMarkdown, { type Components } from 'react-markdown';
+import remarkBreaks from 'remark-breaks';
+import remarkGfm from 'remark-gfm';
+import { visit } from 'unist-util-visit';
 
 type TableAlignment = 'left' | 'center' | 'right';
-
-interface ParsedTable {
-  header: string[];
-  alignments: TableAlignment[];
-  rows: string[][];
-}
-
-type MarkdownBlock =
-  | { type: 'markdown'; content: string }
-  | { type: 'table'; table: ParsedTable };
 
 interface Props {
   content: string;
 }
 
+type HtmlElementNode = {
+  type: 'element';
+  tagName: string;
+  properties?: Record<string, unknown>;
+};
+
 const INLINE_MARKER_RE = /\[\[\s*([^\]:\uFF1A]+?)\s*[:\uFF1A]\s*([\s\S]+?)\s*\]\]/g;
+const CSS_NAMED_COLOR_RE = /^[a-z]{3,20}$/i;
 
 const HIGHLIGHT_TONE_MAP: Record<string, 'good' | 'bad' | 'warn' | 'info'> = {
   good: 'good',
@@ -58,150 +60,102 @@ const HIGHLIGHT_TONE_MAP: Record<string, 'good' | 'bad' | 'warn' | 'info'> = {
   '\u63d0\u793a': 'info',
 };
 
+const SANITIZE_SCHEMA: any = {
+  ...defaultSchema,
+  tagNames: Array.from(new Set([
+    ...(defaultSchema.tagNames ?? []),
+    'span',
+    'mark',
+    'sub',
+    'sup',
+    'kbd',
+    'table',
+    'thead',
+    'tbody',
+    'tr',
+    'th',
+    'td',
+  ])),
+  attributes: {
+    ...(defaultSchema.attributes ?? {}),
+    span: [...((defaultSchema.attributes as Record<string, unknown[]>)?.span ?? []), 'data-md-color'],
+    th: [...((defaultSchema.attributes as Record<string, unknown[]>)?.th ?? []), 'align'],
+    td: [...((defaultSchema.attributes as Record<string, unknown[]>)?.td ?? []), 'align'],
+  },
+};
+
 function resolveHighlightTone(label: string): 'good' | 'bad' | 'warn' | 'info' | null {
   return HIGHLIGHT_TONE_MAP[label.trim().toLowerCase()] ?? null;
 }
 
-function splitMarkdownTableRow(line: string): string[] {
-  let trimmed = line.trim();
-  if (trimmed.startsWith('|')) trimmed = trimmed.slice(1);
-  if (trimmed.endsWith('|')) trimmed = trimmed.slice(0, -1);
+function normalizeMarkdownSource(content: string): string {
+  return content
+    .replace(/\r\n?/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .trim();
+}
 
-  const cells: string[] = [];
-  let current = '';
-  let escaped = false;
+function normalizeColorValue(value: string): string | null {
+  const normalized = value.trim().replace(/^["']|["']$/g, '');
+  if (!normalized) return null;
 
-  for (const char of trimmed) {
-    if (escaped) {
-      current += char;
-      escaped = false;
-      continue;
-    }
-
-    if (char === '\\') {
-      escaped = true;
-      continue;
-    }
-
-    if (char === '|') {
-      cells.push(current.trim());
-      current = '';
-      continue;
-    }
-
-    current += char;
+  if (/^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(normalized)) {
+    return normalized;
   }
 
-  cells.push(current.trim());
-  return cells;
-}
-
-function isMarkdownTableSeparator(line: string): boolean {
-  const normalized = line.trim();
-  return /^\|?(\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?$/.test(normalized);
-}
-
-function isMarkdownTableStart(lines: string[], index: number): boolean {
-  if (index + 1 >= lines.length) return false;
-
-  const header = lines[index]?.trim();
-  const separator = lines[index + 1]?.trim();
-
-  if (!header || !separator) return false;
-  if (!header.includes('|')) return false;
-
-  return isMarkdownTableSeparator(separator);
-}
-
-function parseAlignmentRow(line: string): TableAlignment[] {
-  return splitMarkdownTableRow(line).map((cell) => {
-    const normalized = cell.trim();
-    const alignLeft = normalized.startsWith(':');
-    const alignRight = normalized.endsWith(':');
-
-    if (alignLeft && alignRight) return 'center';
-    if (alignRight) return 'right';
-    return 'left';
-  });
-}
-
-function normalizeTableRows(rows: string[][], columnCount: number): string[][] {
-  return rows.map((row) => {
-    if (row.length === columnCount) return row;
-    if (row.length > columnCount) return row.slice(0, columnCount);
-    return [...row, ...Array.from({ length: columnCount - row.length }, () => '')];
-  });
-}
-
-function parseMarkdownTable(lines: string[], startIndex: number): { block: MarkdownBlock; nextIndex: number } {
-  const header = splitMarkdownTableRow(lines[startIndex]);
-  const alignments = parseAlignmentRow(lines[startIndex + 1]);
-  let nextIndex = startIndex + 2;
-  const rowLines: string[][] = [];
-
-  while (nextIndex < lines.length) {
-    const line = lines[nextIndex];
-    if (!line.trim() || !line.includes('|')) break;
-    rowLines.push(splitMarkdownTableRow(line));
-    nextIndex += 1;
+  if (/^(?:rgb|hsl)a?\([^()]+\)$/i.test(normalized)) {
+    return normalized;
   }
 
-  const columnCount = header.length;
+  if (/^var\(--[\w-]+\)$/i.test(normalized)) {
+    return normalized;
+  }
 
-  return {
-    block: {
-      type: 'table',
-      table: {
-        header,
-        alignments: normalizeTableRows([alignments], columnCount)[0] as TableAlignment[],
-        rows: normalizeTableRows(rowLines, columnCount),
-      },
-    },
-    nextIndex,
+  if (CSS_NAMED_COLOR_RE.test(normalized)) {
+    return normalized.toLowerCase();
+  }
+
+  return null;
+}
+
+function extractColorFromStyle(styleValue: unknown): string | null {
+  const styleText = Array.isArray(styleValue)
+    ? styleValue.join(';')
+    : typeof styleValue === 'string'
+      ? styleValue
+      : '';
+
+  if (!styleText) return null;
+
+  const match = styleText.match(/(?:^|;)\s*color\s*:\s*([^;]+)/i);
+  if (!match?.[1]) return null;
+
+  return normalizeColorValue(match[1]);
+}
+
+function rehypeNormalizeInlineColors() {
+  return (tree: unknown) => {
+    visit(tree as any, 'element', (node: HtmlElementNode) => {
+      const properties = node.properties ?? {};
+      const directColor = typeof properties.color === 'string'
+        ? normalizeColorValue(properties.color)
+        : null;
+      const styleColor = extractColorFromStyle(properties.style);
+      const color = directColor ?? styleColor;
+
+      if (node.tagName === 'font') {
+        node.tagName = 'span';
+      }
+
+      if (color) {
+        properties['data-md-color'] = color;
+      }
+
+      delete properties.color;
+      delete properties.style;
+      node.properties = properties;
+    });
   };
-}
-
-function parseMarkdownBlocks(content: string): MarkdownBlock[] {
-  const normalized = content.replace(/\r\n?/g, '\n');
-  const lines = normalized.split('\n');
-  const blocks: MarkdownBlock[] = [];
-  const markdownBuffer: string[] = [];
-  let inFence = false;
-
-  const flushMarkdown = () => {
-    const segment = markdownBuffer.join('\n').trim();
-    markdownBuffer.length = 0;
-    if (segment) {
-      blocks.push({ type: 'markdown', content: segment });
-    }
-  };
-
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index];
-    const fenceMatch = /^(```|~~~)/.exec(line.trim());
-
-    if (fenceMatch) {
-      inFence = !inFence;
-      markdownBuffer.push(line);
-      index += 1;
-      continue;
-    }
-
-    if (!inFence && isMarkdownTableStart(lines, index)) {
-      flushMarkdown();
-      const parsed = parseMarkdownTable(lines, index);
-      blocks.push(parsed.block);
-      index = parsed.nextIndex;
-      continue;
-    }
-
-    markdownBuffer.push(line);
-    index += 1;
-  }
-
-  flushMarkdown();
-  return blocks;
 }
 
 function renderAnnotatedText(text: string, keyPrefix: string): ReactNode {
@@ -281,12 +235,31 @@ function decorateMarkdownChildren(node: ReactNode, keyPrefix = 'md'): ReactNode 
   return node;
 }
 
+function getCellAlignment(node: unknown): TableAlignment | undefined {
+  const align = (node as { properties?: Record<string, unknown> } | undefined)?.properties?.align;
+  if (align === 'center' || align === 'right' || align === 'left') {
+    return align;
+  }
+  return undefined;
+}
+
+function alignmentClass(align: TableAlignment | undefined): string {
+  if (align === 'center') return 'text-center';
+  if (align === 'right') return 'text-right';
+  return 'text-left';
+}
+
+function getNodeInlineColor(node: unknown): string | null {
+  const color = (node as { properties?: Record<string, unknown> } | undefined)?.properties?.['data-md-color'];
+  return typeof color === 'string' ? color : null;
+}
+
 function createMarkdownComponents(options?: { compact?: boolean }): Components {
   const compact = options?.compact ?? false;
 
   return {
     p: ({ children }) => (
-      <p className={clsx(compact ? 'my-0 whitespace-pre-wrap' : 'my-2 whitespace-pre-wrap')}>
+      <p className={clsx(compact ? 'my-0 leading-6' : 'my-2 leading-7')}>
         {decorateMarkdownChildren(children, compact ? 'p-compact' : 'p')}
       </p>
     ),
@@ -316,10 +289,21 @@ function createMarkdownComponents(options?: { compact?: boolean }): Components {
       </ol>
     ),
     li: ({ children }) => (
-      <li className="whitespace-pre-wrap">
+      <li className="leading-7">
         {decorateMarkdownChildren(children, compact ? 'li-compact' : 'li')}
       </li>
     ),
+    strong: ({ children }) => (
+      <strong className="font-semibold text-slate-900 dark:text-slate-50">
+        {decorateMarkdownChildren(children, compact ? 'strong-compact' : 'strong')}
+      </strong>
+    ),
+    em: ({ children }) => (
+      <em className="markdown-emphasis">
+        {decorateMarkdownChildren(children, compact ? 'em-compact' : 'em')}
+      </em>
+    ),
+    br: () => <br className="markdown-soft-break" />,
     blockquote: ({ children }) => (
       <blockquote className="my-3 border-l-4 border-primary/35 bg-surface/80 px-3 py-2 text-text-secondary dark:bg-dark-sidebar/70 dark:text-text-dark-secondary">
         {decorateMarkdownChildren(children, compact ? 'blockquote-compact' : 'blockquote')}
@@ -334,6 +318,56 @@ function createMarkdownComponents(options?: { compact?: boolean }): Components {
       >
         {decorateMarkdownChildren(children, compact ? 'link-compact' : 'link')}
       </a>
+    ),
+    span: ({ node, children }) => {
+      const color = getNodeInlineColor(node);
+      const style: CSSProperties | undefined = color ? { color } : undefined;
+
+      return (
+        <span style={style}>
+          {decorateMarkdownChildren(children, compact ? 'span-compact' : 'span')}
+        </span>
+      );
+    },
+    table: ({ children }) => (
+      <div className="markdown-table-shell my-4 overflow-x-auto rounded-xl border border-surface-divider bg-white shadow-sm dark:border-dark-divider dark:bg-dark-card">
+        <table className="markdown-table min-w-full border-separate border-spacing-0 text-left text-[13px] leading-6">
+          {children}
+        </table>
+      </div>
+    ),
+    thead: ({ children }) => (
+      <thead className="bg-slate-50/90 dark:bg-slate-900/60">
+        {children}
+      </thead>
+    ),
+    tbody: ({ children }) => (
+      <tbody>{children}</tbody>
+    ),
+    tr: ({ children }) => (
+      <tr className="odd:bg-white even:bg-slate-50/55 hover:bg-primary/5 dark:odd:bg-dark-card dark:even:bg-dark-sidebar/45 dark:hover:bg-primary/8">
+        {children}
+      </tr>
+    ),
+    th: ({ node, children }) => (
+      <th
+        className={clsx(
+          'border-b border-surface-divider px-4 py-3 font-semibold text-slate-700 dark:border-dark-divider dark:text-slate-100',
+          alignmentClass(getCellAlignment(node)),
+        )}
+      >
+        {decorateMarkdownChildren(children, compact ? 'th-compact' : 'th')}
+      </th>
+    ),
+    td: ({ node, children }) => (
+      <td
+        className={clsx(
+          'border-t border-surface-divider px-4 py-3 align-top text-text-primary dark:border-dark-divider dark:text-text-dark-primary',
+          alignmentClass(getCellAlignment(node)),
+        )}
+      >
+        {decorateMarkdownChildren(children, compact ? 'td-compact' : 'td')}
+      </td>
     ),
     code: ({ className, children }) => {
       const code = String(children).replace(/\n$/, '');
@@ -364,81 +398,19 @@ function createMarkdownComponents(options?: { compact?: boolean }): Components {
   };
 }
 
-function renderTableCell(content: string, key: string) {
-  if (!content.trim()) return null;
-
-  return (
-    <ReactMarkdown components={createMarkdownComponents({ compact: true })} key={key}>
-      {content}
-    </ReactMarkdown>
-  );
-}
-
-function alignmentClass(align: TableAlignment | undefined): string {
-  if (align === 'center') return 'text-center';
-  if (align === 'right') return 'text-right';
-  return 'text-left';
-}
-
-function MarkdownTable({ table }: { table: ParsedTable }) {
-  return (
-    <div className="markdown-table-shell my-4 overflow-x-auto rounded-xl border border-surface-divider bg-white shadow-sm dark:border-dark-divider dark:bg-dark-card">
-      <table className="markdown-table min-w-full border-separate border-spacing-0 text-left text-[13px] leading-6">
-        <thead className="bg-slate-50/90 dark:bg-slate-900/60">
-          <tr>
-            {table.header.map((cell, index) => (
-              <th
-                key={`head-${index}`}
-                className={clsx(
-                  'border-b border-surface-divider px-4 py-3 font-semibold text-slate-700 dark:border-dark-divider dark:text-slate-100',
-                  alignmentClass(table.alignments[index]),
-                )}
-              >
-                {renderTableCell(cell, `head-${index}`)}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {table.rows.map((row, rowIndex) => (
-            <tr
-              key={`row-${rowIndex}`}
-              className="odd:bg-white even:bg-slate-50/55 hover:bg-primary/5 dark:odd:bg-dark-card dark:even:bg-dark-sidebar/45 dark:hover:bg-primary/8"
-            >
-              {row.map((cell, cellIndex) => (
-                <td
-                  key={`row-${rowIndex}-cell-${cellIndex}`}
-                  className={clsx(
-                    'border-t border-surface-divider px-4 py-3 align-top text-text-primary dark:border-dark-divider dark:text-text-dark-primary',
-                    alignmentClass(table.alignments[cellIndex]),
-                  )}
-                >
-                  {renderTableCell(cell, `row-${rowIndex}-cell-${cellIndex}`)}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 function RichMarkdown({ content }: Props) {
-  const blocks = parseMarkdownBlocks(content);
   const markdownComponents = createMarkdownComponents();
+  const normalizedContent = normalizeMarkdownSource(content);
 
   return (
     <div className="markdown-body text-[13px] leading-6">
-      {blocks.map((block, index) => (
-        block.type === 'table' ? (
-          <MarkdownTable key={`table-${index}`} table={block.table} />
-        ) : (
-          <ReactMarkdown key={`markdown-${index}`} components={markdownComponents}>
-            {block.content}
-          </ReactMarkdown>
-        )
-      ))}
+      <ReactMarkdown
+        components={markdownComponents}
+        remarkPlugins={[remarkGfm, remarkBreaks]}
+        rehypePlugins={[rehypeRaw, rehypeNormalizeInlineColors, [rehypeSanitize, SANITIZE_SCHEMA]]}
+      >
+        {normalizedContent}
+      </ReactMarkdown>
     </div>
   );
 }

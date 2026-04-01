@@ -86,6 +86,7 @@ function upsertStep(previous: StepState[], next: StepState): StepState[] {
 export default function AgentExecutionPanel({ query, conversationId, onComplete, onCancel }: Props) {
   const { currentRoleId, llmConfigs, activeLLMConfigId } = useAppStore();
   const activeLLMConfig = llmConfigs.find((c) => c.id === activeLLMConfigId) ?? llmConfigs[0];
+  const hasUsableLLMConfig = Boolean(activeLLMConfig && (activeLLMConfig.hasApiKey ?? activeLLMConfig.apiKey));
 
   const [phase, setPhase] = useState<Phase>('matching');
   const [matchResult, setMatchResult] = useState<AgentMatchResult | null>(null);
@@ -164,7 +165,7 @@ export default function AgentExecutionPanel({ query, conversationId, onComplete,
   }, [query, currentRoleId]);
 
   const handleExecute = useCallback(async () => {
-    if (!activeLLMConfig) { setErrorMsg('请先配置 LLM'); setPhase('error'); return; }
+    if (!activeLLMConfig || !hasUsableLLMConfig) { setErrorMsg('请先由管理员配置 LLM'); setPhase('error'); return; }
     const rid = genRunId();
     setRunId(rid);
     setSteps([]);
@@ -265,9 +266,9 @@ export default function AgentExecutionPanel({ query, conversationId, onComplete,
         void loadRunRecord(rid);
       },
       abort.signal,
-      { conversationId, runId: rid },
+      { conversationId, runId: rid, llmProfileId: activeLLMConfig.id },
     );
-  }, [activeLLMConfig, currentRoleId, query, matchResult, paramValues, conversationId, loadRunRecord]);
+  }, [activeLLMConfig, hasUsableLLMConfig, currentRoleId, query, matchResult, paramValues, conversationId, loadRunRecord]);
 
   const handleCancel = useCallback(() => {
     onCancel();

@@ -1,8 +1,12 @@
 """
-Meeting Assistant - FastAPI 后端入口
-所有 AI 推理、文件解析、知识库检索均在此完成，前端仅负责 UI 渲染。
+Meeting Assistant backend entrypoint.
+
+This module wires up the FastAPI app, lifecycle hooks, and optional static
+frontend serving for packaged deployments.
 """
+
 import argparse
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -14,7 +18,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from routers import health, chat, ppt, skills, knowledge, knowhow, agent, settings, conversations, auth
+from routers import agent, auth, chat, conversations, health, knowhow, knowledge, ppt, settings, skills
 
 logger = logging.getLogger(__name__)
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -23,35 +27,46 @@ DIST_DIR = ROOT_DIR / "dist"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """应用生命周期管理：启动初始化 + 关闭清理"""
-    # === Startup ===
+    """Initialize shared services on startup and close them on shutdown."""
     from services.storage import storage
+
     await storage.initialize()
-    logger.info("SQLite 存储已初始化")
+    logger.info("Storage initialized")
 
     from services.skill_manager import skill_manager
+
     await skill_manager.initialize()
-    logger.info(f"Skill Manager 已初始化，加载 {len(skill_manager.list_skills())} 个 Skill")
+    logger.info("Skill manager initialized with %s skills", len(skill_manager.list_skills()))
 
     from services.knowhow_service import knowhow_service
+
     added = await knowhow_service.ensure_defaults()
     if added:
-        logger.info(f"Know-how 已初始化 {added} 条默认规则")
+        logger.info("Seeded %s default know-how rules", added)
 
     from services.knowledge_service import knowledge_service
+
     await knowledge_service.initialize()
-    logger.info("知识库服务已初始化")
+    logger.info("Knowledge service initialized")
 
-    yield
-
-    # === Shutdown ===
-    await storage.close()
-    logger.info("资源已清理")
+    try:
+        yield
+    except asyncio.CancelledError:
+        # On Windows, Ctrl+C during uvicorn shutdown can cancel the lifespan
+        # receive loop. Treat that as a normal shutdown path instead of
+        # surfacing a noisy traceback.
+        logger.info("Lifespan cancelled during shutdown")
+    finally:
+        await storage.close()
+        logger.info("Resources cleaned up")
 
 
 def _should_serve_frontend() -> bool:
     return os.getenv("MEETING_ASSISTANT_SERVE_FRONTEND", "").strip().lower() in {
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 
@@ -70,7 +85,7 @@ def _configure_frontend_routes(app: FastAPI, dist_dir: Path) -> None:
     index_file = dist_dir / "index.html"
 
     if not index_file.exists():
-        logger.warning("前端 dist 目录不存在，跳过静态站点托管: %s", dist_dir)
+        logger.warning("Frontend dist directory does not exist, skipping static hosting: %s", dist_dir)
         return
 
     @app.get("/", include_in_schema=False)
@@ -97,11 +112,10 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Meeting Assistant Backend",
         version="0.1.0",
-        description="本地 AI 会议助手后端服务",
+        description="Local AI meeting assistant backend",
         lifespan=lifespan,
     )
 
-    # CORS 配置 - 允许本地开发和多端部署
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -110,15 +124,10 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # 注册路由 - Auth
     app.include_router(auth.router, prefix="/api", tags=["Auth"])
-
-    # 注册路由 - Phase 1
     app.include_router(health.router, prefix="/api", tags=["Health"])
     app.include_router(chat.router, prefix="/api", tags=["Chat"])
     app.include_router(ppt.router, prefix="/api", tags=["PPT"])
-
-    # 注册路由 - Phase 2
     app.include_router(skills.router, prefix="/api", tags=["Skills"])
     app.include_router(knowledge.router, prefix="/api", tags=["Knowledge"])
     app.include_router(knowhow.router, prefix="/api", tags=["Know-how"])
@@ -135,11 +144,15 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=int(os.getenv("MEETING_ASSISTANT_PORT", "5173")))
     parser.add_argument("--host", type=str, default=os.getenv("MEETING_ASSISTANT_HOST", "0.0.0.0"))
+    parser.add_argument("--reload", action="store_true", help="Enable auto reload for development")
     args = parser.parse_args()
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    target = "main:app" if args.reload else app
+    try:
+        uvicorn.run(target, host=args.host, port=args.port, reload=args.reload)
+    except KeyboardInterrupt:
+        logger.info("Backend stopped by user")

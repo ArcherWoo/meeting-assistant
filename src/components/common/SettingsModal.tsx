@@ -7,8 +7,10 @@ import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import clsx from 'clsx';
 import { useAppStore } from '@/stores/appStore';
+import { useAuthStore } from '@/stores/authStore';
 import { getPreferredRoleForSurface } from '@/utils/roles';
 import {
+  listLLMProfiles, createLLMProfile, updateLLMProfile, deleteLLMProfile, setActiveLLMProfile,
   testLLMConnection,
   getEmbeddingConfig, updateEmbeddingConfig, testEmbeddingConnection,
   createRole, updateRole, deleteRole, listRoles,
@@ -120,9 +122,7 @@ export default function SettingsModal() {
     toggleSettings,
     llmConfigs,
     activeLLMConfigId,
-    setActiveLLMConfig,
-    saveLLMConfig,
-    removeLLMConfig,
+    setLLMProfiles,
     theme,
     setTheme,
     accentColor,
@@ -134,11 +134,12 @@ export default function SettingsModal() {
     setCurrentChatRoleId,
     setCurrentAgentRoleId,
   } = useAppStore();
+  const userIsAdmin = useAuthStore((state) => state.user?.system_role === 'admin');
   const activeProfile = useMemo(
     () => llmConfigs.find((config) => config.id === activeLLMConfigId) ?? llmConfigs[0],
     [activeLLMConfigId, llmConfigs]
   );
-  const [activeTab, setActiveTab] = useState<SettingsTab>('models');
+  const [activeTab, setActiveTab] = useState<SettingsTab>(userIsAdmin ? 'models' : 'appearance');
   const [selectedId, setSelectedId] = useState(activeProfile?.id ?? '');
   const [draft, setDraft] = useState<LLMProfile>(activeProfile ?? createDraftProfile(1));
   const [isNewDraft, setIsNewDraft] = useState(false);
@@ -266,6 +267,12 @@ export default function SettingsModal() {
     }
   };
 
+  const refreshLLMProfiles = useCallback(async () => {
+    const { profiles, activeProfileId } = await listLLMProfiles();
+    setLLMProfiles(profiles, activeProfileId);
+    return { profiles, activeProfileId };
+  }, [setLLMProfiles]);
+
   useEffect(() => {
     if (!settingsOpen || !activeProfile) return;
     setSelectedId(activeProfile.id);
@@ -277,6 +284,17 @@ export default function SettingsModal() {
     setConnectionError('');
   }, [activeProfile, settingsOpen]);
 
+  useEffect(() => {
+    if (!settingsOpen) return;
+    void refreshLLMProfiles().catch(() => {});
+  }, [settingsOpen, refreshLLMProfiles]);
+
+  useEffect(() => {
+    if (settingsOpen && !userIsAdmin && activeTab === 'models') {
+      setActiveTab('appearance');
+    }
+  }, [activeTab, settingsOpen, userIsAdmin]);
+
   const loadEmbeddingConfig = useCallback(async () => {
     try {
       const cfg = await getEmbeddingConfig();
@@ -287,10 +305,10 @@ export default function SettingsModal() {
   }, []);
 
   useEffect(() => {
-    if (settingsOpen) {
+    if (settingsOpen && userIsAdmin) {
       loadEmbeddingConfig();
     }
-  }, [settingsOpen, loadEmbeddingConfig]);
+  }, [settingsOpen, loadEmbeddingConfig, userIsAdmin]);
 
   // Auto-select first role when switching to roles tab
   useEffect(() => {
@@ -513,21 +531,33 @@ export default function SettingsModal() {
     setConnectionError('');
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const nextDraft = {
       ...draft,
       name: draft.name.trim() || `模型 ${llmConfigs.length + (isNewDraft ? 1 : 0)}`,
+      hasApiKey: draft.hasApiKey ?? Boolean(draft.apiKey),
     };
-
-    saveLLMConfig(nextDraft);
-    setDraft(nextDraft);
-    setSelectedId(nextDraft.id);
-    setIsNewDraft(false);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+    try {
+      if (isNewDraft) {
+        await createLLMProfile(nextDraft);
+      } else {
+        await updateLLMProfile(nextDraft);
+      }
+      const { profiles, activeProfileId } = await refreshLLMProfiles();
+      const persistedProfile = profiles.find((profile) => profile.id === nextDraft.id)
+        ?? profiles.find((profile) => profile.id === activeProfileId)
+        ?? nextDraft;
+      setDraft({ ...persistedProfile });
+      setSelectedId(persistedProfile.id);
+      setIsNewDraft(false);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (error) {
+      setConnectionError((error as Error).message || '保存失败');
+    }
   };
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (isNewDraft) {
       if (activeProfile) {
         handleSelectProfile(activeProfile);
@@ -537,15 +567,21 @@ export default function SettingsModal() {
 
     if (llmConfigs.length <= 1) return;
 
-    const fallbackProfile = llmConfigs.find((config) => config.id !== draft.id);
-    removeLLMConfig(draft.id);
+    try {
+      await deleteLLMProfile(draft.id);
+      const { profiles, activeProfileId } = await refreshLLMProfiles();
+      const fallbackProfile = profiles.find((config) => config.id === activeProfileId)
+        ?? profiles.find((config) => config.id !== draft.id);
 
-    if (fallbackProfile) {
-      setSelectedId(fallbackProfile.id);
-      setDraft({ ...fallbackProfile });
+      if (fallbackProfile) {
+        setSelectedId(fallbackProfile.id);
+        setDraft({ ...fallbackProfile });
+      }
       setIsNewDraft(false);
       setConnectionResult(null);
       setConnectionError('');
+    } catch (error) {
+      setConnectionError((error as Error).message || '删除失败');
     }
   };
 
@@ -570,13 +606,25 @@ export default function SettingsModal() {
 
       setDraft(nextDraft);
       setConnectionResult(result);
-      if (!isNewDraft && draftExistsInStore) {
-        saveLLMConfig(nextDraft);
-      }
     } catch (error) {
       setConnectionError((error as Error).message || '连接测试失败');
     } finally {
       setTestingConnection(false);
+    }
+  };
+
+  const handleActivateProfile = async (profileId: string) => {
+    try {
+      await setActiveLLMProfile(profileId);
+      const { profiles, activeProfileId } = await refreshLLMProfiles();
+      const nextProfile = profiles.find((profile) => profile.id === profileId)
+        ?? profiles.find((profile) => profile.id === activeProfileId);
+      if (nextProfile) {
+        setDraft({ ...nextProfile });
+        setSelectedId(nextProfile.id);
+      }
+    } catch (error) {
+      setConnectionError((error as Error).message || '切换默认模型失败');
     }
   };
 
@@ -624,17 +672,19 @@ export default function SettingsModal() {
             </h2>
             {/* Tab 切换 */}
             <div className="flex items-center gap-1 rounded-lg border border-surface-divider bg-surface p-1 dark:border-dark-divider dark:bg-dark-sidebar">
-              <button
-                onClick={() => setActiveTab('models')}
-                className={clsx(
-                  tabBtnCls,
-                  activeTab === 'models'
-                    ? tabBtnActiveCls
-                    : tabBtnIdleCls
-                )}
-              >
-                🧩 模型管理
-              </button>
+              {userIsAdmin && (
+                <button
+                  onClick={() => setActiveTab('models')}
+                  className={clsx(
+                    tabBtnCls,
+                    activeTab === 'models'
+                      ? tabBtnActiveCls
+                      : tabBtnIdleCls
+                  )}
+                >
+                  🧩 模型管理
+                </button>
+              )}
               <button
                 onClick={() => setActiveTab('roles')}
                 className={clsx(
@@ -1142,7 +1192,7 @@ export default function SettingsModal() {
               <SectionTitle>LLM 连接配置</SectionTitle>
               {!isNewDraft && draft.id !== activeLLMConfigId && (
                 <button
-                  onClick={() => setActiveLLMConfig(draft.id)}
+                  onClick={() => { void handleActivateProfile(draft.id); }}
                   className="win-button h-8 px-3 text-xs text-primary"
                 >
                   设为当前使用
@@ -1171,13 +1221,20 @@ export default function SettingsModal() {
             </Field>
 
             <Field label="API Key">
-              <input
-                type="password"
-                value={draft.apiKey}
-                onChange={(e) => updateDraft({ apiKey: e.target.value })}
-                placeholder="sk-..."
-                className={inputCls}
-              />
+              <div className="space-y-2">
+                <input
+                  type="password"
+                  value={draft.apiKey}
+                  onChange={(e) => updateDraft({ apiKey: e.target.value })}
+                  placeholder={draft.hasApiKey && !isNewDraft ? '留空表示保留当前 Key' : 'sk-...'}
+                  className={inputCls}
+                />
+                {draft.hasApiKey && !isNewDraft && (
+                  <p className="text-xs text-text-secondary">
+                    已保存的 Key 不会回显；留空表示保持当前 Key，输入新值会覆盖原配置。
+                  </p>
+                )}
+              </div>
             </Field>
 
             <div className="win-panel-muted space-y-3 p-3">

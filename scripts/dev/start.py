@@ -8,6 +8,8 @@ then starts the backend and frontend dev servers together.
 
 from __future__ import annotations
 
+import json
+import locale
 import os
 import platform
 import shutil
@@ -24,7 +26,13 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
 REQUIREMENTS_FILE = BACKEND_DIR / "requirements.txt"
 NODE_MODULES_DIR = ROOT_DIR / "node_modules"
-PROCESSES: list[subprocess.Popen] = []
+RUNTIME_DIR = ROOT_DIR / ".dev-runtime"
+STATE_FILE = RUNTIME_DIR / "launcher-processes.json"
+PROCESSES: list[tuple[str, subprocess.Popen]] = []
+SHUTDOWN_REQUESTED = threading.Event()
+FORCE_SHUTDOWN = threading.Event()
+SHUTDOWN_LOCK = threading.Lock()
+SHUTDOWN_DONE = False
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -33,6 +41,18 @@ YELLOW = "\033[33m"
 RED = "\033[31m"
 CYAN = "\033[36m"
 BLUE = "\033[34m"
+OUTPUT_ENCODINGS = tuple(
+    dict.fromkeys(
+        encoding
+        for encoding in (
+            "utf-8",
+            locale.getpreferredencoding(False),
+            "gbk",
+            "mbcs" if IS_WINDOWS else None,
+        )
+        if encoding
+    )
+)
 
 
 def _enable_windows_ansi() -> None:
@@ -70,6 +90,38 @@ def fail(message: str) -> None:
 
 def _npm_command() -> str:
     return "npm.cmd" if IS_WINDOWS else "npm"
+
+
+def _write_runtime_state() -> None:
+    try:
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(
+            json.dumps(
+                {
+                    "root_dir": str(ROOT_DIR),
+                    "written_at": time.time(),
+                    "processes": [
+                        {"name": name, "pid": process.pid}
+                        for name, process in PROCESSES
+                        if process.poll() is None
+                    ],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        warn(f"Failed to write runtime state: {exc}")
+
+
+def _clear_runtime_state() -> None:
+    try:
+        if STATE_FILE.exists():
+            STATE_FILE.unlink()
+        if RUNTIME_DIR.exists() and not any(RUNTIME_DIR.iterdir()):
+            RUNTIME_DIR.rmdir()
+    except OSError:
+        pass
 
 
 def _required_python_packages() -> list[str]:
@@ -162,21 +214,38 @@ def check_optional_dependencies() -> None:
             info(f"Install with: pip install {package_name}")
 
 
+def _decode_output_chunk(chunk: bytes) -> str:
+    for encoding in OUTPUT_ENCODINGS:
+        try:
+            return chunk.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return chunk.decode("utf-8", errors="replace")
+
+
 def _stream_output(process: subprocess.Popen, prefix: str, color: str) -> None:
     if process.stdout is None:
         return
 
-    for line in process.stdout:
-        print(f"{color}{BOLD}{prefix}{RESET} {line}", end="", flush=True)
+    while True:
+        line = process.stdout.readline()
+        if not line:
+            break
+        print(f"{color}{BOLD}{prefix}{RESET} {_decode_output_chunk(line)}", end="", flush=True)
+
+
+def _register_process(name: str, process: subprocess.Popen, color: str, prefix: str) -> subprocess.Popen:
+    PROCESSES.append((name, process))
+    _write_runtime_state()
+    threading.Thread(target=_stream_output, args=(process, prefix, color), daemon=True).start()
+    return process
 
 
 def launch_backend() -> subprocess.Popen:
     process = subprocess.Popen(
         [
             sys.executable,
-            "-m",
-            "uvicorn",
-            "main:app",
+            "main.py",
             "--host",
             "127.0.0.1",
             "--port",
@@ -187,15 +256,11 @@ def launch_backend() -> subprocess.Popen:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
+        bufsize=0,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0,
     )
-    PROCESSES.append(process)
-    threading.Thread(target=_stream_output, args=(process, "[Backend]", BLUE), daemon=True).start()
-    return process
+    return _register_process("backend", process, BLUE, "[Backend]")
 
 
 def launch_frontend() -> subprocess.Popen:
@@ -205,35 +270,137 @@ def launch_frontend() -> subprocess.Popen:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
+        bufsize=0,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0,
     )
-    PROCESSES.append(process)
-    threading.Thread(target=_stream_output, args=(process, "[Frontend]", GREEN), daemon=True).start()
-    return process
+    return _register_process("frontend", process, GREEN, "[Frontend]")
 
 
-def shutdown(signum: int | None = None, frame: object | None = None) -> None:
-    print(f"\n{YELLOW}{BOLD}Stopping all services...{RESET}")
-    for process in PROCESSES:
-        if process.poll() is not None:
-            continue
-        if IS_WINDOWS:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
+def _format_signal(signum: int | None) -> str:
+    if signum is None:
+        return "manual request"
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return f"signal {signum}"
+
+
+def _request_shutdown(reason: str) -> None:
+    if SHUTDOWN_REQUESTED.is_set():
+        FORCE_SHUTDOWN.set()
+        warn(f"Additional stop request received ({reason}); forcing shutdown if needed.")
+        return
+
+    SHUTDOWN_REQUESTED.set()
+    warn(f"Stop requested via {reason}. Shutting down services...")
+
+
+def _handle_signal(signum: int, frame: object | None) -> None:
+    del frame
+    _request_shutdown(_format_signal(signum))
+
+
+def _send_graceful_stop(name: str, process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+
+    if IS_WINDOWS:
+        ctrl_break = getattr(signal, "CTRL_BREAK_EVENT", None)
+        if ctrl_break is not None:
+            try:
+                process.send_signal(ctrl_break)
+                info(f"Sent Ctrl+Break to {name} (PID {process.pid})")
+                return
+            except Exception as exc:
+                warn(f"Could not send Ctrl+Break to {name} (PID {process.pid}): {exc}")
         else:
-            process.terminate()
+            warn(f"Ctrl+Break is not available; {name} may need a forced stop.")
+        return
 
-    time.sleep(1)
+    try:
+        process.terminate()
+        info(f"Sent terminate signal to {name} (PID {process.pid})")
+    except Exception as exc:
+        warn(f"Could not terminate {name} (PID {process.pid}): {exc}")
 
-    for process in PROCESSES:
+
+def _force_stop(name: str, process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+
+    if IS_WINDOWS:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
+        warn(f"Force-killed {name} (PID {process.pid})")
+        return
+
+    try:
+        process.kill()
+        warn(f"Force-killed {name} (PID {process.pid})")
+    except Exception as exc:
+        warn(f"Could not force-kill {name} (PID {process.pid}): {exc}")
+
+
+def shutdown() -> None:
+    global SHUTDOWN_DONE
+
+    with SHUTDOWN_LOCK:
+        if SHUTDOWN_DONE:
+            return
+        SHUTDOWN_DONE = True
+
+    print(f"\n{YELLOW}{BOLD}Stopping all services...{RESET}")
+
+    for name, process in PROCESSES:
+        _send_graceful_stop(name, process)
+
+    deadline = time.time() + 8.0
+    while time.time() < deadline:
+        alive = [process for _, process in PROCESSES if process.poll() is None]
+        if not alive:
+            break
+        if FORCE_SHUTDOWN.is_set():
+            break
+        time.sleep(0.2)
+
+    for name, process in PROCESSES:
         if process.poll() is None:
-            process.kill()
+            _force_stop(name, process)
 
+    _clear_runtime_state()
     print(f"{GREEN}Shutdown complete.{RESET}")
-    raise SystemExit(0)
+
+
+def _watch_stdin_for_stop() -> None:
+    if not sys.stdin or not sys.stdin.isatty():
+        return
+
+    while not SHUTDOWN_REQUESTED.is_set():
+        try:
+            line = sys.stdin.readline()
+        except Exception:
+            return
+
+        if line == "":
+            return
+
+        command = line.strip().lower()
+        if command in {"q", "quit", "exit", "stop"}:
+            _request_shutdown("stdin command")
+            return
+
+        if command:
+            info("Type q and press Enter to stop services.")
+
+
+def _check_child_processes() -> None:
+    for name, process in PROCESSES:
+        exit_code = process.poll()
+        if exit_code is None:
+            continue
+        if SHUTDOWN_REQUESTED.is_set():
+            return
+        _request_shutdown(f"{name} exited with code {exit_code}")
+        return
 
 
 def main() -> None:
@@ -256,21 +423,30 @@ def main() -> None:
     info("Backend:  http://127.0.0.1:5173")
     info("Frontend: http://localhost:4173")
 
-    signal.signal(signal.SIGINT, shutdown)
-    if not IS_WINDOWS:
-        signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, _handle_signal)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _handle_signal)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _handle_signal)
 
-    backend_process = launch_backend()
+    launch_backend()
     launch_frontend()
 
-    print(f"\n{GREEN}{BOLD}[OK] Services are running. Press Ctrl+C to stop.{RESET}\n")
+    threading.Thread(target=_watch_stdin_for_stop, daemon=True).start()
+
+    print(f"\n{GREEN}{BOLD}[OK] Services are running.{RESET}")
+    print(f"{CYAN}  Stop with Ctrl+C, Ctrl+Break, or type q then press Enter.{RESET}")
+    print(f"{CYAN}  Fallback from another terminal: python scripts/dev/stop.py{RESET}\n")
 
     try:
-        backend_process.wait()
+        while not SHUTDOWN_REQUESTED.is_set():
+            _check_child_processes()
+            time.sleep(0.25)
     except KeyboardInterrupt:
-        pass
+        _request_shutdown("KeyboardInterrupt")
     finally:
         shutdown()
+        raise SystemExit(0)
 
 
 if __name__ == "__main__":

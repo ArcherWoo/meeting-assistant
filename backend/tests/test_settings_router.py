@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 import uuid
+from fastapi import HTTPException
 
 
 BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -26,6 +27,8 @@ class SettingsRouterTests(unittest.IsolatedAsyncioTestCase):
 
         storage._db_path = self.temp_dir / "test.db"
         await storage.initialize()
+        self.admin = await storage.get_user_by_username("admin")
+        self.assertIsNotNone(self.admin)
 
     async def asyncTearDown(self):
         await storage.close()
@@ -78,17 +81,17 @@ class SettingsRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await storage.get_setting("system_prompt_copilot", default=""), "")
 
     async def test_default_roles_are_flagged_builtin_but_still_deletable(self):
-        roles = await settings_router.list_roles()
+        roles = await settings_router.list_roles(user=self.admin)
         indexed = {role["id"]: role for role in roles["roles"]}
 
         self.assertEqual(indexed["copilot"]["is_builtin"], 1)
         self.assertEqual(indexed["builder"]["is_builtin"], 1)
         self.assertEqual(indexed["executor"]["is_builtin"], 1)
 
-        deleted = await settings_router.delete_role("executor")
+        deleted = await settings_router.delete_role("executor", user=self.admin)
         self.assertEqual(deleted["id"], "executor")
 
-        roles_after_delete = await settings_router.list_roles()
+        roles_after_delete = await settings_router.list_roles(user=self.admin)
         remaining_ids = {role["id"] for role in roles_after_delete["roles"]}
         self.assertNotIn("executor", remaining_ids)
 
@@ -105,7 +108,8 @@ class SettingsRouterTests(unittest.IsolatedAsyncioTestCase):
                 agent_preflight=["auto_knowledge", "pre_match_skill"],
                 allowed_surfaces=["chat", "agent"],
                 agent_allowed_tools=["query_knowledge", "search_knowhow_rules"],
-            )
+            ),
+            user=self.admin,
         )
 
         self.assertEqual(created["role"]["agent_prompt"], "Agent-only prompt")
@@ -123,6 +127,7 @@ class SettingsRouterTests(unittest.IsolatedAsyncioTestCase):
                 agent_allowed_tools=[],
                 agent_prompt="Generic agent prompt",
             ),
+            user=self.admin,
         )
 
         self.assertEqual(updated["role"]["chat_capabilities"], ["auto_knowledge", "auto_skill_suggestion"])
@@ -131,6 +136,56 @@ class SettingsRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["role"]["agent_allowed_tools"], [])
         self.assertEqual(updated["role"]["agent_prompt"], "Generic agent prompt")
         self.assertEqual(updated["role"]["capabilities"], ["rag", "skills"])
+
+    async def test_llm_profiles_are_persisted_and_sanitized_on_read(self):
+        created = await settings_router.create_llm_profile(
+            settings_router.LLMProfileUpsertRequest(
+                name="Server OpenAI",
+                api_url="https://api.openai.com/v1",
+                api_key="sk-test-secret",
+                model="gpt-4o",
+                temperature=0.3,
+                max_tokens=2048,
+                stream=True,
+                available_models=["gpt-4o", "gpt-4.1"],
+            ),
+            user=self.admin,
+        )
+
+        await settings_router.set_active_llm_profile(
+            settings_router.LLMProfileSelectionRequest(profile_id=created["profile"]["id"]),
+            user=self.admin,
+        )
+
+        listed = await settings_router.list_llm_profiles_route(user=self.admin)
+
+        self.assertEqual(listed["total"], 1)
+        self.assertEqual(listed["active_profile_id"], created["profile"]["id"])
+        self.assertEqual(listed["profiles"][0]["name"], "Server OpenAI")
+        self.assertEqual(listed["profiles"][0]["api_key"], "")
+        self.assertTrue(listed["profiles"][0]["has_api_key"])
+        self.assertEqual(listed["profiles"][0]["available_models"], ["gpt-4o", "gpt-4.1"])
+
+    async def test_non_admin_cannot_modify_llm_profiles(self):
+        user = await storage.create_user(
+            username="normal-user",
+            display_name="Normal User",
+            password_hash="hash",
+            system_role="user",
+        )
+
+        with self.assertRaises(HTTPException) as context:
+            await settings_router.create_llm_profile(
+                settings_router.LLMProfileUpsertRequest(
+                    name="Blocked",
+                    api_url="https://api.openai.com/v1",
+                    api_key="sk-test",
+                    model="gpt-4o",
+                ),
+                user=user,
+            )
+
+        self.assertEqual(context.exception.status_code, 403)
 
 
 if __name__ == "__main__":

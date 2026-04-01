@@ -156,7 +156,7 @@ async def _resolve_continuation_request(
     return effective_request, source_run
 
 
-async def execute_agent_stream(request: AgentExecuteRequest):
+async def execute_agent_stream(request: AgentExecuteRequest, user: dict | None = None):
     queue: asyncio.Queue[dict | None] = asyncio.Queue()
     effective_request, source_run = await _resolve_continuation_request(request)
     deps = await build_agent_deps(effective_request)
@@ -207,6 +207,7 @@ async def execute_agent_stream(request: AgentExecuteRequest):
                         ),
                         enabled_surfaces=surfaces,
                         trace_handler=adapter,
+                        user=user,
                     )
                     prompt_ctx = assembled.fit_to_budget(3200)
                     if prompt_ctx.has_context:

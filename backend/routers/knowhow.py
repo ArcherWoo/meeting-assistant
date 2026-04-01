@@ -63,6 +63,7 @@ async def add_rule(rule: KnowhowRuleCreate, user: dict = Depends(get_current_use
         rule_text=rule.rule_text,
         weight=rule.weight,
         source=rule.source,
+        owner_id=user["id"] if isinstance(user, dict) else None,
     )
     return {"id": rule_id, "message": "规则已添加"}
 
