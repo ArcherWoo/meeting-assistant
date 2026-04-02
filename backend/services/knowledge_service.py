@@ -11,8 +11,11 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Callable, Awaitable, Any
+from typing import List, Optional, Any
 
+from services.document_parsing import chunk_parsed_document, document_parser_registry
+from services.document_parsing.models import ParsedDocument
+from services.document_parsing.prompt_render import render_document_for_prompt
 from services.runtime_paths import VECTORS_DIR
 from services.storage import storage, gen_id
 from utils.decryption_handler import decrypt_esafenet_file
@@ -63,6 +66,14 @@ class KnowledgeService:
     def _build_chunk_metadata(import_id: str, chunk: dict) -> str:
         """将片段定位信息编码到已有 metadata 字段，避免变更 LanceDB 主表结构。"""
         metadata = {"import_id": import_id}
+        raw_metadata = chunk.get("metadata_json")
+        if isinstance(raw_metadata, str) and raw_metadata.strip():
+            try:
+                parsed = json.loads(raw_metadata)
+                if isinstance(parsed, dict):
+                    metadata.update(parsed)
+            except json.JSONDecodeError:
+                pass
         for key in ("chunk_index", "char_start", "char_end"):
             value = chunk.get(key)
             if value is not None:
@@ -215,23 +226,15 @@ class KnowledgeService:
         if is_encrypted:
             file_content = decrypt_esafenet_file(file_content, filename)
 
-        ext = os.path.splitext(filename)[1].lower()
-
-        if ext in self.PPT_EXTS:
-            return await self.ingest_ppt(file_content, filename, llm_fn, embedding_fn, owner_id=owner_id)
-        elif ext in (".pdf",):
-            return await self._ingest_pdf(file_content, filename, embedding_fn, owner_id=owner_id)
-        elif ext in (".doc", ".docx"):
-            return await self._ingest_docx(file_content, filename, embedding_fn, owner_id=owner_id)
-        elif ext in self.IMAGE_EXTS:
-            return await self._ingest_image(file_content, filename, owner_id=owner_id)
-        elif ext in self.TEXT_EXTS:
-            return await self._ingest_text(file_content, filename, embedding_fn, owner_id=owner_id)
-        elif ext in (".xls", ".xlsx"):
-            return await self._ingest_excel(file_content, filename, embedding_fn, owner_id=owner_id)
-        else:
-            # 兜底：尝试当纯文本处理
-            return await self._ingest_text(file_content, filename, owner_id=owner_id)
+        parsed_document = await self._parse_document(file_content, filename)
+        return await self._ingest_parsed_document(
+            file_content=file_content,
+            filename=filename,
+            parsed_document=parsed_document,
+            llm_fn=llm_fn,
+            embedding_fn=embedding_fn,
+            owner_id=owner_id,
+        )
 
     async def ingest_ppt(
         self, file_content: bytes, filename: str,
@@ -498,6 +501,8 @@ class KnowledgeService:
             normalized_results: list[dict] = []
             for record in results:
                 metadata = self._parse_chunk_metadata(record.get("metadata"))
+                locator = metadata.get("locator") if isinstance(metadata.get("locator"), dict) else {}
+                table_meta = metadata.get("table") if isinstance(metadata.get("table"), dict) else {}
                 normalized_results.append({
                     "id": record.get("id", ""),
                     "content": record.get("content", ""),
@@ -507,6 +512,14 @@ class KnowledgeService:
                     "chunk_index": metadata.get("chunk_index"),
                     "char_start": metadata.get("char_start"),
                     "char_end": metadata.get("char_end"),
+                    "page": locator.get("page"),
+                    "sheet": locator.get("sheet"),
+                    "row_start": locator.get("row_start"),
+                    "row_end": locator.get("row_end"),
+                    "story": locator.get("story"),
+                    "source": locator.get("source"),
+                    "ocr_segment_index": locator.get("ocr_segment_index"),
+                    "table_title": table_meta.get("title"),
                     "score": record.get("_distance", 0.0),
                 })
             return normalized_results
@@ -737,6 +750,172 @@ class KnowledgeService:
             "file_type": ext.lstrip("."),
             "text": text,
             "char_count": len(text),
+        }
+
+    async def _parse_document(self, file_content: bytes, filename: str) -> ParsedDocument:
+        return await document_parser_registry.parse(file_content, filename)
+
+    @staticmethod
+    def _canonical_file_type(file_type: str) -> str:
+        normalized = file_type.lower().lstrip(".")
+        if normalized in {"ppt", "pptx"}:
+            return "ppt"
+        if normalized in {"doc", "docx"}:
+            return "docx"
+        if normalized in {"xls", "xlsx", "csv"}:
+            return "excel"
+        if normalized in {"txt", "md", "json", "xml"}:
+            return "text"
+        if normalized in {"png", "jpg", "jpeg", "gif", "bmp", "webp"}:
+            return "image"
+        if normalized == "pdf":
+            return "pdf"
+        return normalized or "text"
+
+    def _collect_document_stats(self, parsed_document: ParsedDocument) -> dict:
+        full_text = render_document_for_prompt(parsed_document)
+        slides = {block.slide for block in parsed_document.blocks if block.slide}
+        images = [block for block in parsed_document.blocks if block.block_type == "image"]
+        return {
+            "file_type": self._canonical_file_type(parsed_document.file_type),
+            "slide_count": int(parsed_document.metadata.get("slide_count") or len(slides) or 0),
+            "text_length": len(full_text),
+            "char_count": len(full_text),
+            "table_count": len(parsed_document.tables),
+            "image_count": len(images),
+        }
+
+    async def _ingest_parsed_document(
+        self,
+        *,
+        file_content: bytes,
+        filename: str,
+        parsed_document: ParsedDocument,
+        llm_fn: Optional[object],
+        embedding_fn: Optional[object],
+        owner_id: Optional[str],
+    ) -> dict:
+        import hashlib
+
+        stats = self._collect_document_stats(parsed_document)
+        full_text = render_document_for_prompt(parsed_document)
+        chunks = chunk_parsed_document(parsed_document)
+        for chunk in chunks:
+            chunk["source_file"] = filename
+
+        file_hash = hashlib.md5(file_content).hexdigest()
+        import_id = await storage.record_ppt_import(
+            file_name=filename,
+            file_hash=file_hash,
+            file_size=len(file_content),
+            slide_count=stats["slide_count"],
+            owner_id=owner_id,
+        )
+        existing = await storage._fetchone(
+            "SELECT import_status, slide_count FROM ppt_imports WHERE id=?",
+            (import_id,),
+        )
+        existing_chunk_count = await storage.count_knowledge_chunks(import_id=import_id)
+        if existing and existing["import_status"] == "completed" and existing_chunk_count > 0:
+            return {
+                "import_id": import_id,
+                "status": "duplicate",
+                **stats,
+                "warnings": parsed_document.warnings,
+                "extracted_count": 0,
+                "chunks_count": existing_chunk_count,
+            }
+
+        await storage.update_ppt_import_status(import_id, "processing")
+        await self._reset_import_index(
+            import_id,
+            filename,
+            clear_procurement=stats["file_type"] == "ppt",
+        )
+        await storage.db.execute(
+            "UPDATE ppt_imports SET slide_count=? WHERE id=?",
+            (stats["slide_count"], import_id),
+        )
+        await storage.db.commit()
+
+        extracted_count = 0
+        if llm_fn and stats["file_type"] == "ppt" and full_text:
+            extracted_count = await self._extract_procurement_fields(
+                full_text,
+                filename,
+                import_id,
+                llm_fn,
+            )
+
+        stored_chunks_count = await self._persist_chunks(
+            chunks,
+            import_id,
+            filename,
+            stats["file_type"],
+        )
+        vector_chunks_count = 0
+        if embedding_fn and self._lance_db:
+            vector_chunks_count = await self._vectorize_chunks(chunks, import_id, embedding_fn)
+
+        await storage.update_ppt_import_status(import_id, "completed", extracted_count)
+        return {
+            "import_id": import_id,
+            "status": "completed",
+            **stats,
+            "warnings": parsed_document.warnings,
+            "extracted_count": extracted_count,
+            "chunks_count": vector_chunks_count if vector_chunks_count else stored_chunks_count,
+        }
+
+    async def ingest_file(
+        self,
+        file_content: bytes,
+        filename: str,
+        llm_fn: Optional[object] = None,
+        embedding_fn: Optional[object] = None,
+        owner_id: Optional[str] = None,
+        is_encrypted: bool = False,
+    ) -> dict:
+        if is_encrypted:
+            file_content = decrypt_esafenet_file(file_content, filename)
+        parsed_document = await self._parse_document(file_content, filename)
+        return await self._ingest_parsed_document(
+            file_content=file_content,
+            filename=filename,
+            parsed_document=parsed_document,
+            llm_fn=llm_fn,
+            embedding_fn=embedding_fn,
+            owner_id=owner_id,
+        )
+
+    async def ingest_ppt(
+        self,
+        file_content: bytes,
+        filename: str,
+        llm_fn: Optional[object] = None,
+        embedding_fn: Optional[object] = None,
+        owner_id: Optional[str] = None,
+    ) -> dict:
+        parsed_document = await self._parse_document(file_content, filename)
+        return await self._ingest_parsed_document(
+            file_content=file_content,
+            filename=filename,
+            parsed_document=parsed_document,
+            llm_fn=llm_fn,
+            embedding_fn=embedding_fn,
+            owner_id=owner_id,
+        )
+
+    async def extract_text(self, file_content: bytes, filename: str) -> dict:
+        parsed_document = await self._parse_document(file_content, filename)
+        text = render_document_for_prompt(parsed_document)
+        ext = os.path.splitext(filename)[1].lower()
+        return {
+            "filename": filename,
+            "file_type": ext.lstrip("."),
+            "text": text,
+            "char_count": len(text),
+            "warnings": parsed_document.warnings,
         }
 
     async def list_imports(

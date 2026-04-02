@@ -13,6 +13,14 @@ interface Props {
   content: string;
 }
 
+const IS_LEGACY_BROWSER = (() => {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined' || typeof document === 'undefined') {
+    return false;
+  }
+  const doc = document as Document & { documentMode?: number };
+  return Boolean(doc.documentMode) || /MSIE|Trident/i.test(navigator.userAgent);
+})();
+
 type HtmlElementNode = {
   type: 'element';
   tagName: string;
@@ -93,6 +101,49 @@ function normalizeMarkdownSource(content: string): string {
     .replace(/\r\n?/g, '\n')
     .replace(/\u00a0/g, ' ')
     .trim();
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function sanitizeHref(href: string): string | null {
+  const normalized = href.trim();
+  if (!normalized) return null;
+  if (/^(https?:|mailto:)/i.test(normalized)) {
+    return normalized.replace(/"/g, '%22');
+  }
+  return null;
+}
+
+function renderLegacyMarkdownHtml(content: string): string {
+  const normalized = normalizeMarkdownSource(content);
+  if (!normalized) return '';
+
+  let html = escapeHtml(normalized);
+
+  html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  html = html.replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/__([\s\S]+?)__/g, '<strong>$1</strong>');
+  html = html.replace(/(^|[\s(])\*([^*\n][\s\S]*?)\*(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>');
+  html = html.replace(/(^|[\s(])_([^_\n][\s\S]*?)_(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>');
+  html = html.replace(/\[([^\]\n]+)\]\(([^)\n]+)\)/g, (_match, label: string, href: string) => {
+    const safeHref = sanitizeHref(href);
+    return safeHref
+      ? `<a href="${safeHref}" target="_blank" rel="noreferrer">${label}</a>`
+      : label;
+  });
+  html = html.replace(/^###\s+(.+)$/gm, '<strong>$1</strong>');
+  html = html.replace(/^##\s+(.+)$/gm, '<strong>$1</strong>');
+  html = html.replace(/^#\s+(.+)$/gm, '<strong>$1</strong>');
+  html = html.replace(/\n/g, '<br />');
+
+  return html;
 }
 
 function normalizeColorValue(value: string): string | null {
@@ -401,6 +452,15 @@ function createMarkdownComponents(options?: { compact?: boolean }): Components {
 function RichMarkdown({ content }: Props) {
   const markdownComponents = createMarkdownComponents();
   const normalizedContent = normalizeMarkdownSource(content);
+
+  if (IS_LEGACY_BROWSER) {
+    return (
+      <div
+        className="markdown-body text-[13px] leading-6"
+        dangerouslySetInnerHTML={{ __html: renderLegacyMarkdownHtml(normalizedContent) }}
+      />
+    );
+  }
 
   return (
     <div className="markdown-body text-[13px] leading-6">

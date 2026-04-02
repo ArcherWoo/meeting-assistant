@@ -3,6 +3,7 @@
  * 管理：后端数据库中的对话/消息 + 前端运行时流式状态
  */
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 
 import {
   createConversationRecord,
@@ -64,7 +65,7 @@ interface ChatState {
   resetStreamContent: (conversationId?: string) => void;
 }
 
-export const useChatStore = create<ChatState>()((set, get) => ({
+export const useChatStore = create<ChatState>()(persist((set, get) => ({
   conversations: [],
   activeConversationId: null,
   messagesByConversation: {},
@@ -295,4 +296,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       };
     });
   },
+}), {
+  name: 'zhishu-chat-ui',
+  partialize: (state) => ({
+    activeConversationId: state.activeConversationId,
+  }),
 }));

@@ -84,3 +84,36 @@ backend/
 - 构建产物：`dist/`
 - 服务器部署专用虚拟环境：`.server-venv/`
 - 服务器部署专用数据：`.server-data/`
+## 文档解析结构补充
+
+当前与附件上传、知识库导入、OCR、结构化 chunking 直接相关的新目录为：
+
+```text
+backend/services/document_parsing/
+├─ models.py                 统一中间层 IR：ParsedDocument / DocumentBlock / StructuredTable
+├─ registry.py               按扩展名分发 parser 的统一入口
+├─ chunker.py                基于 IR 生成 knowledge chunks 与 metadata_json
+├─ prompt_render.py          将结构化解析结果渲染成 prompt 文本
+└─ parsers/
+   ├─ common.py              文本清洗、Excel 列号等通用工具
+   ├─ ocr_utils.py           图片 / 扫描 PDF 共用 OCR 与 OCR 表格恢复工具
+   ├─ pdf_parser.py          layout-aware PDF 解析 + scanned PDF OCR fallback
+   ├─ image_parser.py        图片元数据 + OCR 解析
+   ├─ xlsx_parser.py         OOXML Excel 解析，保留 merged ranges / header_path / formula
+   ├─ docx_parser.py         OOXML Word 解析，保留块级顺序与结构化表格
+   ├─ ppt_parser_adapter.py  适配现有 PPT 专用解析器到统一 IR
+   ├─ csv_parser.py          CSV 解析
+   └─ text_parser.py         纯文本解析
+```
+
+配套边界说明：
+
+- `backend/services/knowledge_service.py`
+  负责把统一解析结果接入知识库导入、文本提取、向量化与检索归一化。
+- `backend/services/storage.py`
+  负责 `knowledge_chunks.metadata_json` 持久化与 SQLite 搜索结果的 locator 回填。
+- `backend/services/context_assembler.py`
+  负责把检索结果转换成带定位信息的 citation。
+- `src/components/chat/MessageBubble.tsx`
+  与 `src/components/layout/ContextPanel.tsx`
+  负责把 citation locator 渲染为前端可见 badge。

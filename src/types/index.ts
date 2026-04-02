@@ -34,6 +34,13 @@ export interface ContextCitation {
   location?: string;
   file_name?: string;
   page?: number;
+  sheet?: string;
+  row_start?: number;
+  row_end?: number;
+  story?: string;
+  source?: string;
+  ocr_segment_index?: number;
+  table_title?: string;
   chunk_type?: string;
   chunk_index?: number;
   char_start?: number;

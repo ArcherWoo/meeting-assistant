@@ -8,6 +8,7 @@ import { useAppStore } from '@/stores/appStore';
 import { useAuthStore } from '@/stores/authStore';
 import { extractFilesText, setActiveLLMProfile as persistActiveLLMProfile } from '@/services/api';
 import type { Attachment } from '@/types';
+import InlineNotice from '@/components/common/InlineNotice';
 
 interface Props {
   /** 发送消息（content + 可选附件列表） */
@@ -154,9 +155,11 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, prefi
   return (
     <div className="border-t border-surface-divider dark:border-dark-divider bg-surface-card dark:bg-dark-card px-4 py-3">
       {feedbackMessage && (
-        <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
-          {feedbackMessage}
-        </div>
+        <InlineNotice
+          className="mb-3"
+          message={feedbackMessage}
+          onClose={() => setFeedbackMessage('')}
+        />
       )}
       {/* API Key 未配置提示 */}
       {disabled && (

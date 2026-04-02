@@ -471,3 +471,131 @@ http://localhost:4173
 - **已经确认没回退的点**：构建可过、后端测试可过、SSE 元数据顺序正确、Skill 推荐保持对话内联、token 预算不再硬截断。
 - **仍必须继续修复**：Know-how 相关性过滤、短查询语义召回阈值、Abort/Done 语义。
 - **下次继续工作时，严格按 8.7 的顺序推进，不要重新做大范围排查。**
+## 10. 文档解析与 OCR 新基线
+
+### 10.1 统一解析架构
+
+当前附件文本提取与知识库导入已经统一收敛到 `backend/services/document_parsing/`：
+
+- `registry.py`：按扩展名分发 parser
+- `models.py`：统一 IR，包含 `ParsedDocument / DocumentBlock / StructuredTable / TableCell`
+- `chunker.py`：把 IR 转成知识库 chunks，并写入 `metadata_json`
+- `prompt_render.py`：把结构化解析结果渲染成 LLM 可消费文本
+
+这意味着：
+
+- 附件模式与知识库导入不再各自维护一套解析逻辑
+- 新格式能力只需要接一次 parser，即可同时服务两条链路
+- chunk 的结构信息可以继续传递到检索、citation 与前端定位展示
+
+### 10.2 格式能力现状
+
+#### PPT / PPTX
+
+- 保留现有专用解析器能力，并通过 `ppt_parser_adapter.py` 接入统一 IR
+- 支持 slide、note、table 等结构块进入统一 chunking 流程
+
+#### XLSX
+
+- 使用 OOXML parser，不再是 `values_only=True` 文本摊平
+- 当前会保留：
+  - merged ranges
+  - 多层表头
+  - `header_path`
+  - formula
+  - sheet 级定位
+
+#### DOCX
+
+- 使用 OOXML parser，按块级顺序遍历
+- 当前会保留：
+  - heading / paragraph / table 原始顺序
+  - 结构化表格
+  - header style 等基础来源定位
+
+#### PDF
+
+- 优先使用 PyMuPDF 做 layout-aware 提取
+- 会把文本块分类为：
+  - `title`
+  - `heading`
+  - `paragraph`
+  - `list_item`
+- 可尝试提取 PDF 表格
+- 若页面没有可提取文本与表格，会尝试把页面渲染成图片再走 OCR
+
+#### Image
+
+- 可提取图片元数据
+- 可选执行 OCR
+- 与 scanned PDF 共用同一套 OCR 工具和切块逻辑
+
+### 10.3 OCR 能力边界
+
+OCR 相关实现集中在 `backend/services/document_parsing/parsers/ocr_utils.py`：
+
+- `extract_ocr_layout_from_image_bytes()`：读取 Tesseract OCR 结果与行布局
+- `segment_ocr_text()`：把 OCR 文本切成标题 / 段落 / 列表块
+- `build_ocr_structure()`：尝试从 OCR 行布局恢复简单表格
+
+当前 OCR 表格恢复属于启发式方案，适合：
+
+- 列间距比较稳定的报价表
+- 规则二维表
+- 扫描件中行列相对整齐的表格
+
+当前不保证稳定处理：
+
+- 复杂跨列跨行表
+- 手写表格
+- 倾斜严重或噪点较高的扫描件
+- 表头层级非常复杂的 OCR 表格
+
+### 10.4 检索定位与前端展示
+
+`knowledge_chunks.metadata_json` 现在会保存 richer locator 信息，例如：
+
+- `sheet`
+- `page`
+- `row_start / row_end`
+- `story`
+- `source`
+- `ocr_segment_index`
+- `table_title`
+
+这些字段会沿链路进入：
+
+- SQLite 关键词搜索结果
+- LanceDB 语义检索归一化结果
+- `context_assembler` citation
+- 前端 `MessageBubble` 与 `ContextPanel` 的 locator badges
+
+### 10.5 依赖说明
+
+当前文档解析与 OCR 相关依赖为：
+
+- `python-pptx`
+- `PyMuPDF`
+- `pypdf`
+- `Pillow`
+- `pytesseract`
+
+运行时说明：
+
+- 没有 `PyMuPDF` 时，PDF 会回退到 `pypdf`
+- 没有 `Pillow + pytesseract + Tesseract` 时，OCR 会优雅降级，不阻断知识库导入或附件文本提取主流程
+
+### 10.6 验证基线
+
+本轮相关能力的最低验证要求：
+
+- `pytest backend/tests -q`
+- `npm run build`
+
+新增重点覆盖：
+
+- XLSX merged cells / header_path
+- DOCX 段落与表格顺序
+- scanned PDF OCR block segmentation
+- OCR table recovery
+- citation locator rich metadata

@@ -3,13 +3,13 @@
  * 用户消息右对齐，AI 消息左对齐。
  * AI 消息支持 Markdown、上下文引用、Skill 推荐和 Agent 结构化结果。
  */
-import { memo, useState } from 'react';
+import { lazy, memo, Suspense, useState } from 'react';
 import clsx from 'clsx';
-import { AlertCircle, Check, Copy } from 'lucide-react';
-import RetrievalPlanCard from '@/components/common/RetrievalPlanCard';
-import StructuredPayloadView from '@/components/common/StructuredPayloadView';
-import RichMarkdown from '@/components/chat/RichMarkdown';
 import type { ContextCitation, ContextMetadata, Message, SkillSuggestionEvent } from '@/types';
+
+const RichMarkdown = lazy(() => import('@/components/chat/RichMarkdown'));
+const RetrievalPlanCard = lazy(() => import('@/components/common/RetrievalPlanCard'));
+const StructuredPayloadView = lazy(() => import('@/components/common/StructuredPayloadView'));
 
 interface Props {
   message: Message;
@@ -18,6 +18,33 @@ interface Props {
   onDismissSkillSuggestion?: (message: Message) => void;
   onRetryGeneration?: (message: Message) => void;
   canRetryGeneration?: boolean;
+}
+
+function IconCopy() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.9" aria-hidden="true" className="h-[15px] w-[15px]">
+      <rect x="7" y="3" width="10" height="10" rx="2" />
+      <path d="M5 7H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2v-1" />
+    </svg>
+  );
+}
+
+function IconCheck() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true" className="h-[15px] w-[15px]">
+      <path d="m4.5 10.5 3.5 3.5 7-8" />
+    </svg>
+  );
+}
+
+function IconAlert() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.9" aria-hidden="true" className="h-[15px] w-[15px]">
+      <path d="M10 3.5 17 16.5H3L10 3.5Z" />
+      <path d="M10 7.4v4.2" />
+      <circle cx="10" cy="14" r="0.8" fill="currentColor" stroke="none" />
+    </svg>
+  );
 }
 
 function renderContextBadge(label: string, value: number, tone: 'blue' | 'emerald' | 'amber') {
@@ -63,6 +90,19 @@ function getCitationLocationText(citation: ContextCitation): string {
 
   const uniqueParts = Array.from(new Set(parts));
   return uniqueParts.join(' · ') || '未提供定位信息';
+}
+
+function getCitationLocatorChips(citation: ContextCitation): string[] {
+  const chips: string[] = [];
+  if (citation.sheet) chips.push(citation.sheet);
+  if (citation.row_start && citation.row_end) {
+    chips.push(citation.row_start === citation.row_end ? `R${citation.row_start}` : `R${citation.row_start}-${citation.row_end}`);
+  }
+  if (citation.story) chips.push(citation.story);
+  if (citation.table_title) chips.push(citation.table_title);
+  if (citation.ocr_segment_index) chips.push(`OCR #${citation.ocr_segment_index}`);
+  if (citation.chunk_index) chips.push(`Chunk #${citation.chunk_index}`);
+  return chips;
 }
 
 function getCitationSummaryText(citation: ContextCitation): string {
@@ -257,11 +297,13 @@ function MessageBubble({
               </div>
             )}
             {context?.retrieval_plan && (
-              <RetrievalPlanCard
-                plan={context.retrieval_plan}
-                compact
-                title="检索规划"
-              />
+              <Suspense fallback={null}>
+                <RetrievalPlanCard
+                  plan={context.retrieval_plan}
+                  compact
+                  title="检索规划"
+                />
+              </Suspense>
             )}
             {groupedCitations.length > 0 && (
               <details className="group overflow-hidden rounded-lg border border-surface-divider/80 bg-white/80 shadow-sm dark:border-dark-divider dark:bg-dark-card/70">
@@ -308,6 +350,14 @@ function MessageBubble({
                                       P{citation.page}
                                     </span>
                                   ) : null}
+                                  {getCitationLocatorChips(citation).map((chip) => (
+                                    <span
+                                      key={`${citation.id}-${chip}`}
+                                      className="win-badge border-surface-divider bg-surface px-2 py-1 text-[10px] text-text-secondary dark:border-dark-divider dark:bg-dark-card dark:text-text-dark-secondary"
+                                    >
+                                      {chip}
+                                    </span>
+                                  ))}
                                 </div>
 
                                 <div className="rounded-lg border border-surface-divider/70 bg-white/80 px-3 py-2 dark:border-dark-divider dark:bg-dark-card/80">
@@ -379,6 +429,14 @@ function MessageBubble({
                                           P{citation.page}
                                         </span>
                                       ) : null}
+                                      {getCitationLocatorChips(citation).map((chip) => (
+                                        <span
+                                          key={`retrieved-${citation.id}-${chip}`}
+                                          className="win-badge border-surface-divider bg-surface px-2 py-1 text-[10px] text-text-secondary dark:border-dark-divider dark:bg-dark-card dark:text-text-dark-secondary"
+                                        >
+                                          {chip}
+                                        </span>
+                                      ))}
                                     </div>
 
                                     <div className="rounded-lg border border-surface-divider/70 bg-white/80 px-3 py-2 dark:border-dark-divider dark:bg-dark-card/80">
@@ -457,7 +515,9 @@ function MessageBubble({
           ) : isStreaming ? (
             <p className="whitespace-pre-wrap">{message.content}</p>
           ) : message.content ? (
-            <RichMarkdown content={message.content} />
+            <Suspense fallback={<p className="whitespace-pre-wrap">{message.content}</p>}>
+              <RichMarkdown content={message.content} />
+            </Suspense>
           ) : (
             <span className="inline-flex items-center gap-1 text-text-secondary">
               <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
@@ -598,7 +658,9 @@ function MessageBubble({
                     结构化结果
                   </p>
                   <div className="mt-2">
-                    <StructuredPayloadView data={agentResult.structured_payload} />
+                    <Suspense fallback={null}>
+                      <StructuredPayloadView data={agentResult.structured_payload} />
+                    </Suspense>
                   </div>
                 </div>
               )}
@@ -668,11 +730,11 @@ function MessageBubble({
             aria-label="复制这条消息"
           >
             {copyState === 'done' ? (
-              <Check size={15} strokeWidth={2.25} />
+              <IconCheck />
             ) : copyState === 'error' ? (
-              <AlertCircle size={15} strokeWidth={2.1} />
+              <IconAlert />
             ) : (
-              <Copy size={15} strokeWidth={2.1} />
+              <IconCopy />
             )}
           </button>
         )}

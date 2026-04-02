@@ -5,16 +5,16 @@
  */
 import { useState, useEffect, useCallback, useMemo, useRef, type ChangeEvent } from 'react';
 import clsx from 'clsx';
+import { emitAppDataInvalidation } from '@/utils/appInvalidation';
 import {
   listKnowhowRules, createKnowhowRule, updateKnowhowRule,
-  deleteKnowhowRule, getKnowhowStats,
+  deleteKnowhowRule, getKnowhowStats, listKnowhowCategories,
   renameKnowhowCategory, deleteKnowhowCategory,
-  exportKnowhowRules, importKnowhowRules,
+  exportKnowhowRules, importKnowhowRules, createKnowhowCategory,
 } from '@/services/api';
 import type { KnowhowExportData, KnowhowImportStrategy, KnowhowRule } from '@/types';
 
 /** 规则分类选项 */
-const PRESET_CATEGORIES = ['采购预审', '合规性', '价格合理性', '技术规格', '供应商资质', '流程规范', '其他'] as const;
 type RuleStatusFilter = 'all' | 'active' | 'inactive';
 
 function getImportRuleCount(payload: unknown): number {
@@ -27,12 +27,27 @@ function getImportRuleCount(payload: unknown): number {
 
 function downloadKnowhowExport(data: KnowhowExportData) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+  const exportDate = data.exported_at?.slice(0, 10) || new Date().toISOString().slice(0, 10);
+  const fileName = `knowhow-rules-${exportDate}.json`;
+  const legacyNavigator = window.navigator as Navigator & {
+    msSaveBlob?: (blob: Blob, defaultName?: string) => boolean;
+    msSaveOrOpenBlob?: (blob: Blob, defaultName?: string) => boolean;
+  };
+
+  if (typeof legacyNavigator.msSaveOrOpenBlob === 'function') {
+    legacyNavigator.msSaveOrOpenBlob(blob, fileName);
+    return;
+  }
+
+  if (typeof legacyNavigator.msSaveBlob === 'function') {
+    legacyNavigator.msSaveBlob(blob, fileName);
+    return;
+  }
+
   const url = window.URL.createObjectURL(blob);
   const anchor = document.createElement('a');
-  const exportDate = data.exported_at?.slice(0, 10) || new Date().toISOString().slice(0, 10);
-
   anchor.href = url;
-  anchor.download = `knowhow-rules-${exportDate}.json`;
+  anchor.download = fileName;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
@@ -61,6 +76,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
   const [rules, setRules] = useState<KnowhowRule[]>([]);
   // 后端返回 { total_rules, active_rules, categories: string[], total_hits }
   const [stats, setStats] = useState<{ total_rules: number; active_rules: number; categories: string[]; total_hits: number } | null>(null);
+  const [categories, setCategories] = useState<Array<{ name: string; rule_count: number }>>([]);
   const [filterCategory, setFilterCategory] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<RuleStatusFilter>('all');
   const [loading, setLoading] = useState(true);
@@ -81,14 +97,24 @@ export default function KnowhowManager({ standalone = true }: Props) {
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const categoryOptions = useMemo(
-    () => Array.from(new Set([...PRESET_CATEGORIES, ...(stats?.categories ?? []), ...rules.map((rule) => rule.category)])),
-    [rules, stats]
+    () => Array.from(new Set([
+      ...categories.map((category) => category.name),
+      ...rules.map((rule) => rule.category),
+      ...(editingRule?.category ? [editingRule.category] : []),
+    ].filter(Boolean))),
+    [categories, editingRule?.category, rules]
   );
 
-  const categoryCounts = useMemo(() => rules.reduce<Record<string, number>>((acc, rule) => {
-    acc[rule.category] = (acc[rule.category] ?? 0) + 1;
-    return acc;
-  }, {}), [rules]);
+  const categoryCounts = useMemo(() => {
+    const counts = rules.reduce<Record<string, number>>((acc, rule) => {
+      acc[rule.category] = (acc[rule.category] ?? 0) + 1;
+      return acc;
+    }, {});
+    for (const category of categories) {
+      counts[category.name] = counts[category.name] ?? category.rule_count ?? 0;
+    }
+    return counts;
+  }, [categories, rules]);
 
   const statusCounts = useMemo(() => {
     const scopedRules = filterCategory
@@ -119,12 +145,14 @@ export default function KnowhowManager({ standalone = true }: Props) {
     setLoading(true);
     setError('');
     try {
-      const [ruleList, statsData] = await Promise.all([
+      const [ruleList, statsData, categoryList] = await Promise.all([
         listKnowhowRules(undefined, false),
         getKnowhowStats(),
+        listKnowhowCategories(),
       ]);
       setRules(ruleList);
       setStats(statsData);
+      setCategories(categoryList);
     } catch (e: unknown) {
       setError((e as Error).message);
     } finally {
@@ -138,11 +166,14 @@ export default function KnowhowManager({ standalone = true }: Props) {
   const handleRenameCategory = async () => {
     if (!renamingCat || !renameValue.trim()) return;
     try {
-      await renameKnowhowCategory(renamingCat, renameValue.trim());
-      if (filterCategory === renamingCat) setFilterCategory(renameValue.trim());
+      const nextName = renameValue.trim();
+      await renameKnowhowCategory(renamingCat, nextName);
+      if (filterCategory === renamingCat) setFilterCategory(nextName);
       setRenamingCat(null);
       setRenameValue('');
+      setNotice(`分类「${renamingCat}」已重命名为「${nextName}」`);
       await loadData();
+      emitAppDataInvalidation(['knowhow']);
     } catch (e: unknown) {
       setError((e as Error).message);
     }
@@ -157,18 +188,27 @@ export default function KnowhowManager({ standalone = true }: Props) {
       setDeletingCat(null);
       setDeleteRulesFlag(true);
       await loadData();
+      emitAppDataInvalidation(['knowhow']);
     } catch (e: unknown) {
       setError((e as Error).message);
     }
   };
 
   /** 确认新建分类（新建一条该分类的空规则编辑表单） */
-  const handleAddCategory = () => {
+  const handleAddCategory = async () => {
     const name = newCategoryName.trim();
     if (!name) return;
-    setAddingCategory(false);
-    setNewCategoryName('');
-    setEditingRule({ category: name, rule_text: '', weight: 1.0, source: 'manual' });
+    try {
+      await createKnowhowCategory(name);
+      setAddingCategory(false);
+      setNewCategoryName('');
+      setFilterCategory(name);
+      setNotice(`分类「${name}」已创建`);
+      await loadData();
+      emitAppDataInvalidation(['knowhow']);
+    } catch (e: unknown) {
+      setError((e as Error).message);
+    }
   };
 
   /** 保存规则（新建或更新） */
@@ -192,6 +232,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
       }
       setEditingRule(null);
       await loadData();
+      emitAppDataInvalidation(['knowhow']);
     } catch (e: unknown) {
       setError((e as Error).message);
     }
@@ -202,6 +243,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
     try {
       await deleteKnowhowRule(ruleId);
       await loadData();
+      emitAppDataInvalidation(['knowhow']);
     } catch (e: unknown) {
       setError((e as Error).message);
     }
@@ -212,6 +254,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
     try {
       await updateKnowhowRule(rule.id, { is_active: rule.is_active ? 0 : 1 });
       await loadData();
+      emitAppDataInvalidation(['knowhow']);
     } catch (e: unknown) {
       setError((e as Error).message);
     }
@@ -273,6 +316,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
       setPendingImport(null);
       setNotice(buildImportNotice(result));
       await loadData();
+      emitAppDataInvalidation(['knowhow']);
     } catch (e: unknown) {
       setNotice('');
       setError((e as Error).message);
@@ -388,7 +432,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
       {/* 编辑表单 */}
       {editingRule && (
         <RuleForm rule={editingRule} onSave={handleSave}
-          onCancel={() => setEditingRule(null)} onChange={setEditingRule} />
+          onCancel={() => setEditingRule(null)} onChange={setEditingRule} categoryOptions={categoryOptions} />
       )}
 
       <div className="flex-1 overflow-y-auto scrollbar-thin bg-[#F7F8FA] p-4 space-y-2 dark:bg-dark">
@@ -575,18 +619,19 @@ function CategoryChip({ label, active, count, onSelect, onRename, onDelete }: {
 }
 
 /** 规则编辑表单 */
-function RuleForm({ rule, onSave, onCancel, onChange }: {
+function RuleForm({ rule, onSave, onCancel, onChange, categoryOptions }: {
   rule: Partial<KnowhowRule>;
   onSave: () => void;
   onCancel: () => void;
   onChange: (r: Partial<KnowhowRule>) => void;
+  categoryOptions: string[];
 }) {
   return (
     <div className="win-panel mx-4 mt-3 space-y-3 p-4">
       <div className="flex gap-2">
         <select value={rule.category || ''} onChange={(e) => onChange({ ...rule, category: e.target.value })}
           className="win-select flex-1 !py-1.5 text-xs">
-          {PRESET_CATEGORIES.map((cat) => <option key={cat} value={cat}>{cat}</option>)}
+          {categoryOptions.map((cat) => <option key={cat} value={cat}>{cat}</option>)}
         </select>
         <input type="number" value={rule.weight ?? 1.0} min={0} max={5} step={0.1}
           onChange={(e) => onChange({ ...rule, weight: parseFloat(e.target.value) })}

@@ -122,6 +122,64 @@ class AssembledContext:
             return None
 
     @classmethod
+    def _build_chunk_locator(cls, result: dict) -> tuple[str, dict]:
+        slide_index = cls._coerce_int(result.get("slide_index"))
+        if slide_index is not None and slide_index <= 0:
+            slide_index = None
+        page = cls._coerce_int(result.get("page"))
+        if page is not None and page <= 0:
+            page = None
+        chunk_index = cls._coerce_int(result.get("chunk_index"))
+        if chunk_index is not None and chunk_index <= 0:
+            chunk_index = None
+        raw_char_start = cls._coerce_int(result.get("char_start"))
+        raw_char_end = cls._coerce_int(result.get("char_end"))
+        char_start = raw_char_start + 1 if raw_char_start is not None and raw_char_start >= 0 else None
+        char_end = raw_char_end if raw_char_end is not None and raw_char_end > 0 else None
+        row_start = cls._coerce_int(result.get("row_start"))
+        row_end = cls._coerce_int(result.get("row_end"))
+
+        locator_fields = {
+            "page": page or slide_index,
+            "sheet": str(result.get("sheet") or "").strip() or None,
+            "story": str(result.get("story") or "").strip() or None,
+            "row_start": row_start,
+            "row_end": row_end,
+            "chunk_index": chunk_index,
+            "char_start": char_start,
+            "char_end": char_end,
+            "source": str(result.get("source") or "").strip() or None,
+            "ocr_segment_index": cls._coerce_int(result.get("ocr_segment_index")),
+            "table_title": str(result.get("table_title") or "").strip() or None,
+        }
+
+        location_parts: list[str] = []
+        include_page_in_location = bool(result.get("page")) or any(
+            locator_fields.get(key)
+            for key in ("sheet", "story", "row_start", "row_end", "ocr_segment_index", "table_title")
+        ) or locator_fields.get("source") == "ocr"
+        if locator_fields["sheet"]:
+            location_parts.append(f"工作表 {locator_fields['sheet']}")
+        if locator_fields["page"] and include_page_in_location:
+            location_parts.append(f"第{locator_fields['page']}页")
+        if locator_fields["story"]:
+            location_parts.append(f"区域 {locator_fields['story']}")
+        if row_start is not None and row_end is not None:
+            location_parts.append(f"行 {row_start}" if row_start == row_end else f"行 {row_start}-{row_end}")
+        if locator_fields["ocr_segment_index"] is not None:
+            location_parts.append(f"OCR 段 #{locator_fields['ocr_segment_index']}")
+        if chunk_index is not None:
+            location_parts.append(f"片段 #{chunk_index}")
+        if char_start is not None and char_end is not None and char_end >= char_start:
+            location_parts.append(f"字符 {char_start}-{char_end}")
+        if locator_fields["table_title"]:
+            location_parts.append(f"表 {locator_fields['table_title']}")
+        if locator_fields["source"] == "ocr":
+            location_parts.append("OCR 恢复")
+
+        return " · ".join(location_parts), locator_fields
+
+    @classmethod
     def _build_knowledge_citation(cls, result: dict, index: int) -> dict:
         source_name = str(result.get("source_file") or "知识库文档")
         citation = {
@@ -155,21 +213,18 @@ class AssembledContext:
             location = " · ".join(location_parts)
         else:
             chunk_type_map = {"text": "正文片段", "table": "表格片段", "note": "备注片段"}
-            slide_index = cls._coerce_int(result.get("slide_index"))
-            if slide_index is not None and slide_index <= 0:
-                slide_index = None
+            location, locator_fields = cls._build_chunk_locator(result)
+            page = cls._coerce_int(locator_fields.get("page"))
             chunk_type = str(result.get("chunk_type") or "").strip().lower()
             chunk_type_label = chunk_type_map.get(chunk_type, chunk_type or "正文片段")
-            chunk_index = cls._coerce_int(result.get("chunk_index"))
-            if chunk_index is not None and chunk_index <= 0:
-                chunk_index = None
-            raw_char_start = cls._coerce_int(result.get("char_start"))
-            raw_char_end = cls._coerce_int(result.get("char_end"))
-            char_start = raw_char_start + 1 if raw_char_start is not None and raw_char_start >= 0 else None
-            char_end = raw_char_end if raw_char_end is not None and raw_char_end > 0 else None
+            chunk_index = cls._coerce_int(locator_fields.get("chunk_index"))
+            char_start = cls._coerce_int(locator_fields.get("char_start"))
+            char_end = cls._coerce_int(locator_fields.get("char_end"))
 
             title_parts = []
-            if slide_index is not None:
+            if locator_fields.get("sheet"):
+                title_parts.append(str(locator_fields["sheet"]))
+            if page is not None:
                 title_parts.append(f"第{slide_index}页")
             if chunk_type_label:
                 title_parts.append(chunk_type_label)
@@ -219,6 +274,80 @@ class AssembledContext:
             "snippet": cls._normalize_text_snippet(skill.get("description") or ""),
             "location": f"匹配度 {float(skill.get('score', 0.0)):.0%} · {skill.get('confidence', 'low')}",
         }
+
+    @classmethod
+    def _build_knowledge_citation(cls, result: dict, index: int) -> dict:
+        source_name = str(result.get("source_file") or "知识库文档")
+        citation = {
+            "id": str(result.get("id") or result.get("chunk_id") or f"knowledge-{index}"),
+            "source_type": "knowledge",
+            "label": source_name,
+            "file_name": source_name,
+        }
+
+        if "item_name" in result:
+            title_parts = [str(part).strip() for part in (result.get("category"), result.get("item_name")) if part]
+            title = " - ".join(title_parts) if title_parts else f"知识记录 {index}"
+            snippet = cls._normalize_text_snippet(
+                result.get("raw_text")
+                or "；".join(
+                    part
+                    for part in [
+                        f"供应商: {result['supplier']}" if result.get("supplier") else "",
+                        f"单价: {result['unit_price']}" if result.get("unit_price") else "",
+                        f"总价: {result['total_price']}" if result.get("total_price") else "",
+                    ]
+                    if part
+                )
+                or title
+            )
+            location_parts = []
+            if result.get("supplier"):
+                location_parts.append(f"供应商: {result['supplier']}")
+            if result.get("unit_price"):
+                location_parts.append(f"单价: {result['unit_price']}")
+            location = " · ".join(location_parts)
+            citation.update({"title": title, "snippet": snippet, "location": location})
+            return citation
+
+        chunk_type_map = {"text": "正文片段", "table": "表格片段", "note": "备注片段"}
+        chunk_type = str(result.get("chunk_type") or "").strip().lower()
+        chunk_type_label = chunk_type_map.get(chunk_type, chunk_type or "正文片段")
+        location, locator_fields = cls._build_chunk_locator(result)
+        page = cls._coerce_int(locator_fields.get("page"))
+        chunk_index = cls._coerce_int(locator_fields.get("chunk_index"))
+        char_start = cls._coerce_int(locator_fields.get("char_start"))
+        char_end = cls._coerce_int(locator_fields.get("char_end"))
+
+        title_parts = []
+        if locator_fields.get("sheet"):
+            title_parts.append(str(locator_fields["sheet"]))
+        if page is not None:
+            title_parts.append(f"第{page}页")
+        if chunk_type_label:
+            title_parts.append(chunk_type_label)
+        title = " · ".join(title_parts) if title_parts else f"知识片段 {index}"
+        snippet = cls._normalize_text_snippet(result.get("content") or "")
+        if not location and title_parts:
+            location = " · ".join(title_parts)
+
+        if page is not None:
+            citation["page"] = page
+        if chunk_type:
+            citation["chunk_type"] = chunk_type
+        if chunk_index is not None:
+            citation["chunk_index"] = chunk_index
+        if char_start is not None:
+            citation["char_start"] = char_start
+        if char_end is not None:
+            citation["char_end"] = char_end
+        for key in ("sheet", "row_start", "row_end", "story", "source", "ocr_segment_index", "table_title"):
+            value = locator_fields.get(key)
+            if value is not None and value != "":
+                citation[key] = value
+
+        citation.update({"title": title, "snippet": snippet, "location": location})
+        return citation
 
     def to_metadata_payload(self) -> dict:
         citations = [

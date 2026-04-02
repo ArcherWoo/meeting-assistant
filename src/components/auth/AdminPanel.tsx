@@ -3,6 +3,8 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import type { AccessGrant, Group, Role, SkillMeta, User } from '@/types';
+import { hasInvalidatedResource, subscribeAppDataInvalidation } from '@/utils/appInvalidation';
+import { useConfirm } from '@/hooks/useConfirm';
 import {
   createGroup,
   deleteGroup,
@@ -73,16 +75,19 @@ function useToast() {
     setTimeout(() => setToastState(null), 3000);
   };
 
-  return { toast, showToast };
+  const dismissToast = () => setToastState(null);
+
+  return { toast, showToast, dismissToast };
 }
 
 export default function AdminPanel() {
+  const confirm = useConfirm();
   const [tab, setTab] = useState<Tab>('users');
   const [users, setUsers] = useState<User[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const { toast, showToast } = useToast();
+  const { toast, showToast, dismissToast } = useToast();
 
   const [showAddUser, setShowAddUser] = useState(false);
   const [newUser, setNewUser] = useState<CreateUserFormState>(EMPTY_NEW_USER);
@@ -108,6 +113,12 @@ export default function AdminPanel() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => subscribeAppDataInvalidation((resources) => {
+    if (hasInvalidatedResource(resources, ['users', 'groups'])) {
+      void refresh();
+    }
+  }), [refresh]);
 
   const inputCls =
     'w-full rounded-md border border-surface-divider bg-white px-3 py-2 text-sm ' +
@@ -193,10 +204,17 @@ export default function AdminPanel() {
   const handleDeleteUser = async (id: string) => {
     const targetUser = users.find((user) => user.id === id);
     if (targetUser?.username === DEFAULT_ADMIN_USERNAME) {
-      showToast('默认 admin 账号不能删除', false);
+      showToast('?? admin ??????', false);
       return;
     }
-    if (!confirm('确定删除此用户吗？')) return;
+
+    const confirmed = await confirm({
+      title: `删除用户「${targetUser?.display_name || targetUser?.username || '未命名用户'}」？`,
+      description: '删除后该账号将无法继续登录，操作不可恢复。',
+      confirmLabel: '确认删除',
+      tone: 'danger',
+    });
+    if (!confirmed) return;
 
     setLoading(true);
     try {
@@ -205,7 +223,7 @@ export default function AdminPanel() {
         handleCancelEditUser();
       }
       await refresh();
-      showToast('用户已删除');
+      showToast('?????');
     } catch (e) {
       setError((e as Error).message);
       showToast((e as Error).message, false);
@@ -297,7 +315,14 @@ export default function AdminPanel() {
   };
 
   const handleDeleteGroup = async (id: string) => {
-    if (!confirm('确定删除此用户组吗？')) return;
+    const targetGroup = groups.find((group) => group.id === id);
+    const confirmed = await confirm({
+      title: `删除用户组「${targetGroup?.name || '未命名用户组'}」？`,
+      description: '删除后，关联用户组授权将一并失效，请确认当前分组已不再使用。',
+      confirmLabel: '确认删除',
+      tone: 'danger',
+    });
+    if (!confirmed) return;
 
     setLoading(true);
     try {
@@ -306,7 +331,7 @@ export default function AdminPanel() {
         handleCancelEditGroup();
       }
       await refresh();
-      showToast('用户组已删除');
+      showToast('??????');
     } catch (e) {
       setError((e as Error).message);
       showToast((e as Error).message, false);
@@ -321,11 +346,22 @@ export default function AdminPanel() {
 
       {toast && (
         <div
-          className={`fixed right-4 top-4 z-50 rounded-md px-4 py-2 text-sm text-white shadow-lg transition-all ${
+          className={`fixed right-4 top-4 z-50 max-w-sm rounded-md px-4 py-3 text-sm text-white shadow-lg transition-all ${
             toast.ok ? 'bg-green-500' : 'bg-red-500'
           }`}
         >
-          {toast.msg}
+          <div className="flex items-start gap-3">
+            <span className="min-w-0 flex-1 break-words">{toast.msg}</span>
+            <button
+              type="button"
+              onClick={dismissToast}
+              className="inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded border border-white/20 text-base opacity-80 transition hover:opacity-100"
+              aria-label="关闭通知"
+              title="关闭通知"
+            >
+              ×
+            </button>
+          </div>
         </div>
       )}
 
@@ -731,7 +767,7 @@ function GrantsTab({ users, groups }: { users: User[]; groups: Group[] }) {
   const [grants, setGrants] = useState<AccessGrant[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const { toast, showToast } = useToast();
+  const { toast, showToast, dismissToast } = useToast();
   const [newGrantType, setNewGrantType] = useState<'public' | 'group' | 'user'>('public');
   const [newGrantee, setNewGrantee] = useState('');
 
@@ -781,6 +817,15 @@ function GrantsTab({ users, groups }: { users: User[]; groups: Group[] }) {
       setLoading(false);
     }
   };
+
+  useEffect(() => subscribeAppDataInvalidation((resources) => {
+    if (hasInvalidatedResource(resources, ['roles', 'skills', 'knowledge', 'knowhow'])) {
+      void loadResources();
+      if (selectedId) {
+        void handleSelectResource(selectedId);
+      }
+    }
+  }), [handleSelectResource, loadResources, selectedId]);
 
   const handleAddGrant = async () => {
     if (!selectedId) return;
@@ -840,11 +885,22 @@ function GrantsTab({ users, groups }: { users: User[]; groups: Group[] }) {
     <div className="relative space-y-4">
       {toast && (
         <div
-          className={`fixed right-4 top-4 z-50 rounded-md px-4 py-2 text-sm text-white shadow-lg transition-all ${
+          className={`fixed right-4 top-4 z-50 max-w-sm rounded-md px-4 py-3 text-sm text-white shadow-lg transition-all ${
             toast.ok ? 'bg-green-500' : 'bg-red-500'
           }`}
         >
-          {toast.msg}
+          <div className="flex items-start gap-3">
+            <span className="min-w-0 flex-1 break-words">{toast.msg}</span>
+            <button
+              type="button"
+              onClick={dismissToast}
+              className="inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded border border-white/20 text-base opacity-80 transition hover:opacity-100"
+              aria-label="关闭通知"
+              title="关闭通知"
+            >
+              ×
+            </button>
+          </div>
         </div>
       )}
 

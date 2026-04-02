@@ -8,6 +8,8 @@ import { v4 as uuidv4 } from 'uuid';
 import clsx from 'clsx';
 import { useAppStore } from '@/stores/appStore';
 import { useAuthStore } from '@/stores/authStore';
+import { useConfirm } from '@/hooks/useConfirm';
+import { emitAppDataInvalidation } from '@/utils/appInvalidation';
 import { getPreferredRoleForSurface } from '@/utils/roles';
 import {
   listLLMProfiles, createLLMProfile, updateLLMProfile, deleteLLMProfile, setActiveLLMProfile,
@@ -117,6 +119,7 @@ function createDraftProfile(index: number): LLMProfile {
 }
 
 export default function SettingsModal() {
+  const confirm = useConfirm();
   const {
     settingsOpen,
     toggleSettings,
@@ -384,6 +387,7 @@ export default function SettingsModal() {
       }
       const updatedRoles = await listRoles();
       setRoles(updatedRoles);
+      emitAppDataInvalidation(['roles']);
       syncSurfaceRoleSelections(updatedRoles, {
         chat: currentChatRoleId === selectedRoleId ? savedRole.id : currentChatRoleId,
         agent: currentAgentRoleId === selectedRoleId ? savedRole.id : currentAgentRoleId,
@@ -411,6 +415,7 @@ export default function SettingsModal() {
       await deleteRole(selectedRoleId);
       const updatedRoles = await listRoles();
       setRoles(updatedRoles);
+      emitAppDataInvalidation(['roles']);
       syncSurfaceRoleSelections(updatedRoles);
       if (updatedRoles.length > 0) {
         setSelectedRoleId(updatedRoles[0].id);
@@ -476,14 +481,20 @@ export default function SettingsModal() {
   };
 
   const handleDeletePreset = async (preset: SystemPromptPreset) => {
-    if (!window.confirm(`确定删除预设「${preset.name}」吗？`)) return;
+    const confirmed = await confirm({
+      title: `删除预设「${preset.name}」？`,
+      description: '删除后将无法再从预设库直接导入该提示词。',
+      confirmLabel: '确认删除',
+      tone: 'danger',
+    });
+    if (!confirmed) return;
     setPresetDeleteId(preset.id);
     try {
       await deleteSystemPromptPreset(preset.id);
       setPresets((prev) => prev.filter((p) => p.id !== preset.id));
-      setPresetNotice({ ok: true, text: '预设已删除' });
+      setPresetNotice({ ok: true, text: '?????' });
     } catch (e) {
-      setPresetNotice({ ok: false, text: (e as Error).message || '删除失败' });
+      setPresetNotice({ ok: false, text: (e as Error).message || '????' });
     } finally {
       setPresetDeleteId(null);
     }
@@ -491,7 +502,13 @@ export default function SettingsModal() {
 
   const handleResetPrompt = async () => {
     if (!selectedRoleId || selectedRoleId === '__new__') return;
-    if (!window.confirm('确定将此角色的系统提示词恢复为默认值吗？')) return;
+    const confirmed = await confirm({
+      title: '恢复默认系统提示词？',
+      description: '当前角色已编辑的系统提示词将被默认值覆盖。',
+      confirmLabel: '恢复默认',
+      tone: 'danger',
+    });
+    if (!confirmed) return;
     setPromptResetting(true);
     try {
       const result = await resetSystemPrompt(selectedRoleId);
@@ -499,7 +516,7 @@ export default function SettingsModal() {
       setRoleDraft((d) => ({ ...d, system_prompt: defaultPrompt }));
       setRoleSaved(false);
     } catch {
-      // 静默失败
+      // ????
     } finally {
       setPromptResetting(false);
     }
@@ -544,6 +561,7 @@ export default function SettingsModal() {
         await updateLLMProfile(nextDraft);
       }
       const { profiles, activeProfileId } = await refreshLLMProfiles();
+      emitAppDataInvalidation(['llmProfiles']);
       const persistedProfile = profiles.find((profile) => profile.id === nextDraft.id)
         ?? profiles.find((profile) => profile.id === activeProfileId)
         ?? nextDraft;
@@ -570,6 +588,7 @@ export default function SettingsModal() {
     try {
       await deleteLLMProfile(draft.id);
       const { profiles, activeProfileId } = await refreshLLMProfiles();
+      emitAppDataInvalidation(['llmProfiles']);
       const fallbackProfile = profiles.find((config) => config.id === activeProfileId)
         ?? profiles.find((config) => config.id !== draft.id);
 
@@ -617,6 +636,7 @@ export default function SettingsModal() {
     try {
       await setActiveLLMProfile(profileId);
       const { profiles, activeProfileId } = await refreshLLMProfiles();
+      emitAppDataInvalidation(['llmProfiles']);
       const nextProfile = profiles.find((profile) => profile.id === profileId)
         ?? profiles.find((profile) => profile.id === activeProfileId);
       if (nextProfile) {

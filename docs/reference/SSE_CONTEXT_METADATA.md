@@ -67,3 +67,33 @@
 - 摘要
 
 这样即使不同来源类型共用一套卡片组件，用户也能稳定看到“来源对象 + 定位信息 + 摘要内容”。
+
+## Citation Locator 扩展
+
+随着统一文档解析与结构化 chunk 落地，`citations` 现在还可能携带更丰富的定位字段，用于前端 badge 展示与调试：
+
+- `sheet`: Excel 工作表名
+- `row_start` / `row_end`: 表格或区域的起止行
+- `story`: 兼容富文本或分段来源的逻辑分区
+- `source`: 解析来源类型，例如 `ocr` / `layout` / `table`
+- `ocr_segment_index`: OCR 切块序号
+- `table_title`: 表格标题或推断出的表主题
+
+这些字段目前主要来自：
+
+- `knowledge_chunks.metadata_json`
+- SQLite / 向量检索后的 locator 回填
+- `context_assembler` 在 citation 阶段的统一格式化
+
+前端目前会在以下位置把它们渲染为可见定位标签：
+
+- `src/components/chat/MessageBubble.tsx`
+- `src/components/layout/ContextPanel.tsx`
+
+典型效果包括：
+
+- `第 3 页`
+- `报价汇总`
+- `行 2-18`
+- `OCR #4`
+- `表格: 供应商报价`

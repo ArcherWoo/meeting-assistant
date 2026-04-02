@@ -124,6 +124,12 @@ CREATE TABLE IF NOT EXISTS knowhow_rules (
 );
 CREATE INDEX IF NOT EXISTS idx_knowhow_category ON knowhow_rules(category);
 
+CREATE TABLE IF NOT EXISTS knowhow_categories (
+    name        TEXT PRIMARY KEY,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- 用户设置表
 CREATE TABLE IF NOT EXISTS settings (
     key         TEXT PRIMARY KEY,
@@ -175,6 +181,7 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
     chunk_index INTEGER DEFAULT 0,
     char_start  INTEGER,
     char_end    INTEGER,
+    metadata_json TEXT DEFAULT '{}',
     content     TEXT NOT NULL,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (import_id) REFERENCES ppt_imports(id) ON DELETE CASCADE
@@ -467,6 +474,22 @@ class StorageService:
             cols = await self._table_columns(table)
             if "owner_id" not in cols:
                 await self.db.execute(f"ALTER TABLE {table} ADD COLUMN owner_id TEXT")
+
+        await self.db.execute(
+            "CREATE TABLE IF NOT EXISTS knowhow_categories ("
+            "name TEXT PRIMARY KEY, "
+            "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+        )
+        await self.db.execute(
+            "INSERT OR IGNORE INTO knowhow_categories (name, created_at, updated_at) "
+            "SELECT DISTINCT category, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP "
+            "FROM knowhow_rules WHERE TRIM(COALESCE(category, '')) <> ''"
+        )
+
+        knowledge_chunk_columns = await self._table_columns("knowledge_chunks")
+        if "metadata_json" not in knowledge_chunk_columns:
+            await self.db.execute("ALTER TABLE knowledge_chunks ADD COLUMN metadata_json TEXT DEFAULT '{}'")
 
     # ===== RBAC User/Group CRUD =====
 
@@ -1626,6 +1649,43 @@ class StorageService:
         await self.db.commit()
         return rid
 
+    async def ensure_knowhow_category(self, name: str) -> None:
+        normalized = str(name or "").strip()
+        if not normalized:
+            return
+        now = utc_now_iso()
+        await self.db.execute(
+            "INSERT INTO knowhow_categories (name, created_at, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET updated_at=excluded.updated_at",
+            (normalized, now, now),
+        )
+        await self.db.commit()
+
+    async def list_knowhow_categories(self) -> list[dict]:
+        return await self._fetchall(
+            "SELECT name, created_at, updated_at FROM knowhow_categories ORDER BY created_at ASC, name ASC"
+        )
+
+    async def rename_knowhow_category(self, old_name: str, new_name: str) -> None:
+        now = utc_now_iso()
+        await self.db.execute(
+            "DELETE FROM knowhow_categories WHERE name=?",
+            (new_name,),
+        )
+        await self.db.execute(
+            "UPDATE knowhow_categories SET name=?, updated_at=? WHERE name=?",
+            (new_name, now, old_name),
+        )
+        await self.db.execute(
+            "INSERT OR IGNORE INTO knowhow_categories (name, created_at, updated_at) VALUES (?,?,?)",
+            (new_name, now, now),
+        )
+        await self.db.commit()
+
+    async def delete_knowhow_category(self, name: str) -> None:
+        await self.db.execute("DELETE FROM knowhow_categories WHERE name=?", (name,))
+        await self.db.commit()
+
     async def list_knowhow_rules(
         self,
         category: Optional[str] = None,
@@ -1788,6 +1848,7 @@ class StorageService:
                 int(chunk.get("chunk_index") or 0),
                 chunk.get("char_start"),
                 chunk.get("char_end"),
+                str(chunk.get("metadata_json") or "{}"),
                 content,
                 created_at,
             ))
@@ -1797,7 +1858,7 @@ class StorageService:
 
         await self.db.executemany(
             "INSERT INTO knowledge_chunks (id, import_id, source_file, file_type, slide_index, chunk_type, "
-            "chunk_index, char_start, char_end, content, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "chunk_index, char_start, char_end, metadata_json, content, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
         await self.db.commit()
@@ -1868,13 +1929,35 @@ class StorageService:
 
         sql = (
             "SELECT id, import_id, source_file, file_type, slide_index, chunk_type, chunk_index, "
-            "char_start, char_end, content, "
+            "char_start, char_end, metadata_json, content, "
             f"({' + '.join(score_parts)}) AS match_score "
             "FROM knowledge_chunks "
             f"WHERE {' OR '.join(where_parts)} "
             "ORDER BY match_score DESC, chunk_index ASC, created_at DESC LIMIT ?"
         )
-        return await self._fetchall(sql, [*score_params, *where_params, limit])
+        rows = await self._fetchall(sql, [*score_params, *where_params, limit])
+        for row in rows:
+            raw_metadata = row.get("metadata_json")
+            if not isinstance(raw_metadata, str) or not raw_metadata.strip():
+                continue
+            try:
+                metadata = json.loads(raw_metadata)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(metadata, dict):
+                continue
+            locator = metadata.get("locator")
+            table_meta = metadata.get("table")
+            if isinstance(locator, dict):
+                for key in ("sheet", "page", "slide", "row_start", "row_end", "story"):
+                    if key in locator and row.get(key) in (None, "", 0):
+                        row[key] = locator[key]
+            if isinstance(table_meta, dict):
+                for key in ("title", "header_depth"):
+                    alias = f"table_{key}"
+                    if key in table_meta and alias not in row:
+                        row[alias] = table_meta[key]
+        return rows
 
     async def list_unindexed_imports(self, limit: int = 5) -> list[dict]:
         return await self._fetchall(

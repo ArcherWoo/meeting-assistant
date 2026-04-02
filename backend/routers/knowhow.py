@@ -131,6 +131,11 @@ class CategoryRenameRequest(BaseModel):
     new_name: str
 
 
+class CategoryCreateRequest(BaseModel):
+    """??????"""
+    name: str
+
+
 class CategoryDeleteRequest(BaseModel):
     """删除分类请求"""
     delete_rules: bool = True  # True=同时删除该分类下的所有规则；False=仅清空规则的分类名
@@ -141,6 +146,16 @@ async def list_categories(user: dict = Depends(get_current_user)) -> dict:
     """获取所有分类及其规则数量"""
     categories = await knowhow_service.list_categories()
     return {"categories": categories, "total": len(categories)}
+
+
+@router.post("/knowhow/categories")
+async def create_category(body: CategoryCreateRequest, user: dict = Depends(get_current_user)) -> dict:
+    """?????????????"""
+    try:
+        category = await knowhow_service.create_category(body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"message": f"???{category['name']}????", "category": category}
 
 
 @router.put("/knowhow/categories/{name}")

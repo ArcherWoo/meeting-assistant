@@ -5,6 +5,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type ChangeEvent } from 'react';
 import { useAppStore } from '@/stores/appStore';
 import { useChatStore } from '@/stores/chatStore';
+import { useNotificationStore } from '@/stores/notificationStore';
+import { emitAppDataInvalidation, hasInvalidatedResource, subscribeAppDataInvalidation } from '@/utils/appInvalidation';
+import { useConfirm } from '@/hooks/useConfirm';
 import RetrievalPlanCard from '@/components/common/RetrievalPlanCard';
 import {
   listSkills, getKnowledgeStats, getKnowhowStats,
@@ -64,6 +67,19 @@ function getCitationLocationText(citation: ContextCitation): string {
 
   const uniqueParts = Array.from(new Set(parts));
   return uniqueParts.join(' · ') || '未提供定位信息';
+}
+
+function getCitationLocatorChips(citation: ContextCitation): string[] {
+  const chips: string[] = [];
+  if (citation.sheet) chips.push(citation.sheet);
+  if (citation.row_start && citation.row_end) {
+    chips.push(citation.row_start === citation.row_end ? `R${citation.row_start}` : `R${citation.row_start}-${citation.row_end}`);
+  }
+  if (citation.story) chips.push(citation.story);
+  if (citation.table_title) chips.push(citation.table_title);
+  if (citation.ocr_segment_index) chips.push(`OCR #${citation.ocr_segment_index}`);
+  if (citation.chunk_index) chips.push(`Chunk #${citation.chunk_index}`);
+  return chips;
 }
 
 function getCitationSummaryText(citation: ContextCitation): string {
@@ -147,6 +163,8 @@ export default function ContextPanel({ width }: { width?: number }) {
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState('');
   const [deletingSkillId, setDeletingSkillId] = useState<string | null>(null);
+  const pushNotification = useNotificationStore((state) => state.pushNotification);
+  const confirm = useConfirm();
 
   const modeConversation = useMemo(() => {
     const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
@@ -179,20 +197,37 @@ export default function ContextPanel({ width }: { width?: number }) {
   );
 
   /** 刷新所有数据 */
+  const refreshSkills = useCallback(async () => {
+    const result = await listSkills();
+    setSkills(result);
+  }, []);
+
+  const refreshKnowledge = useCallback(async () => {
+    const [stats, importsResult] = await Promise.all([
+      getKnowledgeStats(),
+      listKnowledgeImports(),
+    ]);
+    setKbStats(stats);
+    setImports(importsResult.imports || []);
+  }, []);
+
+  const refreshKnowhow = useCallback(async () => {
+    const stats = await getKnowhowStats();
+    setKhStats(stats);
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
-      const [s, kb, kh, imp] = await Promise.allSettled([
-        listSkills(), getKnowledgeStats(), getKnowhowStats(), listKnowledgeImports(),
+      await Promise.allSettled([
+        refreshSkills(),
+        refreshKnowledge(),
+        refreshKnowhow(),
       ]);
-      if (s.status === 'fulfilled') setSkills(s.value);
-      if (kb.status === 'fulfilled') setKbStats(kb.value);
-      if (kh.status === 'fulfilled') setKhStats(kh.value);
-      if (imp.status === 'fulfilled') setImports(imp.value.imports || []);
     } catch { /* 静默处理 */ } finally {
       // 无论成功/失败均标记首次加载完成，避免永远卡在"加载中..."
       setStatsLoaded(true);
     }
-  }, []);
+  }, [refreshKnowhow, refreshKnowledge, refreshSkills]);
 
   /** 知识库导入文件 */
   const handleKbImport = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -202,12 +237,21 @@ export default function ContextPanel({ width }: { width?: number }) {
     setImporting(true);
     try {
       const result = await uploadFiles(files, isEncrypted);
-      await refresh();
+      await refreshKnowledge();
+      emitAppDataInvalidation(['knowledge']);
       if (result.errors.length > 0) {
-        alert(`以下文件导入失败：\n${result.errors.map((item) => `${item.filename}: ${item.error}`).join('\n')}`);
+        pushNotification({
+          message: `以下文件导入失败：\n${result.errors.map((item) => `${item.filename}: ${item.error}`).join('\n')}`,
+          tone: 'error',
+          durationMs: 8000,
+        });
       }
     } catch (err: any) {
-      alert(`导入失败：${err.message || '未知错误'}`);
+      pushNotification({
+        message: `导入失败：${err.message || '未知错误'}`,
+        tone: 'error',
+        durationMs: 8000,
+      });
     } finally {
       setImporting(false);
     }
@@ -215,13 +259,23 @@ export default function ContextPanel({ width }: { width?: number }) {
 
   /** 删除知识库记录 */
   const handleDeleteImport = async (importId: string, fileName: string) => {
-    if (!confirm(`确定要删除「${fileName}」及其所有向量数据吗？`)) return;
+    const confirmed = await confirm({
+      title: `删除「${fileName}」？`,
+      description: '这会同时删除该文件及其关联的向量数据，操作后不可恢复。',
+      confirmLabel: '确认删除',
+      tone: 'danger',
+    });
+    if (!confirmed) return;
     setDeletingId(importId);
     try {
       await deleteKnowledgeImport(importId);
-      await refresh();
+      await refreshKnowledge();
+      emitAppDataInvalidation(['knowledge']);
     } catch (err: any) {
-      alert(`删除失败：${err.message || '未知错误'}`);
+      pushNotification({
+        message: `删除失败：${err.message || '未知错误'}`,
+        tone: 'error',
+      });
     } finally {
       setDeletingId(null);
     }
@@ -231,10 +285,39 @@ export default function ContextPanel({ width }: { width?: number }) {
   useEffect(() => { refresh(); }, [activeSurface, currentRoleId, refresh]);
 
   // 定时轮询刷新（每 10 秒）
+  useEffect(() => subscribeAppDataInvalidation((resources) => {
+    if (hasInvalidatedResource(resources, ['skills'])) {
+      void refreshSkills();
+    }
+    if (hasInvalidatedResource(resources, ['knowledge'])) {
+      void refreshKnowledge();
+    }
+    if (hasInvalidatedResource(resources, ['knowhow'])) {
+      void refreshKnowhow();
+    }
+  }), [refreshKnowhow, refreshKnowledge, refreshSkills]);
+
   useEffect(() => {
-    const timer = setInterval(refresh, 10_000);
-    return () => clearInterval(timer);
-  }, [refresh]);
+    const syncVisibleResources = () => {
+      void Promise.all([
+        refreshSkills(),
+        refreshKnowledge(),
+        refreshKnowhow(),
+      ]);
+    };
+    const handleWindowFocus = () => { syncVisibleResources(); };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        syncVisibleResources();
+      }
+    };
+    window.addEventListener('focus', handleWindowFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [refreshKnowhow, refreshKnowledge, refreshSkills]);
 
   /** 新建 Skill 模板 */
   const NEW_SKILL_TEMPLATE = `# Skill: 新技能名称
@@ -270,7 +353,10 @@ export default function ContextPanel({ width }: { width?: number }) {
       setEditContent(data.content);
       setSaveMsg('');
     } catch (err: any) {
-      alert(`无法加载 Skill 内容: ${err.message}`);
+      pushNotification({
+        message: `无法加载 Skill 内容: ${err.message}`,
+        tone: 'error',
+      });
     }
   };
 
@@ -287,7 +373,8 @@ export default function ContextPanel({ width }: { width?: number }) {
         result = await updateSkill(editingSkill.id, editContent);
       }
       setSaveMsg(`✅ ${result.message}`);
-      await refresh();
+      await refreshSkills();
+      emitAppDataInvalidation(['skills']);
       // 新建成功后更新编辑器状态为已保存的 skill
       if (editingSkill.isNew) {
         setEditingSkill((prev) => prev ? { ...prev, id: result.id, name: result.name, isNew: false } : null);
@@ -302,16 +389,25 @@ export default function ContextPanel({ width }: { width?: number }) {
   /** 删除 Skill（内置 Skill 写入墓碑标记实现逻辑删除，用户 Skill 直接删除文件） */
   const handleDeleteSkill = async (skill: SkillMeta, e: React.MouseEvent) => {
     e.stopPropagation();
-    const builtinNote = skill.is_builtin
-      ? '\n（这是内置 Skill，删除后会立即从列表隐藏，不会修改内置源文件）'
-      : '';
-    if (!confirm(`确定要删除 Skill「${skill.name}」吗？${builtinNote}`)) return;
+    const confirmed = await confirm({
+      title: `删除 Skill「${skill.name}」？`,
+      description: skill.is_builtin
+        ? '这是内置 Skill，删除后会从列表中隐藏，不会改动内置源文件。'
+        : '删除后将无法在当前工作区继续使用这个 Skill。',
+      confirmLabel: '确认删除',
+      tone: 'danger',
+    });
+    if (!confirmed) return;
     setDeletingSkillId(skill.id);
     try {
       await deleteSkill(skill.id);
-      await refresh();
+      await refreshSkills();
+      emitAppDataInvalidation(['skills']);
     } catch (err: any) {
-      alert(`删除失败：${err.message}`);
+      pushNotification({
+        message: `删除失败：${err.message}`,
+        tone: 'error',
+      });
     } finally {
       setDeletingSkillId(null);
     }
@@ -492,6 +588,14 @@ export default function ContextPanel({ width }: { width?: number }) {
                                         P{citation.page}
                                       </span>
                                     ) : null}
+                                    {getCitationLocatorChips(citation).map((chip) => (
+                                      <span
+                                        key={`${citation.id}-${chip}`}
+                                        className="win-badge border-surface-divider bg-surface px-2 py-1 text-[10px] text-text-secondary dark:border-dark-divider dark:bg-dark-sidebar dark:text-text-dark-secondary"
+                                      >
+                                        {chip}
+                                      </span>
+                                    ))}
                                   </div>
 
                                   <div>
@@ -560,6 +664,14 @@ export default function ContextPanel({ width }: { width?: number }) {
                                             P{citation.page}
                                           </span>
                                         ) : null}
+                                        {getCitationLocatorChips(citation).map((chip) => (
+                                          <span
+                                            key={`retrieved-${citation.id}-${chip}`}
+                                            className="win-badge border-surface-divider bg-surface px-2 py-1 text-[10px] text-text-secondary dark:border-dark-divider dark:bg-dark-sidebar dark:text-text-dark-secondary"
+                                          >
+                                            {chip}
+                                          </span>
+                                        ))}
                                       </div>
 
                                       <div>

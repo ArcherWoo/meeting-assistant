@@ -123,6 +123,28 @@ class KnowhowRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(listed["rules"][0]["category"], "技术规格")
         self.assertEqual(listed["rules"][0]["rule_text"], "规格参数要和招标书一致")
 
+    async def test_create_and_rename_empty_category(self):
+        created = await knowhow_router.create_category(
+            knowhow_router.CategoryCreateRequest(name="????"),
+            user=self.admin,
+        )
+        self.assertEqual(created["category"]["name"], "????")
+
+        listed = await knowhow_router.list_categories(user=self.admin)
+        self.assertIn("????", {item["name"] for item in listed["categories"]})
+
+        renamed = await knowhow_router.rename_category(
+            "????",
+            knowhow_router.CategoryRenameRequest(new_name="????-????"),
+            user=self.admin,
+        )
+        self.assertEqual(renamed["affected_rules"], 0)
+
+        listed_again = await knowhow_router.list_categories(user=self.admin)
+        category_names = {item["name"] for item in listed_again["categories"]}
+        self.assertIn("????-????", category_names)
+        self.assertNotIn("????", category_names)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -145,8 +145,33 @@ def _python_import_name(package_name: str) -> str:
         "python-multipart": "multipart",
         "pydantic-ai-slim": "pydantic_ai",
         "python-jose": "jose",
+        "Pillow": "PIL",
+        "PyMuPDF": "fitz",
     }
     return overrides.get(package_name, package_name.replace("-", "_").lower())
+
+
+def _summarize_pip_output(output: str) -> list[str]:
+    summary: list[str] = []
+    normalized_lines = [line.strip() for line in output.splitlines() if line.strip()]
+
+    if any("Defaulting to user installation because normal site-packages is not writeable" in line for line in normalized_lines):
+        summary.append("site-packages 不可写，已自动切换到当前用户目录安装")
+
+    installed_line = next(
+        (
+            line
+            for line in reversed(normalized_lines)
+            if line.startswith("Successfully installed ")
+        ),
+        None,
+    )
+    if installed_line:
+        packages = installed_line.removeprefix("Successfully installed ").strip()
+        if packages:
+            summary.append(f"已安装: {packages}")
+
+    return summary
 
 
 def check_python() -> None:
@@ -182,8 +207,39 @@ def ensure_python_dependencies() -> None:
         ok("Python dependencies are ready")
         return
 
-    warn(f"Installing missing Python dependencies: {', '.join(missing)}")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)], cwd=str(ROOT_DIR))
+    warn(f"Missing Python dependencies detected: {', '.join(missing)}")
+    info("Auto-installing missing Python dependencies quietly...")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--progress-bar",
+            "off",
+            "-r",
+            str(REQUIREMENTS_FILE),
+        ],
+        cwd=str(ROOT_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+    output = _decode_output_chunk(result.stdout or b"")
+    if result.returncode != 0:
+        warn("Automatic Python dependency installation failed.")
+        tail_lines = [line for line in output.splitlines() if line.strip()][-20:]
+        if tail_lines:
+            print("")
+            print(f"{YELLOW}{BOLD}[pip]{RESET}")
+            for line in tail_lines:
+                print(f"  {line}")
+        fail(f"Please install dependencies manually: {sys.executable} -m pip install -r {REQUIREMENTS_FILE}")
+
+    for line in _summarize_pip_output(output):
+        info(line)
     ok("Python dependencies installed")
 
 

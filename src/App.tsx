@@ -2,12 +2,13 @@
  * 应用根组件
  * 负责：主题管理、布局渲染、后端连接状态监控
  */
-import { useEffect, useRef } from 'react';
+import { lazy, Suspense, useEffect, useRef } from 'react';
 import { useAppStore } from './stores/appStore';
 import { useAuthStore } from './stores/authStore';
 import { initBackend } from './bootstrap/backend';
-import MainLayout from './components/layout/MainLayout';
-import LoginPage from './components/auth/LoginPage';
+
+const MainLayout = lazy(() => import('./components/layout/MainLayout'));
+const LoginPage = lazy(() => import('./components/auth/LoginPage'));
 
 /** 将 #rrggbb 转为 "r g b" 空格分隔格式，供 CSS rgb() 使用 */
 function hexToRgbParts(hex: string): string {
@@ -85,8 +86,24 @@ export default function App() {
 
   // 未登录时显示登录页
   if (!user) {
-    return <LoginPage />;
+    return (
+      <Suspense fallback={<AppShellFallback />}>
+        <LoginPage />
+      </Suspense>
+    );
   }
 
-  return <MainLayout />;
+  return (
+    <Suspense fallback={<AppShellFallback />}>
+      <MainLayout />
+    </Suspense>
+  );
+}
+
+function AppShellFallback() {
+  return (
+    <div className="flex h-screen items-center justify-center bg-surface-sidebar dark:bg-dark">
+      <span className="text-text-secondary">Loading...</span>
+    </div>
+  );
 }

@@ -6,6 +6,7 @@ import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from 're
 import { useAppStore } from '@/stores/appStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useChatStore } from '@/stores/chatStore';
+import { useNotificationStore } from '@/stores/notificationStore';
 import clsx from 'clsx';
 import { filterRolesBySurface, getPreferredRoleForSurface } from '@/utils/roles';
 
@@ -35,6 +36,7 @@ export default function Sidebar() {
     conversations, activeConversationId, createConversation,
     setActiveConversation, renameConversation, deleteConversation,
   } = useChatStore();
+  const pushNotification = useNotificationStore((state) => state.pushNotification);
 
   /** 根据 role id 查找图标，找不到时回退到 💬 */
   const getRoleIcon = (roleId: string) =>
@@ -75,7 +77,10 @@ export default function Sidebar() {
       await renameConversation(editingId, editingTitle);
       cancelRename();
     } catch (error) {
-      alert((error as Error).message || '重命名失败');
+      pushNotification({
+        message: (error as Error).message || '重命名失败',
+        tone: 'error',
+      });
     }
   };
 
@@ -84,7 +89,10 @@ export default function Sidebar() {
     setActiveView('chat');
     const preferredRole = getPreferredRoleForSurface(roles, activeSurface, currentSurfaceRoleId);
     if (!preferredRole) {
-      alert(`当前 ${activeSurface} 模式下没有可用角色`);
+      pushNotification({
+        message: `当前 ${activeSurface} 模式下没有可用角色`,
+        tone: 'error',
+      });
       return;
     }
 
@@ -94,7 +102,10 @@ export default function Sidebar() {
         startRename(id, '新对话');
       }
     } catch (error) {
-      alert((error as Error).message || '创建对话失败');
+      pushNotification({
+        message: (error as Error).message || '创建对话失败',
+        tone: 'error',
+      });
     }
   };
 
@@ -310,7 +321,10 @@ export default function Sidebar() {
                       <button
                         onClick={() => {
                           void deleteConversation(conv.id).catch((error) => {
-                            alert((error as Error).message || '删除对话失败');
+                            pushNotification({
+                              message: (error as Error).message || '删除对话失败',
+                              tone: 'error',
+                            });
                           });
                         }}
                         className="win-icon-button h-7 w-7 text-xs"

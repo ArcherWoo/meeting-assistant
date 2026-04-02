@@ -13,6 +13,8 @@ interface PersistedAppState {
   currentChatRoleId?: string;
   currentAgentRoleId?: string;
   activeSurface?: 'chat' | 'agent';
+  activeView?: 'chat' | 'knowhow' | 'admin';
+  contextPanelVisible?: boolean;
 }
 
 interface AppState {
@@ -153,6 +155,8 @@ export const useAppStore = create<AppState>()(
           theme: persisted.theme ?? 'system',
           accentColor: persisted.accentColor ?? '#2563EB',
           activeSurface,
+          activeView: persisted.activeView ?? 'chat',
+          contextPanelVisible: persisted.contextPanelVisible ?? false,
           currentChatRoleId,
           currentAgentRoleId,
           currentRoleId: activeSurface === 'chat' ? currentChatRoleId : currentAgentRoleId,
@@ -165,6 +169,8 @@ export const useAppStore = create<AppState>()(
         currentRoleId: state.currentRoleId,
         currentChatRoleId: state.currentChatRoleId,
         currentAgentRoleId: state.currentAgentRoleId,
+        activeView: state.activeView,
+        contextPanelVisible: state.contextPanelVisible,
       }),
     }
   )

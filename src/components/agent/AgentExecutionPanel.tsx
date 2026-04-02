@@ -8,6 +8,7 @@ import { useAppStore } from '@/stores/appStore';
 import { agentMatch, agentExecute, cancelAgentRun, getAgentRun, listKnowledgeImports } from '@/services/api';
 import type { AgentMatchResult, AgentFinalResult, AgentExecutionEvent, AgentRunRecord, AgentRunStep, SkillParam, MessageMetadata } from '@/types';
 import { buildAgentWriteBackPayload } from '@/utils/agentResult';
+import { hasInvalidatedResource, subscribeAppDataInvalidation } from '@/utils/appInvalidation';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -105,6 +106,18 @@ export default function AgentExecutionPanel({ query, conversationId, onComplete,
   const finalizedRunKeyRef = useRef<string | null>(null);
   const finalizingRunKeyRef = useRef<string | null>(null);
 
+  const refreshKnowledgeImports = useCallback(async () => {
+    const params = matchResult?.parameters ?? [];
+    const needsImports = params.some((p) => p.source === 'knowledge_import' || p.type === 'file');
+    if (!needsImports) return;
+    try {
+      const result = await listKnowledgeImports();
+      setKnowledgeImports(result.imports.filter((item) => item.import_status === 'completed'));
+    } catch {
+      // 闈欓粯澶辫触锛岄伩鍏嶅奖鍝嶄富娴佺▼
+    }
+  }, [matchResult]);
+
   useEffect(() => { stepsEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [steps]);
   useEffect(() => () => { abortRef.current?.abort(); }, []);
 
@@ -137,15 +150,14 @@ export default function AgentExecutionPanel({ query, conversationId, onComplete,
   }, [applyRunSnapshot]);
 
   useEffect(() => {
-    const params = matchResult?.parameters ?? [];
-    const needsImports = params.some((p) => p.source === 'knowledge_import' || p.type === 'file');
-    if (!needsImports) return;
-    let cancelled = false;
-    listKnowledgeImports()
-      .then((r) => { if (!cancelled) setKnowledgeImports(r.imports.filter((i) => i.import_status === 'completed')); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [matchResult]);
+    void refreshKnowledgeImports();
+  }, [refreshKnowledgeImports]);
+
+  useEffect(() => subscribeAppDataInvalidation((resources) => {
+    if (hasInvalidatedResource(resources, ['knowledge'])) {
+      void refreshKnowledgeImports();
+    }
+  }), [refreshKnowledgeImports]);
 
   useEffect(() => {
     let cancelled = false;

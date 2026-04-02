@@ -18,3 +18,10 @@
 - 当前状态：[CURRENT_STATE.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/CURRENT_STATE.md)
 - SSE 元数据说明：[reference/SSE_CONTEXT_METADATA.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/reference/SSE_CONTEXT_METADATA.md)
 - SSE 示例：[reference/chat-completions-context-example.sse](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/reference/chat-completions-context-example.sse)
+## 最近更新关注点
+
+- 文档解析与 OCR 当前基线： [CURRENT_STATE.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/CURRENT_STATE.md)
+- 开发落地说明： [development/DEVELOPMENT.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/development/DEVELOPMENT.md)
+- 项目结构补充： [architecture/PROJECT_STRUCTURE.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/architecture/PROJECT_STRUCTURE.md)
+- 产品侧要求与验收口径： [product/PRD.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/product/PRD.md)
+- SSE / citation 元数据： [reference/SSE_CONTEXT_METADATA.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/reference/SSE_CONTEXT_METADATA.md)

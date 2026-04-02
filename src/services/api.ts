@@ -49,6 +49,14 @@ export function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise
   return fetch(input, { ...init, headers });
 }
 
+function canReadStreamingBody(response: Response): response is Response & { body: ReadableStream<Uint8Array> } {
+  return Boolean(
+    response.body
+    && typeof (response.body as ReadableStream<Uint8Array>).getReader === 'function'
+    && typeof TextDecoder !== 'undefined',
+  );
+}
+
 // ===== 健康检查 =====
 
 export async function checkHealth(): Promise<boolean> {
@@ -291,13 +299,18 @@ export async function streamChat(
       onError(error.detail || `HTTP ${res.status}`);
       return;
     }
-
-    const reader = res.body?.getReader();
-    if (!reader) {
-      onError('无法读取响应流');
+    if (!canReadStreamingBody(res)) {
+      buffer += await res.text();
+      if (drainBuffer(true)) {
+        return;
+      }
+      if (!finished) {
+        onDone();
+      }
       return;
     }
 
+    const reader = res.body.getReader();
     const decoder = new TextDecoder();
 
     while (true) {
@@ -468,6 +481,21 @@ export async function listSkills(): Promise<SkillMeta[]> {
 export async function getSkill(skillId: string): Promise<SkillMeta> {
   const res = await authFetch(`${getBaseUrl()}/skills/${encodeURIComponent(skillId)}`);
   if (!res.ok) throw new Error('获取 Skill 详情失败');
+  return res.json();
+}
+
+export async function createKnowhowCategory(
+  name: string
+): Promise<{ message: string; category: { name: string; rule_count: number } }> {
+  const res = await authFetch(`${getBaseUrl()}/knowhow/categories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '??????' }));
+    throw new Error(error.detail);
+  }
   return res.json();
 }
 
@@ -915,15 +943,28 @@ export async function agentExecute(
       onError(error.detail || `HTTP ${res.status}`);
       return;
     }
+    let buffer = '';
 
-    const reader = res.body?.getReader();
-    if (!reader) {
-      onError('无法读取响应流');
+    if (!canReadStreamingBody(res)) {
+      buffer += await res.text();
+      const lines = buffer.split('\n');
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (!data) continue;
+
+        try {
+          const event = JSON.parse(data) as AgentExecutionEvent;
+          onEvent(event);
+        } catch {
+          // ????????
+        }
+      }
       return;
     }
 
+    const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = '';
 
     while (true) {
       const { done, value } = await reader.read();

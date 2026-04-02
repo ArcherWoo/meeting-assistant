@@ -8,6 +8,16 @@
 - Skill / Know-how 管理
 - Agent 执行模式
 
+## 最近文档解析升级
+
+- 后端新增统一文档解析层 `backend/services/document_parsing/`，附件提取与知识库导入共用同一套解析链路。
+- `XLSX` 现在会保留 merged ranges、多层表头、公式与 `header_path`，不再只是简单摊平文本。
+- `DOCX` 现在按块级顺序解析，正文、标题、表格的原始顺序会保留。
+- `PDF` 现在优先走 layout-aware 提取；扫描版 PDF 会在可用依赖存在时自动走 OCR，并尝试恢复 OCR 表格。
+- `Image` 现在支持图片元数据读取与可选 OCR，能力与 PDF OCR 共用同一套底座。
+- 知识库 chunk 现在会落结构化 `metadata_json`，可携带 `sheet/page/row range/OCR 段号/table title` 等定位信息。
+- 聊天消息与右侧上下文面板现在会把这些 citation locator 直接展示出来，方便定位命中的来源片段。
+
 ## 现在的目录分工
 
 根目录只保留运行入口、构建配置和一级导航，业务代码与文档按职责收拢：

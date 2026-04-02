@@ -3,14 +3,16 @@
  * 包含：顶部工具栏、消息列表（自动滚动）、底部输入区
  * Agent 模式下触发 Skill 匹配 → 执行工作流
  */
-import { useState, useRef, useEffect, useCallback, useMemo, type ChangeEvent } from 'react';
+import { lazy, Suspense, useState, useRef, useEffect, useCallback, useMemo, type ChangeEvent } from 'react';
 import { useAppStore } from '@/stores/appStore';
 import { useChatStore, DEFAULT_CONVERSATION_TITLE } from '@/stores/chatStore';
 import { streamChat, extractFilesText, generateAutoTitle } from '@/services/api';
 import { type Attachment, type LLMConfig, type Message, type SkillSuggestionEvent } from '@/types';
 import MessageBubble from './MessageBubble';
 import ChatInput from './ChatInput';
-import AgentExecutionPanel from '../agent/AgentExecutionPanel';
+import InlineNotice from '@/components/common/InlineNotice';
+
+const AgentExecutionPanel = lazy(() => import('../agent/AgentExecutionPanel'));
 
 interface AgentExecutionRequest {
   query: string;
@@ -525,6 +527,7 @@ export default function ChatArea() {
                 onUploadFile={() => welcomeFileRef.current?.click()}
                 uploading={welcomeUploading}
                 feedbackMessage={welcomeFeedbackMessage}
+                onDismissFeedback={() => setWelcomeFeedbackMessage('')}
               />
             </>
           ) : (
@@ -547,20 +550,22 @@ export default function ChatArea() {
               ))}
               {/* Agent 模式执行面板 */}
               {activeSurface === 'agent' && agentExecution && (
-                <AgentExecutionPanel
-                  query={agentExecution.query}
-                  conversationId={agentExecution.conversationId}
-                  onComplete={async (payload) => {
-                    await addMessage({
-                      conversationId: agentExecution.conversationId,
-                      role: 'assistant',
-                      content: payload.content,
-                      metadata: payload.metadata,
-                    });
-                    setAgentExecution(null);
-                  }}
-                  onCancel={() => setAgentExecution(null)}
-                />
+                <Suspense fallback={<AgentPanelFallback />}>
+                  <AgentExecutionPanel
+                    query={agentExecution.query}
+                    conversationId={agentExecution.conversationId}
+                    onComplete={async (payload) => {
+                      await addMessage({
+                        conversationId: agentExecution.conversationId,
+                        role: 'assistant',
+                        content: payload.content,
+                        metadata: payload.metadata,
+                      });
+                      setAgentExecution(null);
+                    }}
+                    onCancel={() => setAgentExecution(null)}
+                  />
+                </Suspense>
               )}
             </>
           )}
@@ -581,14 +586,23 @@ export default function ChatArea() {
   );
 }
 
+function AgentPanelFallback() {
+  return (
+    <div className="my-3 rounded-lg border border-surface-divider bg-white px-4 py-3 text-sm text-text-secondary shadow-sm dark:border-dark-divider dark:bg-dark-sidebar dark:text-text-dark-secondary">
+      正在加载 Agent 执行面板...
+    </div>
+  );
+}
+
 /** 欢迎屏幕 - 无对话时显示 */
-function WelcomeScreen({ mode, surface, onQuickMessage, onUploadFile, uploading, feedbackMessage }: {
+function WelcomeScreen({ mode, surface, onQuickMessage, onUploadFile, uploading, feedbackMessage, onDismissFeedback }: {
   mode: string;
   surface: 'chat' | 'agent';
   onQuickMessage: (msg: string, attachments?: Attachment[]) => Promise<void> | void;
   onUploadFile: () => void;
   uploading: boolean;
   feedbackMessage: string;
+  onDismissFeedback: () => void;
 }) {
   return (
     <div className="flex flex-1 items-center justify-center py-8 animate-fade-in">
@@ -596,9 +610,11 @@ function WelcomeScreen({ mode, surface, onQuickMessage, onUploadFile, uploading,
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl border border-surface-divider dark:border-dark-divider bg-white dark:bg-dark-sidebar text-3xl shadow-sm">🍒</div>
         <h2 className="text-[22px] font-semibold mb-2">Ask Me Anything</h2>
         {feedbackMessage && (
-          <div className="mx-auto mb-4 max-w-xl rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-left text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
-            {feedbackMessage}
-          </div>
+          <InlineNotice
+            className="mx-auto mb-4 max-w-xl text-left"
+            message={feedbackMessage}
+            onClose={onDismissFeedback}
+          />
         )}
         <p className="text-text-secondary text-sm max-w-xl mx-auto leading-6">
           {surface === 'agent' && '选择一个任务并输入目标，我会以当前 Agent 角色执行完整流程。'}

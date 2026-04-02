@@ -2,15 +2,18 @@
  * 主布局组件
  * 三栏结构：侧边栏 + 聊天区 + 上下文面板
  */
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { lazy, Suspense, useState, useRef, useEffect, useCallback } from 'react';
 import clsx from 'clsx';
 import { useAppStore } from '@/stores/appStore';
-import Sidebar from './Sidebar';
-import ChatArea from '../chat/ChatArea';
-import ContextPanel from './ContextPanel';
-import KnowhowManager from '../knowhow/KnowhowManager';
-import AdminPanel from '../auth/AdminPanel';
-import SettingsModal from '../common/SettingsModal';
+import ConfirmDialogHost from '../common/ConfirmDialogHost';
+import ToastViewport from '../common/ToastViewport';
+
+const Sidebar = lazy(() => import('./Sidebar'));
+const ChatArea = lazy(() => import('../chat/ChatArea'));
+const ContextPanel = lazy(() => import('./ContextPanel'));
+const KnowhowManager = lazy(() => import('../knowhow/KnowhowManager'));
+const AdminPanel = lazy(() => import('../auth/AdminPanel'));
+const SettingsModal = lazy(() => import('../common/SettingsModal'));
 
 const CONTEXT_MIN_WIDTH = 220;
 const CONTEXT_MAX_WIDTH = 560;
@@ -52,11 +55,15 @@ export default function MainLayout() {
       {/* 主内容区 */}
       <div className="flex flex-1 overflow-hidden min-h-0">
         {/* 侧边栏 */}
-        <Sidebar />
+        <Suspense fallback={<SidebarFallback />}>
+          <Sidebar />
+        </Suspense>
 
         {/* 主区域 - 聊天区 或 Know-how 管理 */}
         <main className="flex-1 flex flex-col min-w-0 bg-surface dark:bg-dark">
-          {activeView === 'admin' ? <AdminPanel /> : activeView === 'knowhow' ? <KnowhowManager /> : <ChatArea />}
+          <Suspense fallback={<PanelFallback />}>
+            {activeView === 'admin' ? <AdminPanel /> : activeView === 'knowhow' ? <KnowhowManager /> : <ChatArea />}
+          </Suspense>
         </main>
 
         {/* 右侧面板分隔拖拽手柄 */}
@@ -72,11 +79,44 @@ export default function MainLayout() {
         )}
 
         {/* 右侧上下文面板 */}
-        {contextPanelVisible && <ContextPanel width={contextWidth} />}
+        {contextPanelVisible && (
+          <Suspense fallback={<SidePanelFallback width={contextWidth} />}>
+            <ContextPanel width={contextWidth} />
+          </Suspense>
+        )}
       </div>
 
       {/* 设置 Modal（全局挂载，z-50 覆盖所有层） */}
-      <SettingsModal />
+      <Suspense fallback={null}>
+        <SettingsModal />
+      </Suspense>
+      <ConfirmDialogHost />
+      <ToastViewport />
     </div>
+  );
+}
+
+function PanelFallback() {
+  return (
+    <div className="flex h-full items-center justify-center bg-surface dark:bg-dark">
+      <div className="text-sm text-text-secondary dark:text-text-dark-secondary">
+        正在加载页面...
+      </div>
+    </div>
+  );
+}
+
+function SidePanelFallback({ width }: { width: number }) {
+  return (
+    <aside
+      className="flex-shrink-0 border-l border-surface-divider dark:border-dark-divider bg-[#F7F8FA] dark:bg-dark"
+      style={{ width, minWidth: width, maxWidth: width }}
+    />
+  );
+}
+
+function SidebarFallback() {
+  return (
+    <aside className="h-full w-[72px] flex-shrink-0 border-r border-surface-divider bg-surface-sidebar dark:border-dark-divider dark:bg-dark-sidebar" />
   );
 }

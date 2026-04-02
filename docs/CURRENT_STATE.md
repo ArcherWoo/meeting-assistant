@@ -58,6 +58,56 @@ chat persistence or Prompt Template / Prompt Pack runtime support.
 - Vector deletions now reuse a shared helper that escapes LanceDB string literals safely.
 - Generic text ingestion, chunking, and vectorization are kept as one canonical path.
 
+## Document Parsing Baseline
+
+- Attachment text extraction and knowledge ingestion now share one canonical parser registry:
+  - `backend/services/document_parsing/registry.py`
+  - `backend/services/document_parsing/chunker.py`
+  - `backend/services/document_parsing/prompt_render.py`
+- `XLSX` parsing is no longer `values_only` flattening:
+  - merged ranges are preserved
+  - multi-row headers are converted into `header_path`
+  - formulas are retained in structured table cells
+- `DOCX` parsing is block-order aware:
+  - headings, paragraphs, and tables keep source order
+  - tables are emitted as structured table models instead of plain text only
+- `PDF` parsing is now layout-aware first, plain-text fallback second:
+  - PyMuPDF text blocks are classified into title / heading / paragraph / list-item
+  - table detection is attempted when PyMuPDF is available
+  - scanned pages can fall back to OCR when OCR dependencies are available
+- `Image` parsing is no longer placeholder-only:
+  - image metadata is extracted when Pillow is available
+  - OCR is attempted through the shared OCR utilities when pytesseract + Tesseract are available
+- OCR is now shared across image and scanned PDF parsing:
+  - OCR text is segmented into structured blocks
+  - OCR layout can be heuristically converted into simple tables
+
+## Knowledge Chunk Metadata
+
+- `knowledge_chunks` now stores `metadata_json` in SQLite.
+- Search results may include richer locator fields such as:
+  - `sheet`
+  - `page`
+  - `row_start` / `row_end`
+  - `story`
+  - `source`
+  - `ocr_segment_index`
+  - `table_title`
+- LanceDB vector search now normalizes the same locator metadata back into search results where available.
+
+## Citation Rendering
+
+- Context citations are no longer limited to file name + chunk index.
+- The frontend now surfaces locator badges for structured retrieval hits in:
+  - `src/components/chat/MessageBubble.tsx`
+  - `src/components/layout/ContextPanel.tsx`
+- Typical visible locator chips now include:
+  - worksheet name
+  - row range
+  - OCR segment number
+  - table title
+  - chunk number
+
 ## Role Naming
 
 - Runtime chat and conversation APIs use `role_id` / `roleId` as the canonical role field.
