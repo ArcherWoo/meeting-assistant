@@ -108,6 +108,57 @@ chat persistence or Prompt Template / Prompt Pack runtime support.
   - table title
   - chunk number
 
+## Chat Responsiveness UX Baseline
+
+- Chat SSE no longer waits silently for the first model token before the UI gets feedback.
+- `backend/routers/chat.py` now emits lightweight `status` SSE events before normal token chunks:
+  - `queued`
+  - `retrieving`
+  - `calling_model`
+  - `streaming`
+- The frontend consumes these status events in `src/services/api.ts` and stores them on message metadata via `src/components/chat/ChatArea.tsx`.
+- Assistant placeholder bubbles in `src/components/chat/MessageBubble.tsx` now show explicit progress states instead of a blank white box:
+  - preparing the answer
+  - retrieving context
+  - calling the model
+  - streaming the answer
+
+## Attachment Analysis Fast-Path
+
+- Very short small-talk queries and obvious short file-analysis queries no longer always pay an extra retrieval-planner LLM round-trip.
+- `backend/services/retrieval_planner.py` now short-circuits to heuristic fallback for:
+  - small talk / no-retrieval queries
+  - short, single-surface file-analysis prompts such as “请分析这份文件的内容”
+- This change is intended to reduce time-to-first-feedback, especially for greetings and simple attachment analysis requests.
+- Attachment context sent from `src/components/chat/ChatArea.tsx` is now compacted when files are very large:
+  - keep front / middle / tail excerpts
+  - preserve the fact that truncation happened
+  - avoid sending the full raw attachment text when that would significantly delay first token latency
+
+## Attachment Analysis Preview
+
+- Before the assistant starts streaming actual answer text, the frontend may now show a lightweight analysis preview card for attachment-heavy requests.
+- Preview content is stored in message metadata as `generationPreview`.
+- The preview is intentionally UI-only:
+  - it does not alter model output
+  - it disappears once real content starts streaming
+
+## Realtime Markdown Rendering
+
+- Assistant markdown is no longer rendered only after the full response completes.
+- Streaming assistant responses now render through `src/components/chat/RichMarkdown.tsx` in real time.
+- `RichMarkdown` now uses `useDeferredValue` for streaming content so markdown updates stay lower-priority than urgent UI work.
+- Markdown renderer configuration is hoisted and reused instead of being recreated on every streaming update.
+
+## Message Copy UX
+
+- Copy actions are now available on both user messages and assistant messages.
+- The copy affordance was restyled to be lower-contrast and less visually dominant:
+  - icon-only
+  - inside the message bubble
+  - low emphasis until hover/focus
+- Current implementation lives in `src/components/chat/MessageBubble.tsx`.
+
 ## Role Naming
 
 - Runtime chat and conversation APIs use `role_id` / `roleId` as the canonical role field.

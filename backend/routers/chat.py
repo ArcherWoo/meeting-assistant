@@ -114,6 +114,91 @@ def _fallback_auto_title(dialogue_lines: list[str]) -> str:
 
     return "新对话"
 
+
+def _resolve_enabled_surfaces(role_id: str, role: Optional[dict] = None) -> set[str]:
+    if not role_id:
+        return set()
+
+    if role:
+        chat_capabilities = resolve_chat_capabilities(role)
+        enabled_surfaces = set()
+        if "auto_knowledge" in chat_capabilities:
+            enabled_surfaces.add("knowledge")
+        if "auto_knowhow" in chat_capabilities:
+            enabled_surfaces.add("knowhow")
+        if "auto_skill_suggestion" in chat_capabilities:
+            enabled_surfaces.add("skill")
+        return enabled_surfaces
+
+    if role_id in {"copilot", "executor"}:
+        return {"knowledge", "knowhow"}
+    return set()
+
+
+def _format_status_event(phase: str, label: str, detail: str = "") -> str:
+    payload = {
+        "type": "status",
+        "phase": phase,
+        "label": label,
+        "detail": detail,
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _has_retrieval_intent(request: "ChatRequest", messages: list[dict], enabled_surfaces: set[str]) -> bool:
+    if not enabled_surfaces:
+        return False
+
+    rag_query = _strip_attachment_context(request.rag_query)
+    if rag_query:
+        return True
+
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        return bool(_strip_attachment_context(str(message.get("content", ""))))
+    return False
+
+
+def _looks_like_attachment_analysis(messages: list[dict]) -> bool:
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        return _ATTACHMENT_SEPARATOR in str(message.get("content", ""))
+    return False
+
+
+def _is_content_sse_chunk(chunk: str) -> bool:
+    stripped = chunk.strip()
+    if not stripped.startswith("data: "):
+        return False
+
+    data = stripped[6:].strip()
+    if not data or data == "[DONE]":
+        return False
+
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return False
+
+    if not isinstance(payload, dict) or payload.get("type") or payload.get("stream_error"):
+        return False
+
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+
+    first = choices[0]
+    if not isinstance(first, dict):
+        return False
+
+    delta = first.get("delta")
+    if not isinstance(delta, dict):
+        return False
+
+    return bool(delta.get("content"))
+
 class ChatMessage(BaseModel):
     """单条消息"""
     role: str  # system / user / assistant / tool
@@ -186,24 +271,9 @@ async def _assemble_context(
 ) -> AssembledContext:
     """独立的上下文组装步骤，仅 Chat 自动增强开启时才执行检索。"""
     role_id = _request_role_id(request)
-    if not role_id:
+    enabled_surfaces = _resolve_enabled_surfaces(role_id, role)
+    if not enabled_surfaces:
         return AssembledContext()
-
-    if role:
-        chat_capabilities = resolve_chat_capabilities(role)
-        enabled_surfaces = set()
-        if "auto_knowledge" in chat_capabilities:
-            enabled_surfaces.add("knowledge")
-        if "auto_knowhow" in chat_capabilities:
-            enabled_surfaces.add("knowhow")
-        if "auto_skill_suggestion" in chat_capabilities:
-            enabled_surfaces.add("skill")
-        if not enabled_surfaces:
-            return AssembledContext()
-    else:
-        if role_id not in {"copilot", "executor"}:
-            return AssembledContext()
-        enabled_surfaces = {"knowledge", "knowhow"}
 
     emb_url = await storage.get_setting("embedding_api_url")
     emb_key = await storage.get_setting("embedding_api_key")
@@ -333,45 +403,69 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
         if not role and role_id not in DEFAULT_SYSTEM_PROMPTS:
             raise HTTPException(status_code=400, detail="角色不存在")
 
-    messages = await _build_messages(request)
-
-    # 独立的上下文组装步骤（仅 copilot 模式）
-    assembled_ctx = await _assemble_context(
-        request,
-        messages,
-        user,
-        role,
-        runtime_api_url=llm_config["api_url"],
-        runtime_api_key=llm_config["api_key"],
-    )
-    prompt_ctx = AssembledContext()
-
-    if assembled_ctx.has_context:
-        fitted_ctx = assembled_ctx.fit_to_budget(_calculate_context_budget_chars(messages, request))
-        if fitted_ctx.has_context:
-            suffix = fitted_ctx.to_prompt_suffix()
-            if messages and messages[0]["role"] == "system":
-                messages[0]["content"] += f"\n\n{suffix}"
-            else:
-                messages = [{"role": "system", "content": suffix}] + messages
-            prompt_ctx = fitted_ctx
-
     if request.stream:
-        raw_stream = llm_service.stream_chat(
-            messages=messages,
-            model=llm_config["model"],
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-            api_url=llm_config["api_url"],
-            api_key=llm_config["api_key"],
-        )
-        return StreamingResponse(
-            _stream_with_metadata(
+        async def event_stream() -> AsyncGenerator[str, None]:
+            messages = await _build_messages(request)
+            enabled_surfaces = _resolve_enabled_surfaces(role_id, role)
+            should_retrieve = _has_retrieval_intent(request, messages, enabled_surfaces)
+            attachment_analysis = _looks_like_attachment_analysis(messages)
+
+            yield _format_status_event("queued", "已收到请求", "正在准备消息")
+
+            assembled_ctx = AssembledContext()
+            prompt_ctx = AssembledContext()
+
+            if should_retrieve:
+                detail = "正在检索相关知识和规则"
+                if attachment_analysis:
+                    detail = "正在整理附件问题并检索相关上下文"
+                yield _format_status_event("retrieving", "正在准备上下文", detail)
+                assembled_ctx = await _assemble_context(
+                    request,
+                    messages,
+                    user,
+                    role,
+                    runtime_api_url=llm_config["api_url"],
+                    runtime_api_key=llm_config["api_key"],
+                )
+
+                if assembled_ctx.has_context:
+                    fitted_ctx = assembled_ctx.fit_to_budget(_calculate_context_budget_chars(messages, request))
+                    if fitted_ctx.has_context:
+                        suffix = fitted_ctx.to_prompt_suffix()
+                        if messages and messages[0]["role"] == "system":
+                            messages[0]["content"] += f"\n\n{suffix}"
+                        else:
+                            messages = [{"role": "system", "content": suffix}] + messages
+                        prompt_ctx = fitted_ctx
+
+            connect_detail = "模型开始输出后会立即显示"
+            if attachment_analysis:
+                connect_detail = "附件内容较长时，首字可能仍需几秒，请稍候"
+            yield _format_status_event("calling_model", "正在请求模型", connect_detail)
+
+            raw_stream = llm_service.stream_chat(
+                messages=messages,
+                model=llm_config["model"],
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+                api_url=llm_config["api_url"],
+                api_key=llm_config["api_key"],
+            )
+            has_emitted_streaming = False
+            async for chunk in _stream_with_metadata(
                 raw_stream,
                 prompt_ctx,
                 assembled_ctx,
                 assembled_ctx.matched_skills[0] if assembled_ctx.matched_skills else None,
-            ),
+            ):
+                if not has_emitted_streaming and _is_content_sse_chunk(chunk):
+                    has_emitted_streaming = True
+                    yield _format_status_event("streaming", "正在生成回答", "回答已开始输出")
+                yield chunk
+
+        return StreamingResponse(
+            event_stream(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -380,6 +474,27 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
             },
         )
     else:
+        messages = await _build_messages(request)
+        assembled_ctx = await _assemble_context(
+            request,
+            messages,
+            user,
+            role,
+            runtime_api_url=llm_config["api_url"],
+            runtime_api_key=llm_config["api_key"],
+        )
+        prompt_ctx = AssembledContext()
+
+        if assembled_ctx.has_context:
+            fitted_ctx = assembled_ctx.fit_to_budget(_calculate_context_budget_chars(messages, request))
+            if fitted_ctx.has_context:
+                suffix = fitted_ctx.to_prompt_suffix()
+                if messages and messages[0]["role"] == "system":
+                    messages[0]["content"] += f"\n\n{suffix}"
+                else:
+                    messages = [{"role": "system", "content": suffix}] + messages
+                prompt_ctx = fitted_ctx
+
         result = await llm_service.chat(
             messages=messages,
             model=llm_config["model"],

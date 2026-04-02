@@ -90,6 +90,36 @@ class RetrievalPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(plan.actions), 1)
         self.assertEqual(plan.actions[0].surface, "knowhow")
 
+    async def test_plan_short_circuits_to_heuristic_for_small_talk_and_short_queries(self):
+        planner = RetrievalPlanner()
+        planner._plan_with_llm = AsyncMock()  # type: ignore[method-assign]
+        planner._plan_with_json_prompt = AsyncMock()  # type: ignore[method-assign]
+
+        hello_plan = await planner.plan(
+            user_query="你好",
+            enabled_surfaces={"knowledge", "knowhow"},
+            settings=RetrievalPlannerSettings(
+                api_url="https://example.com/v1",
+                api_key="sk-test",
+                model="gpt-4o",
+            ),
+        )
+        file_plan = await planner.plan(
+            user_query="请分析这份文件的内容",
+            enabled_surfaces={"knowledge", "knowhow"},
+            settings=RetrievalPlannerSettings(
+                api_url="https://example.com/v1",
+                api_key="sk-test",
+                model="gpt-4o",
+            ),
+        )
+
+        planner._plan_with_llm.assert_not_awaited()
+        planner._plan_with_json_prompt.assert_not_awaited()
+        self.assertEqual(hello_plan.strategy, "fallback")
+        self.assertEqual(hello_plan.actions, [])
+        self.assertEqual([action.surface for action in file_plan.actions], ["knowledge"])
+
 
 class ContextAssemblerPlannerTests(unittest.IsolatedAsyncioTestCase):
     async def test_context_assembler_only_executes_surfaces_selected_by_plan(self):

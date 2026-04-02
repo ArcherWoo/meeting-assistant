@@ -5,7 +5,7 @@
  */
 import { lazy, memo, Suspense, useState } from 'react';
 import clsx from 'clsx';
-import type { ContextCitation, ContextMetadata, Message, SkillSuggestionEvent } from '@/types';
+import type { ChatGenerationPhase, ContextCitation, ContextMetadata, GenerationPreview, Message, SkillSuggestionEvent } from '@/types';
 
 const RichMarkdown = lazy(() => import('@/components/chat/RichMarkdown'));
 const RetrievalPlanCard = lazy(() => import('@/components/common/RetrievalPlanCard'));
@@ -19,6 +19,8 @@ interface Props {
   onRetryGeneration?: (message: Message) => void;
   canRetryGeneration?: boolean;
 }
+
+type CopyState = 'idle' | 'done' | 'error';
 
 function IconCopy() {
   return (
@@ -162,6 +164,103 @@ function getAttachmentSummary(message: Message): string[] {
   });
 }
 
+function getGenerationPhaseLabel(phase?: ChatGenerationPhase): string {
+  if (phase === 'retrieving') return '正在检索上下文';
+  if (phase === 'calling_model') return '正在请求模型';
+  if (phase === 'streaming') return '正在生成回答';
+  return '正在准备回答';
+}
+
+function AssistantPendingState({
+  phase,
+  detail,
+  preview,
+}: {
+  phase?: ChatGenerationPhase;
+  detail?: string;
+  preview?: GenerationPreview;
+}) {
+  return (
+    <div className="min-w-[280px] max-w-[520px] rounded-2xl border border-surface-divider/90 bg-white/95 px-4 py-4 shadow-[0_14px_32px_rgba(15,23,42,0.06)] dark:border-dark-divider dark:bg-dark-card">
+      <div className="flex items-center gap-2">
+        <span className="inline-flex h-2.5 w-2.5 rounded-full bg-primary animate-pulse" />
+        <span className="text-sm font-semibold text-text-primary dark:text-text-dark-primary">
+          {getGenerationPhaseLabel(phase)}
+        </span>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-text-secondary dark:text-text-dark-secondary">
+        {detail?.trim() || '模型开始输出后会立即显示。'}
+      </p>
+      {preview?.title && (
+        <div className="mt-3 rounded-xl border border-primary/10 bg-primary/5 px-3 py-3">
+          <p className="text-[12px] font-medium text-text-primary dark:text-text-dark-primary">
+            {preview.title}
+          </p>
+          {preview.steps.length > 0 && (
+            <div className="mt-2 space-y-1.5">
+              {preview.steps.map((step, index) => (
+                <p
+                  key={`${step}-${index}`}
+                  className="text-[11px] leading-5 text-text-secondary dark:text-text-dark-secondary"
+                >
+                  {index + 1}. {step}
+                </p>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      <div className="mt-4 space-y-2">
+        <div className="h-2.5 w-[82%] rounded-full bg-slate-200/90 dark:bg-slate-700/70 animate-pulse" />
+        <div className="h-2.5 w-[68%] rounded-full bg-slate-200/80 dark:bg-slate-700/60 animate-pulse [animation-delay:150ms]" />
+        <div className="h-2.5 w-[56%] rounded-full bg-slate-200/70 dark:bg-slate-700/50 animate-pulse [animation-delay:300ms]" />
+      </div>
+    </div>
+  );
+}
+
+function CopyMessageButton({
+  copyState,
+  onCopy,
+  tone,
+}: {
+  copyState: CopyState;
+  onCopy: () => void;
+  tone: 'user' | 'assistant';
+}) {
+  const isUserTone = tone === 'user';
+  const idleClasses = isUserTone
+    ? 'border-white/0 bg-white/10 text-white/72 hover:border-white/18 hover:bg-white/16 hover:text-white'
+    : 'border-surface-divider/0 bg-surface-card/72 text-text-secondary/75 hover:border-surface-divider/80 hover:bg-white/96 hover:text-text-primary dark:bg-dark-card/75 dark:text-text-dark-secondary dark:hover:border-dark-divider dark:hover:bg-dark-card dark:hover:text-text-dark-primary';
+  const doneClasses = isUserTone
+    ? 'border-emerald-200/35 bg-emerald-500/18 text-white'
+    : 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300';
+  const errorClasses = isUserTone
+    ? 'border-rose-200/35 bg-rose-500/18 text-white'
+    : 'border-red-200 bg-red-50 text-red-600 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300';
+
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      className={clsx(
+        'inline-flex h-7 w-7 items-center justify-center rounded-full border shadow-sm transition-all backdrop-blur-sm opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
+        copyState === 'done' ? doneClasses : copyState === 'error' ? errorClasses : idleClasses,
+      )}
+      title="复制这条消息"
+      aria-label="复制这条消息"
+    >
+      {copyState === 'done' ? (
+        <IconCheck />
+      ) : copyState === 'error' ? (
+        <IconAlert />
+      ) : (
+        <IconCopy />
+      )}
+    </button>
+  );
+}
+
 function MessageBubble({
   message,
   isStreaming = false,
@@ -170,8 +269,11 @@ function MessageBubble({
   onRetryGeneration,
   canRetryGeneration = false,
 }: Props) {
-  const [copyState, setCopyState] = useState<'idle' | 'done' | 'error'>('idle');
+  const [copyState, setCopyState] = useState<CopyState>('idle');
   const isUser = message.role === 'user';
+  const generationPhase = message.metadata?.generationPhase;
+  const generationStatusText = message.metadata?.generationStatusText;
+  const generationPreview = message.metadata?.generationPreview;
   const generationState = message.metadata?.generationState;
   const generationError = message.metadata?.generationError;
   const isError = generationState === 'error' && message.content.trim() === '本次生成失败，请重试。';
@@ -202,8 +304,9 @@ function MessageBubble({
       || citations.length
     ),
   );
+  const canCopyMessage = Boolean(message.content?.trim());
 
-  const handleCopyUserMessage = async () => {
+  const handleCopyMessage = async () => {
     const text = message.content?.trim();
     if (!text) return;
 
@@ -234,7 +337,7 @@ function MessageBubble({
   return (
     <div
       className={clsx(
-        'mb-4 flex items-start gap-3 animate-fade-in',
+        'group mb-4 flex items-start gap-3 animate-fade-in',
         isUser ? 'justify-end' : 'justify-start',
       )}
     >
@@ -249,16 +352,6 @@ function MessageBubble({
           'mb-1 px-1 text-[11px] text-text-secondary',
           isUser && 'text-right',
         )}>
-          {isUser && (
-            <button
-              type="button"
-              onClick={() => { void handleCopyUserMessage(); }}
-              className="hidden"
-              title="复制这条消息"
-            >
-              {copyState === 'done' ? '已复制' : copyState === 'error' ? '复制失败' : '复制'}
-            </button>
-          )}
           <span>{senderLabel}</span>
         </div>
 
@@ -488,9 +581,18 @@ function MessageBubble({
               ? 'rounded-[20px] rounded-tr-md border border-[#3F6DF6] bg-[#4B74F8] pr-11 pb-4 text-white [box-shadow:0_10px_24px_rgba(75,116,248,0.28)]'
               : isError
                 ? 'rounded-xl rounded-tl-sm border border-red-200 bg-red-50 text-red-600 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400'
-                : 'rounded-xl rounded-tl-sm border border-surface-divider bg-white text-text-primary dark:border-dark-divider dark:bg-dark-card dark:text-text-dark-primary',
+                : 'rounded-xl rounded-tl-sm border border-surface-divider bg-white pr-10 text-text-primary dark:border-dark-divider dark:bg-dark-card dark:text-text-dark-primary',
           )}
         >
+          {canCopyMessage && (
+            <div className="absolute right-2 top-2 z-10">
+              <CopyMessageButton
+                copyState={copyState}
+                onCopy={() => { void handleCopyMessage(); }}
+                tone={isUser ? 'user' : 'assistant'}
+              />
+            </div>
+          )}
           {isUser ? (
             <>
               <p className="whitespace-pre-wrap select-text [user-select:text] [-webkit-user-select:text]">
@@ -512,12 +614,26 @@ function MessageBubble({
                 </div>
               )}
             </>
-          ) : isStreaming ? (
-            <p className="whitespace-pre-wrap">{message.content}</p>
+          ) : isStreaming && message.content ? (
+            <>
+              <Suspense fallback={<p className="whitespace-pre-wrap">{message.content}</p>}>
+                <RichMarkdown content={message.content} streaming />
+              </Suspense>
+              <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-primary/15 bg-primary/5 px-2.5 py-1 text-[11px] text-primary">
+                <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
+                <span>{generationStatusText || getGenerationPhaseLabel(generationPhase)}</span>
+              </div>
+            </>
           ) : message.content ? (
             <Suspense fallback={<p className="whitespace-pre-wrap">{message.content}</p>}>
               <RichMarkdown content={message.content} />
             </Suspense>
+          ) : generationPhase ? (
+            <AssistantPendingState
+              phase={generationPhase}
+              detail={generationStatusText}
+              preview={generationPreview}
+            />
           ) : (
             <span className="inline-flex items-center gap-1 text-text-secondary">
               <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
@@ -714,30 +830,6 @@ function MessageBubble({
           )}
         </div>
 
-        {isUser && (
-          <button
-            type="button"
-            onClick={() => { void handleCopyUserMessage(); }}
-            className={clsx(
-              'absolute bottom-2 right-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-md border shadow-sm backdrop-blur-sm transition-all',
-              copyState === 'done'
-                ? 'border-emerald-200 bg-white text-emerald-600'
-                : copyState === 'error'
-                  ? 'border-red-200 bg-white text-red-500'
-                  : 'border-slate-200 bg-white text-slate-500 hover:border-primary/25 hover:text-primary',
-            )}
-            title="复制这条消息"
-            aria-label="复制这条消息"
-          >
-            {copyState === 'done' ? (
-              <IconCheck />
-            ) : copyState === 'error' ? (
-              <IconAlert />
-            ) : (
-              <IconCopy />
-            )}
-          </button>
-        )}
       </div>
 
       {isUser && (

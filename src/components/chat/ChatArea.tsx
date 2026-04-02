@@ -7,7 +7,7 @@ import { lazy, Suspense, useState, useRef, useEffect, useCallback, useMemo, type
 import { useAppStore } from '@/stores/appStore';
 import { useChatStore, DEFAULT_CONVERSATION_TITLE } from '@/stores/chatStore';
 import { streamChat, extractFilesText, generateAutoTitle } from '@/services/api';
-import { type Attachment, type LLMConfig, type Message, type SkillSuggestionEvent } from '@/types';
+import { type Attachment, type ChatStatusEvent, type GenerationPreview, type LLMConfig, type Message, type SkillSuggestionEvent } from '@/types';
 import MessageBubble from './MessageBubble';
 import ChatInput from './ChatInput';
 import InlineNotice from '@/components/common/InlineNotice';
@@ -21,12 +21,93 @@ interface AgentExecutionRequest {
 
 const STOPPED_MESSAGE_FALLBACK = '（已停止生成）';
 const ERROR_MESSAGE_FALLBACK = '本次生成失败，请重试。';
+const MAX_ATTACHMENT_CHARS_PER_FILE = 18_000;
+const MAX_ATTACHMENT_CHARS_TOTAL = 36_000;
+const MIN_ATTACHMENT_CHARS_PER_FILE = 1_200;
+
+function compactAttachmentText(text: string, maxChars: number): { text: string; truncated: boolean } {
+  const normalized = text.trim();
+  if (!normalized || normalized.length <= maxChars) {
+    return { text: normalized, truncated: false };
+  }
+
+  if (maxChars <= 800) {
+    return { text: normalized.slice(0, Math.max(maxChars, 0)), truncated: true };
+  }
+
+  const headLength = Math.max(300, Math.floor(maxChars * 0.42));
+  const middleLength = Math.max(180, Math.floor(maxChars * 0.18));
+  const tailLength = Math.max(260, maxChars - headLength - middleLength);
+  const middleStart = Math.max(0, Math.floor((normalized.length - middleLength) / 2));
+
+  return {
+    text: [
+      normalized.slice(0, headLength).trim(),
+      '[中段节选]',
+      normalized.slice(middleStart, middleStart + middleLength).trim(),
+      '[末段节选]',
+      normalized.slice(-tailLength).trim(),
+    ].filter(Boolean).join('\n\n'),
+    truncated: true,
+  };
+}
+
+function buildGenerationPreview(content: string, attachments?: Attachment[]): GenerationPreview {
+  if (attachments?.length) {
+    return {
+      title: attachments.length > 1 ? '我先快速梳理这几份材料' : '我先快速梳理这份材料',
+      steps: [
+        '浏览附件结构，抓取主题、结论和关键数据',
+        '提炼风险点、异常点和需要重点关注的部分',
+        '先给你总结，再展开细节和建议动作',
+      ],
+    };
+  }
+
+  const compact = content.trim();
+  if (compact.length <= 24) {
+    return {
+      title: '我先理解你的问题',
+      steps: [
+        '确认你的核心意图',
+        '必要时补充上下文检索',
+        '直接给你一个尽快可用的回答',
+      ],
+    };
+  }
+
+  return {
+    title: '我先整理你的需求',
+    steps: [
+      '提炼问题重点',
+      '结合上下文组织回答',
+      '先给结论，再补细节说明',
+    ],
+  };
+}
 
 function buildAttachmentContext(attachments?: Attachment[]): string {
   if (!attachments?.length) return '';
-  return attachments.map((attachment, index) => (
-    `\n\n---\n📎 附件${attachments.length > 1 ? ` #${index + 1}` : ''}「${attachment.fileName}」内容（${attachment.charCount ?? 0} 字符）：\n\n${attachment.text ?? ''}`
-  )).join('');
+
+  let remainingBudget = MAX_ATTACHMENT_CHARS_TOTAL;
+  return attachments.map((attachment, index) => {
+    const originalText = attachment.text ?? '';
+    const remainingFiles = Math.max(attachments.length - index, 1);
+    const budget = Math.min(
+      MAX_ATTACHMENT_CHARS_PER_FILE,
+      Math.max(MIN_ATTACHMENT_CHARS_PER_FILE, Math.floor(remainingBudget / remainingFiles)),
+    );
+    const compacted = compactAttachmentText(originalText, budget);
+    remainingBudget = Math.max(0, remainingBudget - compacted.text.length);
+
+    const extraNote = compacted.truncated
+      ? `\n\n[为提升响应速度，原文约 ${attachment.charCount ?? originalText.length} 字，已截取前段 / 中段 / 末段关键内容。若需逐段深挖，可继续追问具体章节。]`
+      : '';
+
+    return (
+      `\n\n---\n📎 附件${attachments.length > 1 ? ` #${index + 1}` : ''}「${attachment.fileName}」内容（${attachment.charCount ?? originalText.length} 字符）：\n\n${compacted.text}${extraNote}`
+    );
+  }).join('');
 }
 
 function buildHistoryMessage(message: Pick<Message, 'role' | 'content' | 'attachments'>): { role: string; content: string } {
@@ -220,6 +301,7 @@ export default function ChatArea() {
     llmConfig: LLMConfig;
     ragQuery: string;
     roleId: string;
+    preview: GenerationPreview;
   }) => {
     const {
       conversationId,
@@ -228,6 +310,7 @@ export default function ChatArea() {
       llmConfig,
       ragQuery,
       roleId,
+      preview,
     } = params;
 
     setStreaming(true, conversationId);
@@ -241,6 +324,9 @@ export default function ChatArea() {
       {
         context: undefined,
         skillSuggestion: undefined,
+        generationPhase: 'queued',
+        generationStatusText: '已发送，正在准备回答',
+        generationPreview: preview,
         generationState: undefined,
         generationError: undefined,
       },
@@ -252,6 +338,7 @@ export default function ChatArea() {
     abortMapRef.current[conversationId] = controller;
 
     let fullContent = '';
+    let hasReceivedChunk = false;
 
     const handleStreamError = (error: string) => {
       setStreaming(false, conversationId);
@@ -263,6 +350,9 @@ export default function ChatArea() {
       void updateMessageMetadata(
         assistantMessageId,
         {
+          generationPhase: undefined,
+          generationStatusText: undefined,
+          generationPreview: undefined,
           generationState: 'error',
           generationError: error,
         },
@@ -274,6 +364,19 @@ export default function ChatArea() {
       history,
       llmConfig,
       (chunk) => {
+        if (!hasReceivedChunk) {
+          hasReceivedChunk = true;
+          void updateMessageMetadata(
+            assistantMessageId,
+            {
+              generationPhase: 'streaming',
+              generationStatusText: '正在生成回答',
+              generationPreview: undefined,
+            },
+            conversationId,
+            { persist: false },
+          ).catch(() => {});
+        }
         fullContent += chunk;
         pendingStreamContentRef.current[conversationId] = fullContent;
         schedulePendingStreamUpdate(conversationId, assistantMessageId);
@@ -286,10 +389,14 @@ export default function ChatArea() {
         void updateMessageMetadata(
           assistantMessageId,
           {
+            generationPhase: undefined,
+            generationStatusText: undefined,
+            generationPreview: undefined,
             generationState: undefined,
             generationError: undefined,
           },
           conversationId,
+          { persist: false },
         ).catch(() => {});
         finalizeAutoTitle(conversationId, llmConfig);
       },
@@ -302,6 +409,18 @@ export default function ChatArea() {
       },
       (suggestion) => {
         void updateMessageMetadata(assistantMessageId, { skillSuggestion: suggestion }, conversationId).catch(() => {});
+      },
+      (status: ChatStatusEvent) => {
+        void updateMessageMetadata(
+          assistantMessageId,
+          {
+            generationPhase: status.phase,
+            generationStatusText: status.detail?.trim() || status.label,
+            generationPreview: status.phase === 'streaming' ? undefined : preview,
+          },
+          conversationId,
+          { persist: false },
+        ).catch(() => {});
       },
     ).catch((error: unknown) => {
       handleStreamError((error as Error).message || '网络错误');
@@ -340,6 +459,7 @@ export default function ChatArea() {
       llmConfig: activeLLMConfig,
       ragQuery: lastUserMessage.content,
       roleId: currentRoleId,
+      preview: buildGenerationPreview(lastUserMessage.content, lastUserMessage.attachments),
     });
   }, [activeLLMConfig, currentRoleId, messagesByConversation, startAssistantStream]);
 
@@ -394,6 +514,7 @@ export default function ChatArea() {
       llmConfig: activeLLMConfig,
       ragQuery: content,
       roleId: currentRoleId,
+      preview: buildGenerationPreview(content, messageAttachments),
     });
   };
 
@@ -462,6 +583,9 @@ export default function ChatArea() {
         void updateMessageMetadata(
           assistantMessageId,
           {
+            generationPhase: undefined,
+            generationStatusText: undefined,
+            generationPreview: undefined,
             generationState: 'stopped',
             generationError: undefined,
           },

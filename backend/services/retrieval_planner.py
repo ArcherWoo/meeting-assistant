@@ -204,6 +204,19 @@ Planning rules:
             )
 
         planner_settings = settings or RetrievalPlannerSettings()
+        fallback_plan = self._build_fallback_plan(
+            user_query=normalized_query,
+            allowed_surfaces=allowed_surfaces,
+        )
+
+        if self._should_short_circuit_with_fallback(normalized_query, fallback_plan):
+            return self._sanitize_plan(
+                fallback_plan,
+                user_query=normalized_query,
+                allowed_surfaces=allowed_surfaces,
+                strategy="fallback",
+            )
+
         if planner_settings.is_configured:
             llm_planner_error: Exception | None = None
             try:
@@ -243,16 +256,37 @@ Planning rules:
                     exc,
                 )
 
-        fallback_plan = self._build_fallback_plan(
-            user_query=normalized_query,
-            allowed_surfaces=allowed_surfaces,
-        )
         return self._sanitize_plan(
             fallback_plan,
             user_query=normalized_query,
             allowed_surfaces=allowed_surfaces,
             strategy="fallback",
         )
+
+    @staticmethod
+    def _should_short_circuit_with_fallback(
+        normalized_query: str,
+        fallback_plan: RetrievalPlan,
+    ) -> bool:
+        notes = set(fallback_plan.notes)
+        if "heuristic_skip_small_talk" in notes or "heuristic_skip_retrieval" in notes:
+            return True
+
+        if not fallback_plan.actions:
+            return True
+
+        # 对“短文件分析”这类高频直白查询直接走启发式，避免额外的规划模型调用。
+        single_action = fallback_plan.actions[0] if len(fallback_plan.actions) == 1 else None
+        file_analysis_hints = ("文件", "文档", "附件", "pdf", "ppt", "内容", "材料")
+        if (
+            single_action is not None
+            and single_action.surface == "knowledge"
+            and len(normalized_query) <= 24
+            and any(hint in normalized_query for hint in file_analysis_hints)
+        ):
+            return True
+
+        return False
 
     def _normalize_enabled_surfaces(
         self,

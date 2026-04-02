@@ -1,4 +1,4 @@
-import { Children, Fragment, cloneElement, isValidElement, memo, type CSSProperties, type ReactNode } from 'react';
+import { Children, Fragment, cloneElement, isValidElement, memo, useDeferredValue, type CSSProperties, type ReactNode } from 'react';
 import clsx from 'clsx';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
@@ -11,6 +11,7 @@ type TableAlignment = 'left' | 'center' | 'right';
 
 interface Props {
   content: string;
+  streaming?: boolean;
 }
 
 const IS_LEGACY_BROWSER = (() => {
@@ -449,9 +450,12 @@ function createMarkdownComponents(options?: { compact?: boolean }): Components {
   };
 }
 
-function RichMarkdown({ content }: Props) {
-  const markdownComponents = createMarkdownComponents();
-  const normalizedContent = normalizeMarkdownSource(content);
+const DEFAULT_MARKDOWN_COMPONENTS = createMarkdownComponents();
+
+function RichMarkdown({ content, streaming = false }: Props) {
+  const deferredContent = useDeferredValue(streaming ? content : '');
+  const sourceContent = streaming ? (deferredContent || content) : content;
+  const normalizedContent = normalizeMarkdownSource(sourceContent);
 
   if (IS_LEGACY_BROWSER) {
     return (
@@ -465,7 +469,7 @@ function RichMarkdown({ content }: Props) {
   return (
     <div className="markdown-body text-[13px] leading-6">
       <ReactMarkdown
-        components={markdownComponents}
+        components={DEFAULT_MARKDOWN_COMPONENTS}
         remarkPlugins={[remarkGfm, remarkBreaks]}
         rehypePlugins={[rehypeRaw, rehypeNormalizeInlineColors, [rehypeSanitize, SANITIZE_SCHEMA]]}
       >

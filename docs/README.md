@@ -21,6 +21,7 @@
 ## 最近更新关注点
 
 - 文档解析与 OCR 当前基线： [CURRENT_STATE.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/CURRENT_STATE.md)
+- 聊天首回体验、实时 Markdown、附件分析预览： [CURRENT_STATE.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/CURRENT_STATE.md)
 - 开发落地说明： [development/DEVELOPMENT.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/development/DEVELOPMENT.md)
 - 项目结构补充： [architecture/PROJECT_STRUCTURE.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/architecture/PROJECT_STRUCTURE.md)
 - 产品侧要求与验收口径： [product/PRD.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/product/PRD.md)

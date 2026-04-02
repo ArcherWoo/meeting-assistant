@@ -8,7 +8,7 @@ import type {
   SkillMeta, SkillMatch,
   KnowhowRule, KnowhowExportData, KnowhowImportResult, KnowhowImportStrategy, KnowledgeStats, IngestResult,
   AgentMatchResult, AgentExecutionEvent, AgentRunCancelResponse, AgentRunRecord,
-  ContextMetadata, SkillSuggestionEvent,
+  ContextMetadata, SkillSuggestionEvent, ChatStatusEvent,
   SystemPromptPreset,
   Conversation, Message,
   User, AuthResponse, Group, AccessGrant,
@@ -212,6 +212,7 @@ export async function streamChat(
   ragQuery?: string,
   onMetadata?: (metadata: ContextMetadata) => void,
   onSkillSuggestion?: (suggestion: SkillSuggestionEvent) => void,
+  onStatus?: (status: ChatStatusEvent) => void,
 ): Promise<void> {
   try {
     let finished = false;
@@ -239,6 +240,10 @@ export async function streamChat(
         }
         if (parsed.type === 'skill_suggestion') {
           onSkillSuggestion?.(parsed as SkillSuggestionEvent);
+          return false;
+        }
+        if (parsed.type === 'status') {
+          onStatus?.(parsed as ChatStatusEvent);
           return false;
         }
 

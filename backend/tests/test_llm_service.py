@@ -16,6 +16,8 @@ from services.retrieval_planner import RetrievalPlan, RetrievalPlanAction
 from routers.chat import (
     ChatRequest,
     _calculate_context_budget_chars,
+    _format_status_event,
+    _is_content_sse_chunk,
     _stream_with_metadata,
     _strip_attachment_context,
 )
@@ -214,6 +216,16 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"type": "skill_suggestion"', chunks[2])
         self.assertIn('"matched_keywords": ["采购", "审查"]', chunks[2])
         self.assertEqual(chunks[3], 'data: [DONE]\n\n')
+
+    def test_status_event_and_content_chunk_helpers(self):
+        status_event = _format_status_event("retrieving", "正在准备上下文", "正在检索相关知识和规则")
+        self.assertIn('"type": "status"', status_event)
+        self.assertIn('"phase": "retrieving"', status_event)
+        self.assertIn('"label": "正在准备上下文"', status_event)
+
+        self.assertTrue(_is_content_sse_chunk('data: {"choices":[{"delta":{"content":"你好"}}]}\n\n'))
+        self.assertFalse(_is_content_sse_chunk('data: {"type":"status","phase":"queued"}\n\n'))
+        self.assertFalse(_is_content_sse_chunk('data: [DONE]\n\n'))
 
     def test_context_budget_uses_model_window_not_output_tokens(self):
         messages = [

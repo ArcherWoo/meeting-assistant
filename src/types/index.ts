@@ -89,6 +89,20 @@ export interface SkillSuggestionEvent {
   matched_keywords?: string[];
 }
 
+export type ChatGenerationPhase = 'queued' | 'retrieving' | 'calling_model' | 'streaming';
+
+export interface ChatStatusEvent {
+  type: 'status';
+  phase: ChatGenerationPhase;
+  label: string;
+  detail?: string;
+}
+
+export interface GenerationPreview {
+  title: string;
+  steps: string[];
+}
+
 export interface AgentResultSnapshot {
   runId?: string;
   summary: string;
@@ -109,6 +123,9 @@ export interface MessageMetadata {
   context?: ContextMetadata;
   skillSuggestion?: SkillSuggestionEvent;
   agentResult?: AgentResultSnapshot;
+  generationPhase?: ChatGenerationPhase;
+  generationStatusText?: string;
+  generationPreview?: GenerationPreview;
   generationState?: 'error' | 'stopped';
   generationError?: string;
 }

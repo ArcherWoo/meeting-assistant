@@ -64,6 +64,18 @@
 - **Context Panel 增强**：知识库管理 UI（导入文件、查看列表、删除记录）
 - **`start.py`**：一键启动脚本，含环境检测与依赖自动安装
 
+### 最新一轮：聊天首回体验与消息渲染优化
+- **首回等待反馈前置**：`backend/routers/chat.py` 在真正 token 流到达前先通过 SSE 发出 `queued / retrieving / calling_model / streaming` 状态事件
+- **前端等待态升级**：`src/components/chat/ChatArea.tsx` + `src/components/chat/MessageBubble.tsx` 不再显示空白 assistant 气泡，而是显示“正在准备 / 正在检索 / 正在请求模型 / 正在生成”的阶段状态
+- **附件分析预览卡**：文件分析场景下，真实回答开始前先展示“接下来会怎么分析”的 UI-only 预览步骤卡，不污染模型正式输出
+- **附件上下文提速**：超长附件在 `ChatArea.tsx` 中不再整份拼入 prompt，而是压缩为前段 / 中段 / 末段关键片段，降低首 token 等待时间
+- **检索规划快路径**：`backend/services/retrieval_planner.py` 对小聊法和明显短文件分析问句直接走启发式 fallback，避免额外 planner LLM 调用
+- **实时 Markdown 渲染**：assistant 流式输出阶段改为实时走 `RichMarkdown.tsx`，不再等全文结束后再统一渲染
+- **实时 Markdown 性能保护**：
+  - `RichMarkdown.tsx` 使用 `useDeferredValue`
+  - markdown components 改为模块级复用，避免每个 chunk 重建 renderer
+- **消息复制交互统一**：用户消息与 assistant 消息都支持复制，复制按钮改为低调的气泡内 hover 图标，不再使用高存在感的外置按钮
+
 ---
 
 ## 4. 核心模块说明
