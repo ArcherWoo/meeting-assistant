@@ -114,7 +114,7 @@ export default function AgentExecutionPanel({ query, conversationId, onComplete,
       const result = await listKnowledgeImports();
       setKnowledgeImports(result.imports.filter((item) => item.import_status === 'completed'));
     } catch {
-      // 闈欓粯澶辫触锛岄伩鍏嶅奖鍝嶄富娴佺▼
+      // 静默失败，避免影响主流程
     }
   }, [matchResult]);
 

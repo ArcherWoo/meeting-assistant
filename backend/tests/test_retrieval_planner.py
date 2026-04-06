@@ -8,6 +8,7 @@ BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if BACKEND_ROOT not in sys.path:
     sys.path.insert(0, BACKEND_ROOT)
 
+from routers.chat import ChatRequest, _assemble_context
 from services.context_assembler import AssembledContext, ContextAssembler
 from services.retrieval_planner import (
     RetrievalPlan,
@@ -49,7 +50,7 @@ class RetrievalPlannerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         plan = await planner.plan(
-            user_query="供应商资质和风险怎么审",
+            user_query="供应商资质和风险怎么审？",
             enabled_surfaces={"knowhow"},
             settings=RetrievalPlannerSettings(
                 api_url="https://example.com/v1",
@@ -77,7 +78,7 @@ class RetrievalPlannerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         plan = await planner.plan(
-            user_query="单一来源风险和资质需要怎么审",
+            user_query="单一来源风险和资质需要怎么审？",
             enabled_surfaces={"knowledge", "knowhow"},
             settings=RetrievalPlannerSettings(
                 api_url="https://example.com/v1",
@@ -277,6 +278,129 @@ class ContextAssemblerPlannerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(fused[0]["id"], "rule-hit")
+
+    async def test_context_assembler_passes_planner_settings_to_knowhow_surface(self):
+        planner = AsyncMock()
+        planner.plan.return_value = RetrievalPlan(
+            strategy="fallback",
+            normalized_query="供应商资质 风险",
+            actions=[
+                RetrievalPlanAction(
+                    surface="knowhow",
+                    query="供应商资质 风险",
+                    limit=4,
+                    required=True,
+                )
+            ],
+        )
+        assembler = ContextAssembler(planner=planner)
+        assembler.search_knowledge = AsyncMock(return_value=[])  # type: ignore[method-assign]
+        assembler.match_skills = AsyncMock(return_value=[])  # type: ignore[method-assign]
+        assembler.get_knowhow_rules = AsyncMock(return_value=[])  # type: ignore[method-assign]
+        planner_settings = RetrievalPlannerSettings(
+            api_url="https://example.com/v1",
+            api_key="sk-test",
+            model="deepseek-chat",
+        )
+
+        await assembler.assemble(
+            user_query="请检查供应商资质和风险",
+            enabled_surfaces={"knowhow"},
+            planner_settings=planner_settings,
+        )
+
+        assembler.get_knowhow_rules.assert_awaited_once_with(
+            "供应商资质 风险",
+            limit=4,
+            user=None,
+            planner_settings=planner_settings,
+        )
+
+    async def test_context_assembler_passes_planner_settings_to_knowledge_surface(self):
+        planner = AsyncMock()
+        planner.plan.return_value = RetrievalPlan(
+            strategy="fallback",
+            normalized_query="付款方式 验收",
+            actions=[
+                RetrievalPlanAction(
+                    surface="knowledge",
+                    query="付款方式 验收",
+                    limit=4,
+                    required=True,
+                )
+            ],
+        )
+        assembler = ContextAssembler(planner=planner)
+        assembler.search_knowledge = AsyncMock(return_value=[])  # type: ignore[method-assign]
+        assembler.match_skills = AsyncMock(return_value=[])  # type: ignore[method-assign]
+        assembler.get_knowhow_rules = AsyncMock(return_value=[])  # type: ignore[method-assign]
+        planner_settings = RetrievalPlannerSettings(
+            api_url="https://example.com/v1",
+            api_key="sk-test",
+            model="deepseek-chat",
+        )
+
+        await assembler.assemble(
+            user_query="请核对付款方式和验收条件",
+            enabled_surfaces={"knowledge"},
+            planner_settings=planner_settings,
+        )
+
+        assembler.search_knowledge.assert_awaited_once_with(
+            "付款方式 验收",
+            category=None,
+            limit=4,
+            planner_settings=planner_settings,
+        )
+
+
+class ChatContextAssemblyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_assemble_context_passes_runtime_llm_settings_to_planner(self):
+        request = ChatRequest(
+            messages=[{"role": "user", "content": "请检查供应商资质"}],
+            model="deepseek-chat",
+            api_url="https://unused.example/v1",
+            api_key="",
+            role_id="copilot",
+        )
+        assemble_mock = AsyncMock(return_value=AssembledContext())
+
+        from routers import chat as chat_router
+
+        original_assemble = chat_router.context_assembler.assemble
+        original_get_setting = chat_router.storage.get_setting
+        original_embedding_api_url = chat_router.embedding_service._api_url
+        original_embedding_api_key = chat_router.embedding_service._api_key
+        original_embedding_model = chat_router.embedding_service._model
+        original_embedding_dimension = chat_router.embedding_service._dimension
+        try:
+            chat_router.context_assembler.assemble = assemble_mock  # type: ignore[assignment]
+            chat_router.storage.get_setting = AsyncMock(return_value="")  # type: ignore[assignment]
+            chat_router.embedding_service._api_url = "https://embedding.example/v1"
+            chat_router.embedding_service._api_key = "sk-embedding"
+
+            await _assemble_context(
+                request,
+                [{"role": "user", "content": "请检查供应商资质"}],
+                user={"id": "u-1"},
+                runtime_api_url="https://runtime.example/v1",
+                runtime_api_key="sk-runtime",
+                runtime_model="gpt-4o-mini",
+            )
+        finally:
+            chat_router.context_assembler.assemble = original_assemble  # type: ignore[assignment]
+            chat_router.storage.get_setting = original_get_setting  # type: ignore[assignment]
+            chat_router.embedding_service._api_url = original_embedding_api_url
+            chat_router.embedding_service._api_key = original_embedding_api_key
+            chat_router.embedding_service._model = original_embedding_model
+            chat_router.embedding_service._dimension = original_embedding_dimension
+
+        assemble_mock.assert_awaited_once()
+        _, kwargs = assemble_mock.await_args
+        planner_settings = kwargs["planner_settings"]
+        self.assertEqual(planner_settings.api_url, "https://runtime.example/v1")
+        self.assertEqual(planner_settings.api_key, "sk-runtime")
+        self.assertEqual(planner_settings.model, "gpt-4o-mini")
 
 
 if __name__ == "__main__":

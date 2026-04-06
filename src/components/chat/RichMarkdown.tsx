@@ -28,7 +28,7 @@ type HtmlElementNode = {
   properties?: Record<string, unknown>;
 };
 
-const INLINE_MARKER_RE = /\[\[\s*([^\]:\uFF1A]+?)\s*[:\uFF1A]\s*([\s\S]+?)\s*\]\]/g;
+const INLINE_MARKER_RE = /\[\[\s*([^\]:：]+?)\s*[:：]\s*([\s\S]+?)\s*\]\]/g;
 const CSS_NAMED_COLOR_RE = /^[a-z]{3,20}$/i;
 
 const HIGHLIGHT_TONE_MAP: Record<string, 'good' | 'bad' | 'warn' | 'info'> = {
@@ -39,34 +39,34 @@ const HIGHLIGHT_TONE_MAP: Record<string, 'good' | 'bad' | 'warn' | 'info'> = {
   strength: 'good',
   highlight: 'good',
   plus: 'good',
-  '\u597d': 'good',
-  '\u4f18\u52bf': 'good',
-  '\u4eae\u70b9': 'good',
-  '\u6b63\u5411': 'good',
+  '好': 'good',
+  '优势': 'good',
+  '亮点': 'good',
+  '正向': 'good',
   bad: 'bad',
   risk: 'bad',
   negative: 'bad',
   blocker: 'bad',
   issue: 'bad',
   danger: 'bad',
-  '\u574f': 'bad',
-  '\u98ce\u9669': 'bad',
-  '\u95ee\u9898': 'bad',
-  '\u963b\u585e': 'bad',
+  '坏': 'bad',
+  '风险': 'bad',
+  '问题': 'bad',
+  '阻塞': 'bad',
   warn: 'warn',
   warning: 'warn',
   caution: 'warn',
   attention: 'warn',
   note: 'warn',
-  '\u63d0\u9192': 'warn',
-  '\u6ce8\u610f': 'warn',
-  '\u5173\u6ce8': 'warn',
+  '提醒': 'warn',
+  '注意': 'warn',
+  '关注': 'warn',
   info: 'info',
   tip: 'info',
   neutral: 'info',
-  '\u4fe1\u606f': 'info',
-  '\u8bf4\u660e': 'info',
-  '\u63d0\u793a': 'info',
+  '信息': 'info',
+  '说明': 'info',
+  '提示': 'info',
 };
 
 const SANITIZE_SCHEMA: any = {
@@ -100,7 +100,7 @@ function resolveHighlightTone(label: string): 'good' | 'bad' | 'warn' | 'info' |
 function normalizeMarkdownSource(content: string): string {
   return content
     .replace(/\r\n?/g, '\n')
-    .replace(/\u00a0/g, ' ')
+    .replace(/ /g, ' ')
     .trim();
 }
 

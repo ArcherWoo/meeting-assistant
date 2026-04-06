@@ -260,7 +260,7 @@ export default function ContextPanel({ width }: { width?: number }) {
   /** 删除知识库记录 */
   const handleDeleteImport = async (importId: string, fileName: string) => {
     const confirmed = await confirm({
-      title: `删除「${fileName}」？`,
+      title: `删除“${fileName}”？`,
       description: '这会同时删除该文件及其关联的向量数据，操作后不可恢复。',
       confirmLabel: '确认删除',
       tone: 'danger',
@@ -390,7 +390,7 @@ export default function ContextPanel({ width }: { width?: number }) {
   const handleDeleteSkill = async (skill: SkillMeta, e: React.MouseEvent) => {
     e.stopPropagation();
     const confirmed = await confirm({
-      title: `删除 Skill「${skill.name}」？`,
+      title: `删除 Skill“${skill.name}”？`,
       description: skill.is_builtin
         ? '这是内置 Skill，删除后会从列表中隐藏，不会改动内置源文件。'
         : '删除后将无法在当前工作区继续使用这个 Skill。',
@@ -839,9 +839,18 @@ export default function ContextPanel({ width }: { width?: number }) {
 
             {/* 统计卡片 */}
             {kbStats && (
-              <div className="grid grid-cols-2 gap-2 mb-2">
-                <StatCard label="文件导入" value={kbStats.total_ppt_imports} />
-                <StatCard label="向量块" value={kbStats.total_vector_chunks} />
+              <div className="space-y-2 mb-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <StatCard label="文件导入" value={kbStats.total_ppt_imports} />
+                  <StatCard label="向量块" value={kbStats.total_vector_chunks} />
+                </div>
+                <div className="rounded-md border border-surface-divider bg-white/80 px-3 py-2 text-[11px] text-text-secondary dark:border-dark-divider dark:bg-dark-card/80">
+                  <div>文本块：{kbStats.total_text_chunks ?? 0}</div>
+                  <div>
+                    Embedding：{kbStats.embedding_configured ? '已配置' : '未配置'}
+                    {kbStats.embedding_model ? ` · ${kbStats.embedding_model}` : ''}
+                  </div>
+                </div>
               </div>
             )}
 

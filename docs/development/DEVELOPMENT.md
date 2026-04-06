@@ -6,78 +6,36 @@
 
 **Meeting Assistant** 是一款面向专业用户的 AI 会议助手 Web 应用，核心功能包括：
 
-- 💬 **智能对话**：与大语言模型（LLM）进行多轮对话，支持会话历史持久化
-- 📎 **文件附件**：通过聊天输入框附加文件，文件文本作为上下文随消息发送给 LLM
-- 📚 **知识库管理**：将文件永久导入向量数据库（LanceDB），支持语义检索增强生成（RAG）
-- 🛠️ **技能系统**：预定义的会议场景技能（会议纪要、任务拆解等）
-- 🤖 **Agent 模式**：自主完成多步任务的智能代理
+- 智能对话：与大语言模型（LLM）进行多轮对话，支持会话历史持久化
+- 文件附件：通过聊天输入框附加文件，文件文本作为上下文随消息发送给 LLM
+- 知识库管理：将文件永久导入向量数据库（LanceDB），支持语义检索增强生成（RAG）
+- 技能系统：预定义的会议场景技能（会议纪要、任务拆解等）
+- Agent 模式：自主完成多步任务的智能代理
 
 ---
 
 ## 2. 技术栈
 
-### 前端
-| 技术 | 版本 | 用途 |
-|------|------|------|
-| React | 18 | UI 框架 |
-| TypeScript | 5 | 类型安全 |
-| Vite | 6 | 构建工具 / 开发服务器 |
-| Zustand | 最新 | 全局状态管理（运行时缓存；聊天数据以后端 SQLite 为准） |
-| Tailwind CSS | 3 | 样式框架 |
-
-### 后端
-| 技术 | 版本 | 用途 |
-|------|------|------|
-| FastAPI | 0.115 | Web 框架 |
-| Uvicorn | 0.32 | ASGI 服务器 |
-| SQLite + aiosqlite | — | 知识库元数据存储 |
-| LanceDB | 可选 | 向量数据库（RAG 检索） |
-| python-pptx | 1.0 | PPT 解析 |
-| PyMuPDF (fitz) | 可选 | PDF 解析 |
-| python-docx | 可选 | Word 文档解析 |
-| openpyxl | 可选 | Excel 解析 |
-
-### AI
-- 外部 LLM API（OpenAI 兼容格式，可配置 base_url / model / api_key）
-- Embedding 模型（用于知识库向量化，需 LanceDB 支持）
+- 前端：React + Vite + TypeScript + Zustand + Tailwind CSS
+- 后端：FastAPI + SQLite + aiosqlite
+- 知识检索：LanceDB + Embedding （可降级）
+- 运行时规划：Planner + Context Assembler + Knowhow Router
 
 ---
 
-## 3. 开发阶段总结
+## 3. 最新一轮：无 Embedding 的 LLM 重排 Fallback
 
-### Phase 1：基础架构
-- Vite + React 前端骨架搭建
-- FastAPI 后端基础框架（固定端口 5173）
-- 聊天界面：多会话管理、消息气泡、流式 SSE 响应
-- PPT 解析端点（`/api/ppt/parse`）
-
-### Phase 2：RAG 与知识管理
-- 知识库导入管道：文件解析 → LLM 结构化 → SQLite 元数据 → 分块 → 向量化 → LanceDB
-- 知识库统计、导入记录查询与删除（`/api/knowledge/*`）
-- 技能系统（`/api/skills`）和 Know-how 规则（`/api/knowhow`）
-- Agent 模式（`/api/agent/execute`，SSE 事件流）
-
-### 本次迭代：交互优化与工程完善
-- **📎 按钮重构**：从「直接导入知识库」改为「附件模式」——提取文本作为上下文随消息发送
-- **`/api/knowledge/extract-text`**：新增仅提取文本（不入库）的轻量端点
-- **对话历史持久化**：后端 SQLite 会话/消息存储 + 前端运行时缓存
-- **Context Panel 增强**：知识库管理 UI（导入文件、查看列表、删除记录）
-- **`start.py`**：一键启动脚本，含环境检测与依赖自动安装
-
-### 最新一轮：聊天首回体验与消息渲染优化
-- **首回等待反馈前置**：`backend/routers/chat.py` 在真正 token 流到达前先通过 SSE 发出 `queued / retrieving / calling_model / streaming` 状态事件
-- **前端等待态升级**：`src/components/chat/ChatArea.tsx` + `src/components/chat/MessageBubble.tsx` 不再显示空白 assistant 气泡，而是显示“正在准备 / 正在检索 / 正在请求模型 / 正在生成”的阶段状态
-- **附件分析预览卡**：文件分析场景下，真实回答开始前先展示“接下来会怎么分析”的 UI-only 预览步骤卡，不污染模型正式输出
-- **附件上下文提速**：超长附件在 `ChatArea.tsx` 中不再整份拼入 prompt，而是压缩为前段 / 中段 / 末段关键片段，降低首 token 等待时间
-- **检索规划快路径**：`backend/services/retrieval_planner.py` 对小聊法和明显短文件分析问句直接走启发式 fallback，避免额外 planner LLM 调用
-- **实时 Markdown 渲染**：assistant 流式输出阶段改为实时走 `RichMarkdown.tsx`，不再等全文结束后再统一渲染
-- **实时 Markdown 性能保护**：
-  - `RichMarkdown.tsx` 使用 `useDeferredValue`
-  - markdown components 改为模块级复用，避免每个 chunk 重建 renderer
-- **消息复制交互统一**：用户消息与 assistant 消息都支持复制，复制按钮改为低调的气泡内 hover 图标，不再使用高存在感的外置按钮
+- `backend/services/hybrid_search.py` 现在能接收运行时 LLM 配置，并在语义检索没有结果时走一层有界的 LLM 重排。
+- 这条 fallback 不会替代候选召回：
+  - 仍然先走 SQLite 结构化/关键词召回
+  - LLM 只负责对候选集做重排和过滤
+- `backend/services/context_assembler.py` 现在会把 planner settings 继续传给知识检索，让 chat 端也能用上这层 fallback。
+- `backend/routers/knowledge.py` 同样会把运行时 LLM 配置传给直接知识查询接口，保持 API 和 chat 行为一致。
+- 这一轮新增回归：
+  - `backend/tests/test_knowledge_service.py`
+  - `backend/tests/test_retrieval_planner.py`
 
 ---
-
 ## 4. 核心模块说明
 
 ```

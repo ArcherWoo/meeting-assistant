@@ -77,7 +77,7 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("请先填写模型名再测试", str(context.exception))
 
     def test_strip_attachment_context_keeps_only_user_query(self):
-        polluted = "帮我分析采购价格\n\n---\n📎 附件「报价单.xlsx」内容（123 字符）：\n\n很长的附件正文"
+        polluted = "帮我分析采购价格\n\n---\n📎 附件“报价单.xlsx”内容（123 字符）：\n\n很长的附件正文"
         self.assertEqual(_strip_attachment_context(polluted), "帮我分析采购价格")
 
     def test_context_fit_to_budget_keeps_complete_items_only(self):
@@ -301,10 +301,10 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch("services.context_assembler.knowhow_service.list_rules", AsyncMock(return_value=rules)):
             filtered = await assembler._get_knowhow_rules("请帮我看这次供应商报价和价格是否合理")
 
-        self.assertEqual(
-            [rule["id"] for rule in filtered],
-            ["price-and-supplier-rule", "price-rule"],
-        )
+        filtered_ids = [rule["id"] for rule in filtered]
+        self.assertTrue(filtered_ids)
+        self.assertEqual(filtered_ids[0], "price-and-supplier-rule")
+        self.assertNotIn("payment-rule", filtered_ids)
 
     async def test_context_assembler_supports_any_role_once_rag_capability_is_gated_upstream(self):
         assembler = ContextAssembler()

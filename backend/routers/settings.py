@@ -493,7 +493,7 @@ async def create_role(request: RoleCreateRequest, user: dict = Depends(get_curre
         agent_allowed_tools=agent_allowed_tools,
         owner_id=user["id"],
     )
-    return {"role": _normalize_role_row(role), "message": f"角色 '{name}' 已创建"}
+    return {"role": _normalize_role_row(role), "message": f"角色“{name}”已创建"}
 
 
 @router.put("/settings/roles/{role_id}")
@@ -612,7 +612,7 @@ async def update_system_prompts(request: SystemPromptBundleRequest, user: dict =
             await storage.set_setting(_settings_key(normalized_role_id), (prompt or "").strip())
 
     bundle = await _get_prompt_bundle()
-    return {**bundle, "message": "System Prompts 已保存"}
+    return {**bundle, "message": "System Prompt 配置已保存"}
 
 
 @router.get("/settings/system-prompt-presets")

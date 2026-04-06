@@ -22,6 +22,7 @@ from services.document_parsing.parsers.ocr_utils import build_ocr_structure, seg
 from services.document_parsing.parsers.pdf_parser import PdfParser
 from services.document_parsing.registry import document_parser_registry
 from services.knowledge_service import KnowledgeService
+from services.retrieval_planner import RetrievalPlannerSettings
 from services.storage import storage
 from services.embedding_service import embedding_service
 
@@ -499,6 +500,54 @@ class HybridSearchServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("付款方式", terms)
         self.assertIn("单一来源风险", terms)
+
+
+    async def test_search_uses_llm_rerank_fallback_when_semantic_is_unavailable(self):
+        candidates = [
+            {
+                "id": "chunk-1",
+                "source_file": "pricing.txt",
+                "content": "付款方式为 30% 预付款，70% 验收后支付",
+            },
+            {
+                "id": "chunk-2",
+                "source_file": "summary.txt",
+                "content": "项目背景与交付计划概述",
+            },
+        ]
+
+        with patch.object(hybrid_search, "_structured_search", AsyncMock(return_value=[])):
+            with patch.object(hybrid_search, "_text_search", AsyncMock(return_value=candidates)):
+                with patch.object(hybrid_search, "_semantic_search", AsyncMock(return_value=[])):
+                    with patch.object(
+                        hybrid_search._llm_service,
+                        "chat",
+                        AsyncMock(return_value={
+                            "choices": [{
+                                "message": {
+                                    "content": '{"selected_ids":["chunk-1"],"notes":"付款相关最匹配"}',
+                                }
+                            }]
+                        }),
+                    ) as chat_mock:
+                        with patch.object(
+                            hybrid_search._llm_service,
+                            "extract_text_content",
+                            return_value='{"selected_ids":["chunk-1"],"notes":"付款相关最匹配"}',
+                        ):
+                            results = await hybrid_search.search(
+                                "请核对付款方式是否合理",
+                                limit=5,
+                                llm_settings=RetrievalPlannerSettings(
+                                    api_url="https://example.com/v1",
+                                    api_key="sk-test",
+                                    model="deepseek-chat",
+                                ),
+                            )
+
+        chat_mock.assert_awaited_once()
+        self.assertEqual([item["id"] for item in results["structured"]], ["chunk-1"])
+        self.assertEqual(results["structured"][0]["rerank_strategy"], "llm_fallback")
 
 
 class KnowledgeServiceIntegrationTests(unittest.IsolatedAsyncioTestCase):

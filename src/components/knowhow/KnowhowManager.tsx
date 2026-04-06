@@ -171,7 +171,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
       if (filterCategory === renamingCat) setFilterCategory(nextName);
       setRenamingCat(null);
       setRenameValue('');
-      setNotice(`分类「${renamingCat}」已重命名为「${nextName}」`);
+      setNotice(`分类“${renamingCat}”已重命名为“${nextName}”`);
       await loadData();
       emitAppDataInvalidation(['knowhow']);
     } catch (e: unknown) {
@@ -203,7 +203,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
       setAddingCategory(false);
       setNewCategoryName('');
       setFilterCategory(name);
-      setNotice(`分类「${name}」已创建`);
+      setNotice(`分类“${name}”已创建`);
       await loadData();
       emitAppDataInvalidation(['knowhow']);
     } catch (e: unknown) {
@@ -457,7 +457,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setRenamingCat(null)}>
           <div className="win-modal w-80 p-5" onClick={(e) => e.stopPropagation()}>
             <h4 className="text-sm font-medium mb-3">重命名分类</h4>
-            <p className="text-xs text-text-secondary mb-3">将「{renamingCat}」重命名为：</p>
+            <p className="text-xs text-text-secondary mb-3">将“{renamingCat}”重命名为：</p>
             <input
               autoFocus
               value={renameValue}
@@ -478,7 +478,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
       {deletingCat && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setDeletingCat(null)}>
           <div className="win-modal w-80 p-5" onClick={(e) => e.stopPropagation()}>
-            <h4 className="text-sm font-medium mb-3">删除分类「{deletingCat}」</h4>
+            <h4 className="text-sm font-medium mb-3">删除分类“{deletingCat}”</h4>
             <p className="text-xs text-text-secondary mb-3">请选择如何处理该分类下的规则：</p>
             <div className="space-y-2 mb-4">
               <label className="flex items-start gap-2 cursor-pointer">
@@ -510,7 +510,7 @@ export default function KnowhowManager({ standalone = true }: Props) {
           <div className="win-modal w-96 p-5" onClick={(e) => e.stopPropagation()}>
             <h4 className="text-sm font-medium mb-3">导入 Know-how 规则</h4>
             <p className="text-xs text-text-secondary mb-3">
-              文件「{pendingImport.fileName}」中发现 {pendingImport.ruleCount} 条规则。
+              文件“{pendingImport.fileName}”中发现 {pendingImport.ruleCount} 条规则。
             </p>
             <div className="space-y-2 mb-4">
               <label className="flex items-start gap-2 cursor-pointer">
@@ -641,6 +641,9 @@ function RuleForm({ rule, onSave, onCancel, onChange, categoryOptions }: {
       <textarea value={rule.rule_text || ''} onChange={(e) => onChange({ ...rule, rule_text: e.target.value })}
         className="win-input w-full resize-none text-sm leading-6"
         rows={3} placeholder="输入规则内容..." />
+      <p className="text-[11px] leading-5 text-text-secondary">
+        系统会自动提炼关键词、适用场景和示例问法，你只需专注写好规则内容。
+      </p>
       <div className="flex gap-2 justify-end">
         <button onClick={onCancel} className="win-button h-8 px-3 text-xs">
           取消

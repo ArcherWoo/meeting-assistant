@@ -8,7 +8,7 @@ from typing import Any
 from services.document_parsing.parsers.common import compact_join, normalize_text
 
 
-LIST_ITEM_RE = re.compile(r"^([-\*\u2022]|\d+[.)])\s+")
+LIST_ITEM_RE = re.compile(r"^([-*•]|\d+[.)])\s+")
 SENTENCE_END_RE = re.compile(r"[。！？!?；;.]$")
 SECTION_PREFIX_RE = re.compile(r"^(section|chapter|part|appendix)\b", re.IGNORECASE)
 

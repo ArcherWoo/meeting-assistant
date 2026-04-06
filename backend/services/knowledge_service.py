@@ -325,8 +325,8 @@ class KnowledgeService:
         await storage.update_ppt_import_status(import_id, "completed", extracted_count)
 
         logger.info(
-            f"PPT 瀵煎叆瀹屾垚: {filename}, {slide_count} 椤? {text_length} 瀛楃, "
-            f"{stored_chunks_count} 涓鏂囧潡, {vector_chunks_count} 涓悜閲忓潡"
+            f"PPT 导入完成: {filename}, {slide_count} 页, {text_length} 字符, "
+            f"{stored_chunks_count} 个正文块, {vector_chunks_count} 个向量块"
         )
 
         return {
@@ -338,6 +338,8 @@ class KnowledgeService:
             "table_count": table_count,
             "image_count": image_count,
             "extracted_count": extracted_count,
+            "stored_chunks_count": stored_chunks_count,
+            "vector_chunks_count": vector_chunks_count,
             "chunks_count": vector_chunks_count if vector_chunks_count else stored_chunks_count or chunks_parsed,
         }
 
@@ -610,6 +612,8 @@ class KnowledgeService:
             "status": "completed",
             "file_type": file_type,
             "extracted_count": 0,
+            "stored_chunks_count": stored_chunks_count,
+            "vector_chunks_count": vector_chunks_count,
             "chunks_count": chunks_count,
             "char_count": char_count,
         }
@@ -864,6 +868,8 @@ class KnowledgeService:
             **stats,
             "warnings": parsed_document.warnings,
             "extracted_count": extracted_count,
+            "stored_chunks_count": stored_chunks_count,
+            "vector_chunks_count": vector_chunks_count,
             "chunks_count": vector_chunks_count if vector_chunks_count else stored_chunks_count,
         }
 

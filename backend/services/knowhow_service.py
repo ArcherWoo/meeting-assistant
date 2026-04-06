@@ -1,58 +1,489 @@
-"""
-Know-how 规则服务 - 业务经验规则管理与匹配
-遵循 PRD §5⅔：让系统"越用越好用"，通过用户反馈沉淀业务知识
+﻿"""
+Know-how 规则服务。
 
-功能：
-  - 规则 CRUD（增删改查）
-  - 规则匹配检查（逐项检查 PPT 内容是否覆盖关注点）
-  - 命中统计 + 置信度自动衰减
-  - 内置默认采购预审关注点清单
+负责：
+- 规则的增删改查
+- 分类画像的增删改查
+- 规则导入导出
+- 基于内容的轻量匹配检查
 """
+
+from __future__ import annotations
+
+import json
 import logging
+import re
 from datetime import datetime, timezone
-from typing import Any, Literal, List, Optional
+from typing import Any, Literal, Optional
 
 from services.storage import gen_id, storage
+from utils.text_utils import contains_han_text, extract_han_segments
 
 logger = logging.getLogger(__name__)
 
-# 内置默认采购预审关注点（PRD §5½.4）
-DEFAULT_PROCUREMENT_RULES: List[dict] = [
-    {"category": "采购预审", "rule_text": "供应商必须提供 ISO 9001 质量管理体系认证或相关行业资质", "weight": 3, "source": "builtin"},
-    {"category": "采购预审", "rule_text": "价格与历史同品类均价对比，偏差应在合理范围（±15%）内", "weight": 3, "source": "builtin"},
-    {"category": "采购预审", "rule_text": "是否有与该供应商的历史合作记录及合作评价", "weight": 2, "source": "builtin"},
-    {"category": "采购预审", "rule_text": "交付时间节点是否明确，有无里程碑和交付计划", "weight": 3, "source": "builtin"},
-    {"category": "采购预审", "rule_text": "付款方式与条件是否合理（预付比例、验收付款、质保金等）", "weight": 2, "source": "builtin"},
-    {"category": "采购预审", "rule_text": "是否包含违约条款（延迟交付、质量不合格的处罚）", "weight": 2, "source": "builtin"},
-    {"category": "采购预审", "rule_text": "技术参数是否完整详细，能否满足实际需求", "weight": 2, "source": "builtin"},
-    {"category": "采购预审", "rule_text": "是否有售后服务承诺（保修期、响应时间、备件供应）", "weight": 1, "source": "builtin"},
-    {"category": "采购预审", "rule_text": "是否提供了竞品对比或多家供应商的对比分析", "weight": 1, "source": "builtin"},
-    {"category": "采购预审", "rule_text": "是否进行了供应链风险评估和单一来源风险分析", "weight": 2, "source": "builtin"},
-    {"category": "采购预审", "rule_text": "采购策略是否合理：Single Source 需有充分理由，是否考虑 Multi-Source", "weight": 3, "source": "builtin"},
-    {"category": "采购预审", "rule_text": "采购流程是否合规：金额是否达招标门槛、审批流程是否完整、比价记录是否齐全", "weight": 3, "source": "builtin"},
+UNCATEGORIZED = "未分类"
+
+DEFAULT_CATEGORY_PROFILES: dict[str, dict[str, Any]] = {
+    "采购预审": {
+        "description": "用于采购预审、供应商资质、报价合理性、付款条款、交付风险、单一来源与审批合规判断。",
+        "aliases": ["采购审核", "采购评审", "供应商预审", "采购合规"],
+        "example_queries": [
+            "这个供应商资质是否齐全",
+            "付款方式是否合理",
+            "单一来源风险说明够不够",
+            "采购流程是否合规",
+        ],
+        "applies_to": "采购、招投标、供应商准入、单一来源论证、合同前置审查",
+    }
+}
+
+DEFAULT_PROCUREMENT_RULES: list[dict[str, Any]] = [
+    {
+        "category": "采购预审",
+        "title": "供应商资质要求",
+        "rule_text": "供应商必须提供 ISO 9001 质量管理体系认证或相关行业资质。",
+        "trigger_terms": ["供应商资质", "ISO", "认证", "资格"],
+        "examples": ["这个供应商缺少 ISO 认证还能继续吗"],
+        "weight": 3,
+        "source": "builtin",
+    },
+    {
+        "category": "采购预审",
+        "title": "价格偏差判断",
+        "rule_text": "价格与历史同品类均价对比，偏差应在合理范围内，异常偏差需要补充解释。",
+        "trigger_terms": ["价格偏差", "均价", "报价", "偏差说明"],
+        "examples": ["这次报价比历史均价高很多是否合理"],
+        "weight": 3,
+        "source": "builtin",
+    },
+    {
+        "category": "采购预审",
+        "title": "历史合作记录",
+        "rule_text": "需要核查与该供应商的历史合作记录及合作评价。",
+        "trigger_terms": ["合作记录", "历史合作", "供应商评价"],
+        "weight": 2,
+        "source": "builtin",
+    },
+    {
+        "category": "采购预审",
+        "title": "交付计划完整性",
+        "rule_text": "交付时间节点应明确，并包含里程碑和交付计划。",
+        "trigger_terms": ["交付", "里程碑", "交期"],
+        "weight": 3,
+        "source": "builtin",
+    },
+    {
+        "category": "采购预审",
+        "title": "付款条款合理性",
+        "rule_text": "付款方式与条件是否合理，需要关注预付比例、验收付款、质保金等安排。",
+        "trigger_terms": ["付款方式", "预付款", "验收付款", "质保金"],
+        "examples": ["30%预付款、70%验收后支付是否合理"],
+        "weight": 2,
+        "source": "builtin",
+    },
+    {
+        "category": "采购预审",
+        "title": "违约条款完整性",
+        "rule_text": "需要明确违约责任，包括延迟交付和质量不合格的处理方式。",
+        "trigger_terms": ["违约", "延迟交付", "质量不合格"],
+        "weight": 2,
+        "source": "builtin",
+    },
+    {
+        "category": "采购预审",
+        "title": "技术参数完整性",
+        "rule_text": "技术参数应完整详细，并能够支撑实际需求。",
+        "trigger_terms": ["技术参数", "规格", "参数完整"],
+        "weight": 2,
+        "source": "builtin",
+    },
+    {
+        "category": "采购预审",
+        "title": "售后服务承诺",
+        "rule_text": "需要明确售后服务承诺，包括保修期、响应时间和备件供应。",
+        "trigger_terms": ["售后", "保修", "响应时间"],
+        "weight": 1,
+        "source": "builtin",
+    },
+    {
+        "category": "采购预审",
+        "title": "竞品比价要求",
+        "rule_text": "应提供竞品对比或多家供应商的比价分析。",
+        "trigger_terms": ["比价", "竞品", "多家供应商"],
+        "weight": 1,
+        "source": "builtin",
+    },
+    {
+        "category": "采购预审",
+        "title": "供应链与单一来源风险",
+        "rule_text": "需要进行供应链风险评估和单一来源风险分析。",
+        "trigger_terms": ["风险评估", "单一来源", "供应链风险"],
+        "examples": ["单一来源风险是否已经说明充分"],
+        "weight": 2,
+        "source": "builtin",
+    },
+    {
+        "category": "采购预审",
+        "title": "采购策略合理性",
+        "rule_text": "采购策略是否合理，Single Source 需要有充分理由，并评估是否应考虑 Multi-Source。",
+        "trigger_terms": ["single source", "multi-source", "采购策略"],
+        "applies_when": "适用于单一来源、唯一供应商、采购策略合理性判断。",
+        "examples": ["唯一供应商方案是否需要补充理由"],
+        "weight": 3,
+        "source": "builtin",
+    },
+    {
+        "category": "采购预审",
+        "title": "采购流程合规性",
+        "rule_text": "采购流程应合规，需要核查招标门槛、审批流程和比价记录是否齐全。",
+        "trigger_terms": ["审批流程", "招标门槛", "比价记录", "合规"],
+        "examples": ["这个采购流程是否需要补审批材料"],
+        "weight": 3,
+        "source": "builtin",
+    },
 ]
 
 
 class KnowhowService:
-    """Know-how 规则管理与匹配服务"""
+    """Know-how 规则管理与检索支持服务。"""
+
+    @staticmethod
+    def _normalize_text(value: Any) -> str:
+        return str(value or "").strip()
+
+    @classmethod
+    def _normalize_list(cls, value: Any) -> list[str]:
+        if isinstance(value, list):
+            raw_items = value
+        elif isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(stripped)
+                    raw_items = parsed if isinstance(parsed, list) else [parsed]
+                except json.JSONDecodeError:
+                    raw_items = [item.strip() for item in stripped.split(",")]
+            else:
+                raw_items = [item.strip() for item in stripped.split(",")]
+        else:
+            raw_items = []
+
+        items: list[str] = []
+        seen: set[str] = set()
+        for item in raw_items:
+            text = cls._normalize_text(item)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            items.append(text)
+        return items
+
+    @classmethod
+    def _dump_list(cls, value: Any) -> str:
+        return json.dumps(cls._normalize_list(value), ensure_ascii=False)
+
+    @classmethod
+    def _load_list(cls, value: Any) -> list[str]:
+        return cls._normalize_list(value)
+
+    @classmethod
+    def _serialize_rule(cls, rule: dict) -> dict:
+        serialized = dict(rule)
+        serialized["category"] = cls._normalize_text(serialized.get("category")) or UNCATEGORIZED
+        serialized["title"] = cls._normalize_text(serialized.get("title"))
+        serialized["rule_text"] = cls._normalize_text(serialized.get("rule_text"))
+        serialized["trigger_terms"] = cls._load_list(serialized.get("trigger_terms"))
+        serialized["exclude_terms"] = cls._load_list(serialized.get("exclude_terms"))
+        serialized["applies_when"] = cls._normalize_text(serialized.get("applies_when"))
+        serialized["not_applies_when"] = cls._normalize_text(serialized.get("not_applies_when"))
+        serialized["examples"] = cls._load_list(serialized.get("examples"))
+        return serialized
+
+    @classmethod
+    def _serialize_category(cls, category: dict, rule_count: int = 0) -> dict:
+        serialized = dict(category)
+        serialized["name"] = cls._normalize_text(serialized.get("name"))
+        serialized["description"] = cls._normalize_text(serialized.get("description"))
+        serialized["aliases"] = cls._load_list(serialized.get("aliases"))
+        serialized["example_queries"] = cls._load_list(serialized.get("example_queries"))
+        serialized["applies_to"] = cls._normalize_text(serialized.get("applies_to"))
+        serialized["rule_count"] = int(rule_count)
+        return serialized
+
+    async def _sync_categories_from_rules(self) -> None:
+        rules = await storage.list_knowhow_rules(active_only=False)
+        category_names = {
+            self._normalize_text(rule.get("category")) or UNCATEGORIZED
+            for rule in rules
+        }
+        for name in category_names:
+            defaults = DEFAULT_CATEGORY_PROFILES.get(name, {})
+            await storage.ensure_knowhow_category(
+                name,
+                description=self._normalize_text(defaults.get("description")),
+                aliases=self._dump_list(defaults.get("aliases")),
+                example_queries=self._dump_list(defaults.get("example_queries")),
+                applies_to=self._normalize_text(defaults.get("applies_to")),
+            )
 
     async def ensure_defaults(self) -> int:
-        """确保内置默认规则已初始化，返回新增数量"""
         existing = await storage.list_knowhow_rules(active_only=False)
         if existing:
+            await self._sync_categories_from_rules()
             return 0
+
         count = 0
+        for profile_name, profile in DEFAULT_CATEGORY_PROFILES.items():
+            await storage.ensure_knowhow_category(
+                profile_name,
+                description=self._normalize_text(profile.get("description")),
+                aliases=self._dump_list(profile.get("aliases")),
+                example_queries=self._dump_list(profile.get("example_queries")),
+                applies_to=self._normalize_text(profile.get("applies_to")),
+            )
+
         for rule in DEFAULT_PROCUREMENT_RULES:
-            await storage.add_knowhow_rule(
+            await self.add_rule(
                 category=rule["category"],
+                title=rule.get("title", ""),
                 rule_text=rule["rule_text"],
+                trigger_terms=rule.get("trigger_terms"),
+                exclude_terms=rule.get("exclude_terms"),
+                applies_when=rule.get("applies_when", ""),
+                not_applies_when=rule.get("not_applies_when", ""),
+                examples=rule.get("examples"),
                 weight=rule["weight"],
                 source=rule["source"],
             )
             count += 1
-        logger.info(f"已初始化 {count} 条默认 Know-how 规则")
+        logger.info("Initialized %s default knowhow rules", count)
         return count
+    @staticmethod
+    def _contains_chinese(text: str) -> bool:
+        return contains_han_text(text)
 
+    @classmethod
+    def _merge_unique_items(cls, *groups: Any, limit: int = 6) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for group in groups:
+            for item in cls._normalize_list(group):
+                key = item.casefold()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                merged.append(item)
+                if len(merged) >= limit:
+                    return merged
+        return merged
+
+    @classmethod
+    def _normalize_weight(cls, value: Any, default: float = 2) -> float:
+        try:
+            normalized = round(float(value), 1)
+        except (TypeError, ValueError):
+            normalized = float(default)
+        return max(0.0, min(5.0, normalized))
+
+    @classmethod
+    def _infer_title(cls, category: str, rule_text: str) -> str:
+        text = cls._normalize_text(rule_text)
+        lowered = text.lower()
+        is_chinese = cls._contains_chinese(f"{category} {rule_text}")
+        title_hints = [
+            (("single source", "sole source", "单一来源", "唯一供应商"), "单一来源合规判断", "Single-source compliance check"),
+            (("iso", "supplier", "qualification", "certification", "资质", "认证", "供应商"), "供应商资质要求", "Supplier qualification requirement"),
+            (("payment", "advance", "milestone", "付款", "预付"), "付款条款检查", "Payment term check"),
+            (("price", "quote", "quotation", "价格", "报价"), "价格合理性判断", "Price reasonableness check"),
+            (("delivery", "milestone", "schedule", "交付", "里程碑"), "交付计划检查", "Delivery plan check"),
+            (("contract", "penalty", "liability", "合同", "违约"), "合同条款检查", "Contract clause check"),
+            (("support", "warranty", "service", "售后", "保修"), "售后服务要求", "After-sales support requirement"),
+            (("specification", "technical", "parameter", "参数", "规格"), "技术参数检查", "Technical specification check"),
+            (("compliance", "approval", "process", "合规", "审批"), "合规流程检查", "Compliance workflow check"),
+        ]
+        for terms, zh_title, en_title in title_hints:
+            if any(term in lowered for term in terms):
+                return zh_title if is_chinese else en_title
+
+        first_sentence = re.split(r"[。！？?!\n;；]", text, maxsplit=1)[0].strip()
+        if not first_sentence:
+            return category.strip() or ("规则摘要" if is_chinese else "Rule summary")
+        return first_sentence[:18] if is_chinese else " ".join(first_sentence.split()[:6]).strip()
+
+    @classmethod
+    def _extract_keywords(cls, rule_text: str) -> list[str]:
+        text = cls._normalize_text(rule_text).lower()
+        keywords: list[str] = []
+        english_terms = [
+            "iso",
+            "supplier",
+            "qualification",
+            "certification",
+            "price",
+            "payment",
+            "delivery",
+            "milestone",
+            "contract",
+            "penalty",
+            "support",
+            "warranty",
+            "specification",
+            "compliance",
+            "approval",
+            "risk",
+            "single source",
+            "multi-source",
+        ]
+        for term in english_terms:
+            if term in text:
+                keywords.append(term)
+        keywords.extend(extract_han_segments(cls._normalize_text(rule_text), min_length=2, max_length=8))
+        return cls._merge_unique_items(keywords, limit=8)
+
+    @classmethod
+    def _infer_trigger_terms(cls, category: str, rule_text: str, title: str, current_terms: Any = None) -> list[str]:
+        existing = cls._normalize_list(current_terms)
+        if existing:
+            return existing
+
+        normalized_text = cls._normalize_text(f"{category} {title} {rule_text}")
+        lowered_text = normalized_text.lower()
+        hint_terms = [
+            "single source", "multi-source", "iso", "supplier", "qualification", "certification",
+            "price", "payment", "delivery", "milestone", "contract", "penalty", "risk", "compliance",
+            "供应商", "资质", "资格", "认证", "价格", "报价", "付款", "预付",
+            "交付", "里程碑", "合同", "违约", "风险", "合规", "审批",
+            "售后", "保修", "参数", "规格", "单一来源",
+        ]
+        inferred = [term for term in hint_terms if term.lower() in lowered_text]
+        inferred.extend(cls._extract_keywords(normalized_text))
+        inferred.extend(re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", lowered_text))
+        inferred.extend(extract_han_segments(normalized_text, min_length=2, max_length=8))
+        return cls._merge_unique_items(inferred, limit=6)
+
+    @classmethod
+    def _infer_applies_when(cls, category: str, trigger_terms: list[str], rule_text: str, current_value: str = "") -> str:
+        existing = cls._normalize_text(current_value)
+        if existing:
+            return existing
+
+        is_chinese = cls._contains_chinese(f"{category} {rule_text}")
+        focus = ("、" if is_chinese else ", ").join(trigger_terms[:3])
+        if not focus:
+            focus = category or ("相关事项" if is_chinese else "related cases")
+        if is_chinese:
+            return f"当用户询问{focus}是否合理、合规或需要补充说明时适用。"
+        return f"Use when the user asks whether {focus} is sufficient, compliant, or needs more support."
+
+    @classmethod
+    def _infer_examples(cls, category: str, trigger_terms: list[str], current_examples: Any = None) -> list[str]:
+        existing = cls._normalize_list(current_examples)
+        if existing:
+            return existing
+
+        seed = trigger_terms[0] if trigger_terms else (category or "rule")
+        if cls._contains_chinese(f"{category} {' '.join(trigger_terms)}"):
+            return [f"这个{seed}是否满足要求？"]
+        return [f"Does this satisfy the {seed} requirement?"]
+
+    @classmethod
+    def _prepare_rule_fields(
+        cls,
+        *,
+        category: str,
+        rule_text: str,
+        title: str = "",
+        trigger_terms: Any = None,
+        exclude_terms: Any = None,
+        applies_when: str = "",
+        not_applies_when: str = "",
+        examples: Any = None,
+    ) -> dict[str, Any]:
+        normalized_category = cls._normalize_text(category) or UNCATEGORIZED
+        normalized_rule_text = cls._normalize_text(rule_text)
+        normalized_title = cls._normalize_text(title) or cls._infer_title(normalized_category, normalized_rule_text)
+        normalized_trigger_terms = cls._infer_trigger_terms(
+            normalized_category,
+            normalized_rule_text,
+            normalized_title,
+            trigger_terms,
+        )
+        normalized_examples = cls._infer_examples(
+            normalized_category,
+            normalized_trigger_terms,
+            examples,
+        )
+        return {
+            "category": normalized_category,
+            "title": normalized_title,
+            "rule_text": normalized_rule_text,
+            "trigger_terms": normalized_trigger_terms,
+            "exclude_terms": cls._normalize_list(exclude_terms),
+            "applies_when": cls._infer_applies_when(
+                normalized_category,
+                normalized_trigger_terms,
+                normalized_rule_text,
+                applies_when,
+            ),
+            "not_applies_when": cls._normalize_text(not_applies_when),
+            "examples": normalized_examples,
+        }
+
+    async def _refresh_category_profile(self, category: str) -> None:
+        normalized_category = self._normalize_text(category) or UNCATEGORIZED
+        await storage.ensure_knowhow_category(normalized_category)
+        categories = await storage.list_knowhow_categories()
+        existing_row = next((item for item in categories if item.get("name") == normalized_category), {}) or {}
+        existing = self._serialize_category(existing_row, 0)
+        defaults = DEFAULT_CATEGORY_PROFILES.get(normalized_category, {})
+        rules = await self.list_rules(category=normalized_category, active_only=False)
+
+        inferred_terms: list[str] = []
+        inferred_examples: list[str] = []
+        for rule in rules:
+            inferred_terms.extend(rule.get("trigger_terms") or [])
+            inferred_terms.extend(self._extract_keywords(rule.get("rule_text", "")))
+            inferred_examples.extend(rule.get("examples") or [])
+
+        top_terms = self._merge_unique_items(inferred_terms, limit=4)
+        merged_aliases = self._merge_unique_items(existing.get("aliases"), defaults.get("aliases"), top_terms, limit=6)
+        merged_examples = self._merge_unique_items(
+            existing.get("example_queries"),
+            defaults.get("example_queries"),
+            inferred_examples,
+            limit=6,
+        )
+
+        if self._contains_chinese(normalized_category):
+            zh_focus = "、".join(top_terms)
+            zh_focus_short = "、".join(top_terms[:3])
+            inferred_description = (
+                f"适用于{normalized_category}相关判断，重点关注{zh_focus}。"
+                if top_terms else f"适用于{normalized_category}相关判断。"
+            )
+            inferred_applies_to = (
+                f"当用户询问{zh_focus_short}是否合理、合规或需要补充说明时。"
+                if top_terms else f"当用户询问{normalized_category}相关问题时。"
+            )
+        else:
+            inferred_description = (
+                f"Used for {normalized_category} decisions, especially around {', '.join(top_terms)}."
+                if top_terms else f"Used for {normalized_category} decisions."
+            )
+            inferred_applies_to = (
+                f"When the user asks whether {', '.join(top_terms[:3])} is sufficient, compliant, or needs clarification."
+                if top_terms else f"When the user asks about {normalized_category}."
+            )
+
+        await storage.update_knowhow_category_profile(
+            normalized_category,
+            description=self._normalize_text(existing.get("description")) or self._normalize_text(defaults.get("description")) or inferred_description,
+            aliases=self._dump_list(merged_aliases),
+            example_queries=self._dump_list(merged_examples),
+            applies_to=self._normalize_text(existing.get("applies_to")) or self._normalize_text(defaults.get("applies_to")) or inferred_applies_to,
+        )
     async def list_rules(
         self,
         category: Optional[str] = None,
@@ -60,66 +491,110 @@ class KnowhowService:
         user_id: Optional[str] = None,
         group_id: Optional[str] = None,
         is_admin: bool = False,
-    ) -> List[dict]:
-        """获取规则列表，支持 RBAC 过滤"""
-        return await storage.list_knowhow_rules(
+    ) -> list[dict]:
+        rules = await storage.list_knowhow_rules(
             category=category,
             active_only=active_only,
             user_id=user_id,
             group_id=group_id,
             is_admin=is_admin,
         )
+        return [self._serialize_rule(rule) for rule in rules]
 
     async def add_rule(
         self,
         category: str,
         rule_text: str,
+        title: str = "",
+        trigger_terms: Any = None,
+        exclude_terms: Any = None,
+        applies_when: str = "",
+        not_applies_when: str = "",
+        examples: Any = None,
         weight: int = 2,
         source: str = "user",
         owner_id: Optional[str] = None,
     ) -> str:
-        """?????"""
-        normalized_category = str(category or "").strip() or "???"
-        await storage.ensure_knowhow_category(normalized_category)
-        return await storage.add_knowhow_rule(
-            normalized_category,
-            rule_text,
-            weight,
-            source,
+        prepared = self._prepare_rule_fields(
+            category=category,
+            rule_text=rule_text,
+            title=title,
+            trigger_terms=trigger_terms,
+            exclude_terms=exclude_terms,
+            applies_when=applies_when,
+            not_applies_when=not_applies_when,
+            examples=examples,
+        )
+        await storage.ensure_knowhow_category(prepared["category"])
+        rule_id = await storage.add_knowhow_rule(
+            category=prepared["category"],
+            title=prepared["title"],
+            rule_text=prepared["rule_text"],
+            trigger_terms=self._dump_list(prepared["trigger_terms"]),
+            exclude_terms=self._dump_list(prepared["exclude_terms"]),
+            applies_when=prepared["applies_when"],
+            not_applies_when=prepared["not_applies_when"],
+            examples=self._dump_list(prepared["examples"]),
+            weight=self._normalize_weight(weight),
+            source=source,
             owner_id=owner_id,
         )
+        await self._refresh_category_profile(prepared["category"])
+        return rule_id
 
     async def update_rule(self, rule_id: str, updates: dict) -> bool:
-        """??????"""
-        if "category" in updates:
-            updates["category"] = str(updates["category"] or "").strip() or "???"
-            await storage.ensure_knowhow_category(str(updates["category"]))
-        allowed = {"category", "rule_text", "weight", "is_active"}
-        sets = []
-        params: list = []
-        for k, v in updates.items():
-            if k in allowed:
-                sets.append(f"{k}=?")
-                params.append(v)
-        if not sets:
+        existing_raw = await storage.get_knowhow_rule(rule_id)
+        if not existing_raw:
             return False
-        sets.append("updated_at=?")
-        params.append(datetime.now(timezone.utc).isoformat())
-        params.append(rule_id)
+
+        existing = self._serialize_rule(existing_raw)
+        old_category = existing["category"]
+        content_changed = any(key in updates for key in ("category", "rule_text"))
+        prepared = self._prepare_rule_fields(
+            category=updates.get("category", existing["category"]),
+            rule_text=updates.get("rule_text", existing["rule_text"]),
+            title=updates["title"] if "title" in updates else ("" if content_changed else existing["title"]),
+            trigger_terms=updates["trigger_terms"] if "trigger_terms" in updates else ([] if content_changed else existing["trigger_terms"]),
+            exclude_terms=updates.get("exclude_terms", existing["exclude_terms"]),
+            applies_when=updates["applies_when"] if "applies_when" in updates else ("" if content_changed else existing["applies_when"]),
+            not_applies_when=updates.get("not_applies_when", existing["not_applies_when"]),
+            examples=updates["examples"] if "examples" in updates else ([] if content_changed else existing["examples"]),
+        )
+        await storage.ensure_knowhow_category(prepared["category"])
+
+        persisted_updates = {
+            "category": prepared["category"],
+            "title": prepared["title"],
+            "rule_text": prepared["rule_text"],
+            "trigger_terms": self._dump_list(prepared["trigger_terms"]),
+            "exclude_terms": self._dump_list(prepared["exclude_terms"]),
+            "applies_when": prepared["applies_when"],
+            "not_applies_when": prepared["not_applies_when"],
+            "examples": self._dump_list(prepared["examples"]),
+        }
+        if "weight" in updates:
+            persisted_updates["weight"] = self._normalize_weight(updates.get("weight"), existing_raw.get("weight", 2))
+        if "is_active" in updates:
+            persisted_updates["is_active"] = 1 if bool(updates.get("is_active")) else 0
+
+        set_clause = ", ".join(f"{key}=?" for key in persisted_updates)
+        params = [*persisted_updates.values(), datetime.now(timezone.utc).isoformat(), rule_id]
         await storage.db.execute(
-            f"UPDATE knowhow_rules SET {', '.join(sets)} WHERE id=?", params,
+            f"UPDATE knowhow_rules SET {set_clause}, updated_at=? WHERE id=?",
+            params,
         )
         await storage.db.commit()
+        await self._refresh_category_profile(prepared["category"])
+        if prepared["category"] != old_category:
+            await self._refresh_category_profile(old_category)
         return True
 
     async def delete_rule(self, rule_id: str) -> bool:
-        """删除规则"""
         await storage.db.execute("DELETE FROM knowhow_rules WHERE id=?", (rule_id,))
         await storage.db.commit()
         return True
 
-    def _extract_import_rules(self, payload: Any) -> List[dict]:
-        """从导入载荷中提取规则列表。"""
+    def _extract_import_rules(self, payload: Any) -> list[dict]:
         if isinstance(payload, list):
             raw_rules = payload
         elif isinstance(payload, dict):
@@ -137,11 +612,11 @@ class KnowhowService:
 
     @staticmethod
     def _normalize_import_rule(raw_rule: Any, index: int) -> dict:
-        """标准化导入规则，兼容导出备份和手工维护的 JSON。"""
         if not isinstance(raw_rule, dict):
             raise ValueError(f"第 {index} 条规则格式不正确")
 
-        category = str(raw_rule.get("category") or "").strip() or "未分类"
+        category = str(raw_rule.get("category") or "").strip() or UNCATEGORIZED
+        title = str(raw_rule.get("title") or "").strip()
         rule_text = str(raw_rule.get("rule_text") or "").strip()
         if not rule_text:
             raise ValueError(f"第 {index} 条规则缺少内容")
@@ -176,7 +651,13 @@ class KnowhowService:
 
         return {
             "category": category,
+            "title": title,
             "rule_text": rule_text,
+            "trigger_terms": KnowhowService._normalize_list(raw_rule.get("trigger_terms")),
+            "exclude_terms": KnowhowService._normalize_list(raw_rule.get("exclude_terms")),
+            "applies_when": str(raw_rule.get("applies_when") or "").strip(),
+            "not_applies_when": str(raw_rule.get("not_applies_when") or "").strip(),
+            "examples": KnowhowService._normalize_list(raw_rule.get("examples")),
             "weight": weight,
             "hit_count": hit_count,
             "confidence": confidence,
@@ -187,11 +668,10 @@ class KnowhowService:
         }
 
     async def export_rules(self) -> dict:
-        """导出当前 Know-how 规则库。"""
-        rules = await storage.list_knowhow_rules(active_only=False)
+        rules = await self.list_rules(active_only=False)
         return {
             "kind": "knowhow_rules_export",
-            "schema_version": 1,
+            "schema_version": 2,
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "total_rules": len(rules),
             "rules": rules,
@@ -202,14 +682,16 @@ class KnowhowService:
         payload: Any,
         strategy: Literal["append", "replace"] = "append",
     ) -> dict:
-        """导入 Know-how 规则库，支持追加或覆盖。"""
         if strategy not in {"append", "replace"}:
-            raise ValueError("导入策略不支持")
+            raise ValueError("不支持的导入策略")
 
         rules = self._extract_import_rules(payload)
         existing_rules = await storage.list_knowhow_rules(active_only=False)
         existing_keys = {
-            (str(rule.get("category") or "").strip(), str(rule.get("rule_text") or "").strip())
+            (
+                self._normalize_text(rule.get("category")),
+                self._normalize_text(rule.get("rule_text")),
+            )
             for rule in existing_rules
         }
 
@@ -219,36 +701,61 @@ class KnowhowService:
             deleted_count = max(cursor.rowcount, 0)
             existing_keys.clear()
 
-        rows = []
+        rows: list[tuple[Any, ...]] = []
         skipped_count = 0
+        touched_categories: set[str] = set()
         for rule in rules:
-            key = (rule["category"], rule["rule_text"])
+            prepared = self._prepare_rule_fields(
+                category=rule["category"],
+                rule_text=rule["rule_text"],
+                title=rule.get("title", ""),
+                trigger_terms=rule.get("trigger_terms"),
+                exclude_terms=rule.get("exclude_terms"),
+                applies_when=rule.get("applies_when", ""),
+                not_applies_when=rule.get("not_applies_when", ""),
+                examples=rule.get("examples"),
+            )
+            key = (prepared["category"], prepared["rule_text"])
             if key in existing_keys:
                 skipped_count += 1
                 continue
 
             existing_keys.add(key)
-            rows.append((
-                gen_id(),
-                rule["category"],
-                rule["rule_text"],
-                rule["weight"],
-                rule["hit_count"],
-                rule["confidence"],
-                rule["source"],
-                rule["is_active"],
-                rule["created_at"],
-                rule["updated_at"],
-            ))
+            touched_categories.add(prepared["category"])
+            await storage.ensure_knowhow_category(prepared["category"])
+            rows.append(
+                (
+                    gen_id(),
+                    prepared["category"],
+                    prepared["title"],
+                    prepared["rule_text"],
+                    self._dump_list(prepared["trigger_terms"]),
+                    self._dump_list(prepared["exclude_terms"]),
+                    prepared["applies_when"],
+                    prepared["not_applies_when"],
+                    self._dump_list(prepared["examples"]),
+                    self._normalize_weight(rule["weight"]),
+                    rule["hit_count"],
+                    rule["confidence"],
+                    rule["source"],
+                    rule["is_active"],
+                    rule["created_at"],
+                    rule["updated_at"],
+                )
+            )
 
         if rows:
             await storage.db.executemany(
                 "INSERT INTO knowhow_rules ("
-                "id, category, rule_text, weight, hit_count, confidence, source, is_active, created_at, updated_at"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "id, category, title, rule_text, trigger_terms, exclude_terms, applies_when, not_applies_when, "
+                "examples, weight, hit_count, confidence, source, is_active, created_at, updated_at"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 rows,
             )
         await storage.db.commit()
+        await self._sync_categories_from_rules()
+        for category in sorted(touched_categories):
+            await self._refresh_category_profile(category)
 
         total_after_import = len(await storage.list_knowhow_rules(active_only=False))
         return {
@@ -259,70 +766,55 @@ class KnowhowService:
             "deleted_count": deleted_count,
             "total_after_import": total_after_import,
         }
+    def _extract_rule_keywords(self, rule: dict) -> list[str]:
+        bag: list[str] = []
+        bag.extend(self._extract_keywords(rule.get("title", "")))
+        bag.extend(self._extract_keywords(rule.get("rule_text", "")))
+        bag.extend(self._normalize_list(rule.get("trigger_terms")))
+        bag.extend(self._normalize_list(rule.get("examples")))
+        if rule.get("category"):
+            bag.extend(self._normalize_list([rule["category"]]))
 
-    async def check_against_content(
-        self, content: str, category: str = "采购预审",
-    ) -> List[dict]:
-        """
-        将 Know-how 规则逐项与内容匹配检查
-        返回每条规则的覆盖情况: [{rule_id, rule_text, weight, covered: bool, detail: str}]
-        注意：精准匹配需要 LLM，这里做基础关键词预匹配；Agent 执行时由 LLM 做最终判定
-        """
-        rules = await storage.list_knowhow_rules(category=category, active_only=True)
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in bag:
+            text = self._normalize_text(item).lower()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            normalized.append(text)
+        return normalized
+
+    async def check_against_content(self, content: str, category: str = "采购预审") -> list[dict]:
+        rules = await self.list_rules(category=category, active_only=True)
         content_lower = content.lower()
-        results: List[dict] = []
+        results: list[dict] = []
 
         for rule in rules:
-            rule_text = rule["rule_text"]
-            # 基础关键词匹配（从规则中提取关键词）
-            keywords = self._extract_keywords(rule_text)
-            matched = sum(1 for kw in keywords if kw in content_lower)
+            keywords = self._extract_rule_keywords(rule)
+            matched = sum(1 for keyword in keywords if keyword in content_lower)
             covered = matched >= max(1, len(keywords) // 3)
-
-            results.append({
-                "rule_id": rule["id"],
-                "rule_text": rule_text,
-                "weight": rule["weight"],
-                "covered": covered,
-                "match_score": matched / max(len(keywords), 1),
-                "detail": f"匹配 {matched}/{len(keywords)} 个关键词" if keywords else "无法自动判定",
-            })
-
-            # 更新命中统计
+            results.append(
+                {
+                    "rule_id": rule["id"],
+                    "rule_text": rule["rule_text"],
+                    "weight": rule["weight"],
+                    "covered": covered,
+                    "match_score": matched / max(len(keywords), 1),
+                    "detail": f"匹配 {matched}/{len(keywords)} 个关键词" if keywords else "无法自动判定",
+                }
+            )
             if covered:
                 await storage.increment_knowhow_hit(rule["id"])
-
         return results
 
-    def _extract_keywords(self, rule_text: str) -> List[str]:
-        """从规则文本中提取关键词（简单分词）"""
-        keywords: List[str] = []
-        term_map = {
-            "ISO": "iso", "认证": "认证", "资质": "资质", "供应商": "供应商",
-            "价格": "价格", "均价": "均价", "偏差": "偏差",
-            "合作": "合作", "历史": "历史",
-            "交付": "交付", "里程碑": "里程碑", "时间": "时间",
-            "付款": "付款", "预付": "预付", "质保": "质保",
-            "违约": "违约", "处罚": "处罚",
-            "技术参数": "技术参数", "规格": "规格",
-            "售后": "售后", "保修": "保修",
-            "竞品": "竞品", "对比": "对比", "比价": "比价",
-            "风险": "风险", "评估": "评估",
-            "招标": "招标", "审批": "审批", "合规": "合规",
-            "单一来源": "单一来源", "multi-source": "multi-source",
-        }
-        rule_lower = rule_text.lower()
-        for term, kw in term_map.items():
-            if term.lower() in rule_lower:
-                keywords.append(kw.lower())
-        return keywords
-
     async def get_stats(self) -> dict:
-        """获取 Know-how 统计"""
         all_rules = await storage.list_knowhow_rules(active_only=False)
-        active = [r for r in all_rules if r.get("is_active")]
+        if all_rules:
+            await self._sync_categories_from_rules()
+        active = [rule for rule in all_rules if rule.get("is_active")]
         categories = [item["name"] for item in await storage.list_knowhow_categories()]
-        total_hits = sum(r.get("hit_count", 0) for r in all_rules)
+        total_hits = sum(rule.get("hit_count", 0) for rule in all_rules)
         return {
             "total_rules": len(all_rules),
             "active_rules": len(active),
@@ -331,56 +823,90 @@ class KnowhowService:
         }
 
     async def list_categories(self) -> list[dict]:
-        """????????????"""
         all_rules = await storage.list_knowhow_rules(active_only=False)
+        if all_rules:
+            await self._sync_categories_from_rules()
         counts: dict[str, int] = {}
         for rule in all_rules:
-            cat = rule["category"]
-            counts[cat] = counts.get(cat, 0) + 1
+            category = self._normalize_text(rule.get("category")) or UNCATEGORIZED
+            counts[category] = counts.get(category, 0) + 1
         categories = await storage.list_knowhow_categories()
-        return [
-            {"name": item["name"], "rule_count": counts.get(item["name"], 0)}
-            for item in categories
-        ]
+        return [self._serialize_category(item, counts.get(item["name"], 0)) for item in categories]
 
-    async def create_category(self, name: str) -> dict:
-        normalized = str(name or "").strip()
+    async def create_category(
+        self,
+        name: str,
+        description: str = "",
+        aliases: Any = None,
+        example_queries: Any = None,
+        applies_to: str = "",
+    ) -> dict:
+        normalized = self._normalize_text(name)
         if not normalized:
-            raise ValueError("???????")
-        await storage.ensure_knowhow_category(normalized)
-        return {"name": normalized, "rule_count": 0}
+            raise ValueError("分类名称不能为空")
+        await storage.ensure_knowhow_category(
+            normalized,
+            description=self._normalize_text(description),
+            aliases=self._dump_list(aliases),
+            example_queries=self._dump_list(example_queries),
+            applies_to=self._normalize_text(applies_to),
+        )
+        return {
+            "name": normalized,
+            "description": self._normalize_text(description),
+            "aliases": self._normalize_list(aliases),
+            "example_queries": self._normalize_list(example_queries),
+            "applies_to": self._normalize_text(applies_to),
+            "rule_count": 0,
+        }
+
+    async def update_category(self, name: str, updates: dict[str, Any]) -> dict:
+        normalized_name = self._normalize_text(name)
+        if not normalized_name:
+            raise ValueError("分类名称不能为空")
+        existing = {item["name"]: item for item in await self.list_categories()}
+        if normalized_name not in existing:
+            raise ValueError("分类不存在")
+
+        payload: dict[str, Any] = {}
+        if "description" in updates:
+            payload["description"] = self._normalize_text(updates.get("description"))
+        if "aliases" in updates:
+            payload["aliases"] = self._dump_list(updates.get("aliases"))
+        if "example_queries" in updates:
+            payload["example_queries"] = self._dump_list(updates.get("example_queries"))
+        if "applies_to" in updates:
+            payload["applies_to"] = self._normalize_text(updates.get("applies_to"))
+        await storage.update_knowhow_category_profile(normalized_name, **payload)
+        refreshed = {item["name"]: item for item in await self.list_categories()}
+        return refreshed[normalized_name]
 
     async def rename_category(self, old_name: str, new_name: str) -> int:
-        """??????? old_name ??????? new_name????????"""
-        await storage.rename_knowhow_category(old_name, new_name)
+        normalized_new_name = self._normalize_text(new_name)
+        if not normalized_new_name:
+            raise ValueError("新分类名称不能为空")
+        await storage.rename_knowhow_category(old_name, normalized_new_name)
         cursor = await storage.db.execute(
             "UPDATE knowhow_rules SET category=?, updated_at=? WHERE category=?",
-            (new_name, datetime.now(timezone.utc).isoformat(), old_name),
+            (normalized_new_name, datetime.now(timezone.utc).isoformat(), old_name),
         )
         await storage.db.commit()
+        await self._refresh_category_profile(normalized_new_name)
         return cursor.rowcount
 
     async def delete_category(self, name: str, delete_rules: bool = True) -> int:
-        """
-        删除分类。
-        delete_rules=True：连同该分类下所有规则一起删除（默认）。
-        delete_rules=False：仅将规则的 category 清空（置为空字符串），保留规则本身。
-        返回受影响行数。
-        """
         if delete_rules:
-            cursor = await storage.db.execute(
-                "DELETE FROM knowhow_rules WHERE category=?", (name,)
-            )
+            cursor = await storage.db.execute("DELETE FROM knowhow_rules WHERE category=?", (name,))
         else:
             cursor = await storage.db.execute(
-                "UPDATE knowhow_rules SET category='未分类', updated_at=? WHERE category=?",
-                (datetime.now(timezone.utc).isoformat(), name),
+                "UPDATE knowhow_rules SET category=?, updated_at=? WHERE category=?",
+                (UNCATEGORIZED, datetime.now(timezone.utc).isoformat(), name),
             )
-            await storage.ensure_knowhow_category("未分类")
+            await storage.ensure_knowhow_category(UNCATEGORIZED)
+            await self._refresh_category_profile(UNCATEGORIZED)
         await storage.delete_knowhow_category(name)
         await storage.db.commit()
         return cursor.rowcount
 
 
-# 全局单例
 knowhow_service = KnowhowService()

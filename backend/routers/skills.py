@@ -23,6 +23,7 @@ from services.skill_manager import _BACKEND_SKILLS_DIR, _USER_SKILLS_DIR, skill_
 from services.skill_matcher import skill_matcher
 from services.storage import storage
 from routers.auth import get_current_user
+from utils.text_utils import slugify_preserving_han
 
 router = APIRouter()
 
@@ -88,7 +89,7 @@ async def list_skills(builtin_only: bool = False, user: dict = Depends(get_curre
 async def get_skill(skill_id: str, user: dict = Depends(get_current_user)) -> dict:
     skill = await _resolve_skill_for_user(skill_id, user)
     if not skill:
-        raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' 未找到")
+        raise HTTPException(status_code=404, detail=f"Skill “{skill_id}”未找到")
     return _serialize_skill_detail(skill)
 
 
@@ -96,7 +97,7 @@ async def get_skill(skill_id: str, user: dict = Depends(get_current_user)) -> di
 async def get_skill_content(skill_id: str, user: dict = Depends(get_current_user)) -> dict:
     skill = await _resolve_skill_for_user(skill_id, user)
     if not skill:
-        raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' 未找到")
+        raise HTTPException(status_code=404, detail=f"Skill “{skill_id}”未找到")
     if not skill.source_path:
         raise HTTPException(status_code=404, detail="Skill 源文件路径未知")
 
@@ -114,9 +115,7 @@ async def get_skill_content(skill_id: str, user: dict = Depends(get_current_user
 
 
 def _slugify(name: str) -> str:
-    slug = re.sub(r"[^\w\u4e00-\u9fff-]", "-", name)
-    slug = re.sub(r"-+", "-", slug).strip("-").lower()
-    return slug or "unnamed-skill"
+    return slugify_preserving_han(name)
 
 
 @router.post("/skills")
@@ -144,7 +143,7 @@ async def save_skill(request: SaveSkillRequest, user: dict = Depends(get_current
     return {
         "id": slug,
         "name": skill.name if skill else skill_name,
-        "message": f"Skill '{skill_name}' 已保存",
+        "message": f"Skill “{skill_name}”已保存",
         "source_path": str(file_path),
     }
 
@@ -157,7 +156,7 @@ async def update_skill(skill_id: str, request: SaveSkillRequest, user: dict = De
 
     skill = await _resolve_skill_for_user(skill_id, user)
     if not skill:
-        raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' 未找到")
+        raise HTTPException(status_code=404, detail=f"Skill “{skill_id}”未找到")
 
     if skill.is_builtin:
         _USER_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
@@ -172,7 +171,7 @@ async def update_skill(skill_id: str, request: SaveSkillRequest, user: dict = De
         return {
             "id": skill_id,
             "name": updated.name if updated else skill_id,
-            "message": f"Skill '{skill_id}' 已保存为用户版本（覆盖内置）",
+            "message": f"Skill “{skill_id}”已保存为用户版本（覆盖内置）",
         }
 
     if not skill.source_path:
@@ -188,7 +187,7 @@ async def update_skill(skill_id: str, request: SaveSkillRequest, user: dict = De
     return {
         "id": skill_id,
         "name": updated.name if updated else skill_id,
-        "message": f"Skill '{skill_id}' 已更新",
+        "message": f"Skill “{skill_id}”已更新",
     }
 
 
@@ -204,7 +203,7 @@ async def delete_skill(skill_id: str, user: dict = Depends(get_current_user)) ->
     """
     skill = await _resolve_skill_for_user(skill_id, user)
     if not skill:
-        raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' 未找到")
+        raise HTTPException(status_code=404, detail=f"Skill “{skill_id}”未找到")
     if not skill.source_path:
         raise HTTPException(status_code=404, detail="Skill 源文件路径未知")
 
@@ -238,7 +237,7 @@ async def delete_skill(skill_id: str, user: dict = Depends(get_current_user)) ->
             await storage.delete_skill_metadata(skill_id)
         return {
             "id": skill_id,
-            "message": f"Skill '{skill_id}' 已从列表隐藏（未修改内置源文件）",
+            "message": f"Skill “{skill_id}”已从列表隐藏（未修改内置源文件）",
             "deletion_mode": "builtin_tombstone",
         }
 
@@ -247,11 +246,11 @@ async def delete_skill(skill_id: str, user: dict = Depends(get_current_user)) ->
 
     if builtin_shadow_exists:
         await skill_manager.mark_builtin_deleted(skill_id)
-        message = f"Skill '{skill_id}' 已删除用户版本，并隐藏内置版本"
+        message = f"Skill “{skill_id}”已删除用户版本，并隐藏内置版本"
         deletion_mode = "user_delete_and_builtin_tombstone"
     else:
         await skill_manager.clear_builtin_deleted(skill_id)
-        message = f"Skill '{skill_id}' 已删除"
+        message = f"Skill “{skill_id}”已删除"
         deletion_mode = "user_delete"
 
     await skill_manager.reload()

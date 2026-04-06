@@ -15,7 +15,7 @@ from services.document_parsing.parsers.ocr_utils import (
 )
 
 
-LIST_ITEM_RE = re.compile(r"^([-\*\u2022]|\d+[.)])\s+")
+LIST_ITEM_RE = re.compile(r"^([-*•]|\d+[.)])\s+")
 
 
 class PdfParser:

@@ -477,12 +477,12 @@ export default function SettingsModal() {
   const handleImportPreset = (preset: SystemPromptPreset) => {
     setRoleDraft((d) => ({ ...d, system_prompt: preset.prompt }));
     setRoleSaved(false);
-    setPresetNotice({ ok: true, text: `已导入「${preset.name}」，点击保存生效` });
+    setPresetNotice({ ok: true, text: `已导入“${preset.name}”，点击保存生效` });
   };
 
   const handleDeletePreset = async (preset: SystemPromptPreset) => {
     const confirmed = await confirm({
-      title: `删除预设「${preset.name}」？`,
+      title: `删除预设“${preset.name}”？`,
       description: '删除后将无法再从预设库直接导入该提示词。',
       confirmLabel: '确认删除',
       tone: 'danger',
@@ -492,9 +492,9 @@ export default function SettingsModal() {
     try {
       await deleteSystemPromptPreset(preset.id);
       setPresets((prev) => prev.filter((p) => p.id !== preset.id));
-      setPresetNotice({ ok: true, text: '?????' });
+      setPresetNotice({ ok: true, text: '预设已删除' });
     } catch (e) {
-      setPresetNotice({ ok: false, text: (e as Error).message || '????' });
+      setPresetNotice({ ok: false, text: (e as Error).message || '删除预设失败' });
     } finally {
       setPresetDeleteId(null);
     }
@@ -516,7 +516,7 @@ export default function SettingsModal() {
       setRoleDraft((d) => ({ ...d, system_prompt: defaultPrompt }));
       setRoleSaved(false);
     } catch {
-      // ????
+      // 重置失败时保留当前编辑内容
     } finally {
       setPromptResetting(false);
     }

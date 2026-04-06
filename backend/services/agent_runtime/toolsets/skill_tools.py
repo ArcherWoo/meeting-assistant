@@ -43,7 +43,7 @@ def register_skill_tools(agent, policy) -> None:
                 steps=list(skill.steps),
                 output_template=skill.output_template,
             )
-            summary = f"已读取 Skill「{skill.name}」定义"
+            summary = f"已读取 Skill“{skill.name}”定义"
             ctx.deps.memory.used_tools.append("get_skill_definition")
             ctx.deps.memory.tool_calls.append(
                 AgentToolCallRecord(

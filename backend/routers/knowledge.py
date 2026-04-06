@@ -12,9 +12,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 
+from services.llm_profiles import get_runtime_llm_config
 from services.knowledge_service import knowledge_service
 from services.hybrid_search import hybrid_search
 from services.embedding_service import embedding_service
+from services.retrieval_planner import RetrievalPlannerSettings
 from services.storage import storage
 from routers.auth import get_current_user
 
@@ -63,21 +65,47 @@ def _collect_uploaded_files(
     return collected, batch_mode
 
 
-async def _build_embedding_fn():
-    """从数据库读取 Embedding 配置并返回可选 embedding_fn。"""
+async def _build_embedding_fn() -> tuple[Optional[object], dict]:
+    """返回 embedding_fn 及当前启用状态，优先单独 Embedding 配置，缺失时回退到活动 LLM 配置。"""
     emb_url = await storage.get_setting("embedding_api_url", "")
     emb_key = await storage.get_setting("embedding_api_key", "")
     emb_model = await storage.get_setting("embedding_model", "text-embedding-3-small")
 
-    if not (emb_url and emb_key):
-        return None
+    if emb_url and emb_key:
+        embedding_service.configure(api_url=emb_url, api_key=emb_key, model=emb_model)
 
-    embedding_service.configure(api_url=emb_url, api_key=emb_key, model=emb_model)
+        async def embedding_fn(texts: list) -> list:
+            return await embedding_service.embed_batch(texts)
 
-    async def embedding_fn(texts: list) -> list:
-        return await embedding_service.embed_batch(texts)
+        return embedding_fn, {
+            "enabled": True,
+            "source": "embedding_settings",
+            "model": emb_model or "text-embedding-3-small",
+        }
 
-    return embedding_fn
+    llm_runtime = await get_runtime_llm_config()
+    if llm_runtime["api_url"] and llm_runtime["api_key"]:
+        fallback_model = "text-embedding-3-small"
+        embedding_service.configure(
+            api_url=llm_runtime["api_url"],
+            api_key=llm_runtime["api_key"],
+            model=fallback_model,
+        )
+
+        async def embedding_fn(texts: list) -> list:
+            return await embedding_service.embed_batch(texts)
+
+        return embedding_fn, {
+            "enabled": True,
+            "source": "active_llm_profile",
+            "model": fallback_model,
+        }
+
+    return None, {
+        "enabled": False,
+        "source": "disabled",
+        "model": "",
+    }
 
 
 async def _validate_and_read_upload(file: UploadFile) -> tuple[str, bytes]:
@@ -116,6 +144,7 @@ async def ingest_file(
         raise HTTPException(status_code=400, detail="至少上传一个文件")
 
     embedding_fn = None
+    embedding_status = {"enabled": False, "source": "disabled", "model": ""}
     embedding_fn_ready = False
     results: list[dict] = []
     errors: list[dict] = []
@@ -126,7 +155,7 @@ async def ingest_file(
             try:
                 validated_filename, content = await _validate_and_read_upload(upload)
                 if not embedding_fn_ready:
-                    embedding_fn = await _build_embedding_fn()
+                    embedding_fn, embedding_status = await _build_embedding_fn()
                     embedding_fn_ready = True
                 result = await knowledge_service.ingest_file(
                     file_content=content,
@@ -136,6 +165,7 @@ async def ingest_file(
                     owner_id=user.get("id"),
                     is_encrypted=is_encrypted,
                 )
+                result["embedding_status"] = dict(embedding_status)
                 results.append(result)
             except ValueError as e:
                 errors.append({"filename": filename, "error": str(e)})
@@ -167,10 +197,20 @@ async def query_knowledge(request: QueryRequest, user: dict = Depends(get_curren
     混合检索 - SQLite 精确查询 + LanceDB 语义检索
     """
     try:
+        llm_runtime = await get_runtime_llm_config(
+            api_url=request.api_url,
+            api_key=request.api_key,
+            model="",
+        )
         results = await hybrid_search.search(
             query=request.query,
             category=request.category,
             limit=request.top_k,
+            llm_settings=RetrievalPlannerSettings(
+                api_url=llm_runtime["api_url"],
+                api_key=llm_runtime["api_key"],
+                model=llm_runtime["model"],
+            ),
         )
         return results
     except Exception as e:
@@ -183,6 +223,11 @@ async def get_stats(user: dict = Depends(get_current_user)) -> dict:
     """获取知识库统计信息"""
     try:
         stats = await knowledge_service.get_stats()
+        emb_url = await storage.get_setting("embedding_api_url", "")
+        emb_key = await storage.get_setting("embedding_api_key", "")
+        emb_model = await storage.get_setting("embedding_model", "text-embedding-3-small")
+        stats["embedding_configured"] = bool(emb_url and emb_key)
+        stats["embedding_model"] = emb_model or "text-embedding-3-small"
         return stats
     except Exception as e:
         logger.error(f"获取统计失败: {e}")

@@ -498,7 +498,7 @@ export async function createKnowhowCategory(
     body: JSON.stringify({ name }),
   });
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '??????' }));
+    const error = await res.json().catch(() => ({ detail: '创建分类失败' }));
     throw new Error(error.detail);
   }
   return res.json();
@@ -595,7 +595,7 @@ export async function resetSystemPrompt(
 
 export async function listSystemPromptPresets(): Promise<SystemPromptPreset[]> {
   const res = await authFetch(`${getBaseUrl()}/settings/system-prompt-presets`);
-  if (!res.ok) throw new Error('鑾峰彇 System Prompt 棰勮澶辫触');
+  if (!res.ok) throw new Error('获取 System Prompt 预设失败');
   const data = await res.json();
   return Array.isArray(data) ? data : (data.presets ?? []);
 }
@@ -611,7 +611,7 @@ export async function createSystemPromptPreset(
     body: JSON.stringify({ name, role_id: roleId, prompt }),
   });
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '淇濆瓨棰勮澶辫触' }));
+    const error = await res.json().catch(() => ({ detail: '保存预设失败' }));
     throw new Error(error.detail);
   }
   return res.json();
@@ -622,7 +622,7 @@ export async function deleteSystemPromptPreset(presetId: string): Promise<{ id: 
     method: 'DELETE',
   });
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '鍒犻櫎棰勮澶辫触' }));
+    const error = await res.json().catch(() => ({ detail: '删除预设失败' }));
     throw new Error(error.detail);
   }
   return res.json();
@@ -962,7 +962,7 @@ export async function agentExecute(
           const event = JSON.parse(data) as AgentExecutionEvent;
           onEvent(event);
         } catch {
-          // ????????
+          // 忽略无法解析的事件行
         }
       }
       return;

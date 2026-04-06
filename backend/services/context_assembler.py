@@ -11,6 +11,7 @@ from typing import Any, List, Optional, Protocol
 
 from services.access_control import filter_accessible_skills, is_admin
 from services.hybrid_search import hybrid_search
+from services.knowhow_router import knowhow_router
 from services.knowhow_service import knowhow_service
 from services.retrieval_planner import (
     RetrievalPlan,
@@ -21,6 +22,7 @@ from services.retrieval_planner import (
 )
 from services.skill_manager import skill_manager
 from services.skill_matcher import skill_matcher
+from utils.text_utils import extract_han_segments
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +80,9 @@ class AssembledContext:
     @staticmethod
     def _format_knowhow_rule(rule: dict, index: int) -> str:
         weight_icon = "⚠️" if int(rule.get("weight", 0) or 0) >= 3 else "ℹ️"
-        return f"{weight_icon} [{index}] {rule.get('rule_text', '')}"
+        category = str(rule.get("category") or "").strip()
+        category_prefix = f"({category}) " if category and category != "未分类" else ""
+        return f"{weight_icon} [{index}] {category_prefix}{rule.get('rule_text', '')}"
 
     @staticmethod
     def _format_knowledge_result(result: dict, index: int) -> str:
@@ -510,7 +514,7 @@ class ContextAssembler:
         )
         candidates.extend(re.findall(r"[a-z0-9][a-z0-9_.-]{1,}", normalized))
 
-        for segment in re.findall(r"[\u4e00-\u9fff]{2,}", normalized):
+        for segment in extract_han_segments(normalized, min_length=2):
             cleaned = segment
             for stopword in sorted(self.QUERY_STOPWORDS, key=len, reverse=True):
                 cleaned = cleaned.replace(stopword, " ")
@@ -613,6 +617,7 @@ class ContextAssembler:
             self._collect_surface_results(
                 surface="knowledge",
                 actions=knowledge_actions,
+                planner_settings=planner_settings,
                 category=category,
                 trace_handler=trace_handler,
                 user=user,
@@ -622,6 +627,7 @@ class ContextAssembler:
             self._collect_surface_results(
                 surface="knowhow",
                 actions=knowhow_actions,
+                planner_settings=planner_settings,
                 trace_handler=trace_handler,
                 user=user,
             )
@@ -700,6 +706,7 @@ class ContextAssembler:
         surface: RetrievalSurface,
         actions: list[RetrievalPlanAction],
         trace_handler: RetrievalTraceHandler | None,
+        planner_settings: RetrievalPlannerSettings | None = None,
         category: Optional[str] = None,
         user: Optional[dict] = None,
     ) -> list[dict]:
@@ -721,14 +728,24 @@ class ContextAssembler:
             if surface == "knowledge":
                 result_sets = await asyncio.gather(
                     *[
-                        self.search_knowledge(action.query, category=category, limit=action.limit)
+                        self.search_knowledge(
+                            action.query,
+                            category=category,
+                            limit=action.limit,
+                            planner_settings=planner_settings,
+                        )
                         for action in actions
                     ]
                 )
             elif surface == "knowhow":
                 result_sets = await asyncio.gather(
                     *[
-                        self.get_knowhow_rules(action.query, limit=action.limit, user=user)
+                        self.get_knowhow_rules(
+                            action.query,
+                            limit=action.limit,
+                            user=user,
+                            planner_settings=planner_settings,
+                        )
                         for action in actions
                     ]
                 )
@@ -1024,17 +1041,29 @@ class ContextAssembler:
         *,
         category: Optional[str] = None,
         limit: int = 5,
+        planner_settings: RetrievalPlannerSettings | None = None,
     ) -> List[dict]:
-        return await self._search_knowledge(query, category=category, limit=limit)
+        return await self._search_knowledge(
+            query,
+            category=category,
+            limit=limit,
+            planner_settings=planner_settings,
+        )
 
     async def _search_knowledge(
         self,
         query: str,
         category: Optional[str] = None,
         limit: int = 5,
+        planner_settings: RetrievalPlannerSettings | None = None,
     ) -> List[dict]:
         try:
-            results = await hybrid_search.search(query=query, category=category, limit=limit)
+            results = await hybrid_search.search(
+                query=query,
+                category=category,
+                limit=limit,
+                llm_settings=planner_settings,
+            )
             combined: list[dict] = []
             seen_ids: set[str] = set()
             dedup_counter = 0
@@ -1068,10 +1097,28 @@ class ContextAssembler:
             logger.warning("[ContextAssembler] knowledge search failed: %s", exc, exc_info=True)
             return []
 
-    async def get_knowhow_rules(self, query: str, *, limit: int = 5, user: Optional[dict] = None) -> List[dict]:
-        return await self._get_knowhow_rules(query, limit=limit, user=user)
+    async def get_knowhow_rules(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        user: Optional[dict] = None,
+        planner_settings: RetrievalPlannerSettings | None = None,
+    ) -> List[dict]:
+        return await self._get_knowhow_rules(
+            query,
+            limit=limit,
+            user=user,
+            planner_settings=planner_settings,
+        )
 
-    async def _get_knowhow_rules(self, query: str, limit: int = 5, user: Optional[dict] = None) -> List[dict]:
+    async def _get_knowhow_rules(
+        self,
+        query: str,
+        limit: int = 5,
+        user: Optional[dict] = None,
+        planner_settings: RetrievalPlannerSettings | None = None,
+    ) -> List[dict]:
         try:
             if isinstance(user, dict):
                 rules = await knowhow_service.list_rules(
@@ -1082,42 +1129,81 @@ class ContextAssembler:
                 )
             else:
                 rules = await knowhow_service.list_rules(active_only=True)
-            query_terms = self._extract_query_terms(query)
-            query_text = self._normalize_rule_text(query)
-            if not rules or not query_terms:
+            if not rules:
                 logger.debug("[ContextAssembler] skip knowhow injection because query has no useful terms")
                 return []
-
-            scored_rules: list[tuple[float, dict]] = []
-            for rule in rules:
-                score = self._score_knowhow_rule(query_terms, query_text, rule)
-                if score < 2.0:
-                    continue
-                weighted_score = (
-                    score
-                    + float(rule.get("weight", 0)) * 0.15
-                    + float(rule.get("hit_count", 0)) * 0.01
+            try:
+                categories = await knowhow_service.list_categories()
+            except Exception:
+                logger.debug(
+                    "[ContextAssembler] knowhow categories unavailable, fall back to rule-only routing",
+                    exc_info=True,
                 )
-                scored_rules.append((weighted_score, rule))
-
-            scored_rules.sort(
-                key=lambda item: (
-                    item[0],
-                    int(item[1].get("weight", 0)),
-                    int(item[1].get("hit_count", 0)),
-                ),
-                reverse=True,
-            )
-            relevant_rules = [rule for _, rule in scored_rules]
+                categories = None
+            if categories is None:
+                relevant_rules = self._select_knowhow_rules_without_profiles(
+                    query=query,
+                    rules=rules,
+                    limit=limit,
+                )
+                strategy = "legacy_rule_only"
+                routed_categories: list[str] = []
+            else:
+                routing = await knowhow_router.retrieve_rules(
+                    query,
+                    rules,
+                    category_profiles=categories,
+                    limit=limit,
+                    settings=planner_settings,
+                )
+                relevant_rules = list(routing.rules)
+                strategy = routing.decision.strategy
+                routed_categories = list(routing.decision.categories)
             logger.debug(
-                "[ContextAssembler] knowhow rules active=%s relevant=%s",
+                "[ContextAssembler] knowhow rules active=%s relevant=%s strategy=%s categories=%s",
                 len(rules),
                 len(relevant_rules),
+                strategy,
+                routed_categories,
             )
-            return relevant_rules[:limit]
+            return relevant_rules
         except Exception as exc:
             logger.warning("[ContextAssembler] knowhow fetch failed: %s", exc, exc_info=True)
             return []
+
+    def _select_knowhow_rules_without_profiles(
+        self,
+        *,
+        query: str,
+        rules: list[dict],
+        limit: int,
+    ) -> List[dict]:
+        query_terms = self._extract_query_terms(query)
+        query_text = self._normalize_rule_text(query)
+        scored_rules: list[tuple[float, dict]] = []
+
+        for rule in rules:
+            score = self._score_knowhow_rule(query_terms, query_text, rule)
+            if score <= 0:
+                continue
+            score += float(rule.get("weight", 0)) * 0.12
+            score += float(rule.get("hit_count", 0)) * 0.005
+            scored_rules.append((score, rule))
+
+        scored_rules.sort(
+            key=lambda item: (
+                item[0],
+                float(item[1].get("weight", 0)),
+                float(item[1].get("hit_count", 0)),
+            ),
+            reverse=True,
+        )
+        if not scored_rules:
+            return []
+        top_score = scored_rules[0][0]
+        cutoff = max(0.1, top_score * 0.7)
+        filtered = [(score, rule) for score, rule in scored_rules if score >= cutoff] or scored_rules
+        return [rule for _, rule in filtered[:limit]]
 
     async def match_skills(self, query: str, *, limit: int = 3, user: Optional[dict] = None) -> List[dict]:
         return await self._match_skills(query, limit=limit, user=user)

@@ -113,7 +113,13 @@ CREATE INDEX IF NOT EXISTS idx_skill_usage ON skill_usage_logs(skill_id);
 CREATE TABLE IF NOT EXISTS knowhow_rules (
     id          TEXT PRIMARY KEY,
     category    TEXT NOT NULL,
+    title       TEXT DEFAULT '',
     rule_text   TEXT NOT NULL,
+    trigger_terms TEXT DEFAULT '[]',
+    exclude_terms TEXT DEFAULT '[]',
+    applies_when TEXT DEFAULT '',
+    not_applies_when TEXT DEFAULT '',
+    examples    TEXT DEFAULT '[]',
     weight      INTEGER DEFAULT 2,
     hit_count   INTEGER DEFAULT 0,
     confidence  REAL DEFAULT 0.5,
@@ -126,6 +132,10 @@ CREATE INDEX IF NOT EXISTS idx_knowhow_category ON knowhow_rules(category);
 
 CREATE TABLE IF NOT EXISTS knowhow_categories (
     name        TEXT PRIMARY KEY,
+    description TEXT DEFAULT '',
+    aliases     TEXT DEFAULT '[]',
+    example_queries TEXT DEFAULT '[]',
+    applies_to  TEXT DEFAULT '',
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -478,6 +488,10 @@ class StorageService:
         await self.db.execute(
             "CREATE TABLE IF NOT EXISTS knowhow_categories ("
             "name TEXT PRIMARY KEY, "
+            "description TEXT DEFAULT '', "
+            "aliases TEXT DEFAULT '[]', "
+            "example_queries TEXT DEFAULT '[]', "
+            "applies_to TEXT DEFAULT '', "
             "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
             "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
         )
@@ -490,6 +504,30 @@ class StorageService:
         knowledge_chunk_columns = await self._table_columns("knowledge_chunks")
         if "metadata_json" not in knowledge_chunk_columns:
             await self.db.execute("ALTER TABLE knowledge_chunks ADD COLUMN metadata_json TEXT DEFAULT '{}'")
+
+        knowhow_rule_columns = await self._table_columns("knowhow_rules")
+        if "title" not in knowhow_rule_columns:
+            await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN title TEXT DEFAULT ''")
+        if "trigger_terms" not in knowhow_rule_columns:
+            await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN trigger_terms TEXT DEFAULT '[]'")
+        if "exclude_terms" not in knowhow_rule_columns:
+            await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN exclude_terms TEXT DEFAULT '[]'")
+        if "applies_when" not in knowhow_rule_columns:
+            await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN applies_when TEXT DEFAULT ''")
+        if "not_applies_when" not in knowhow_rule_columns:
+            await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN not_applies_when TEXT DEFAULT ''")
+        if "examples" not in knowhow_rule_columns:
+            await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN examples TEXT DEFAULT '[]'")
+
+        knowhow_category_columns = await self._table_columns("knowhow_categories")
+        if "description" not in knowhow_category_columns:
+            await self.db.execute("ALTER TABLE knowhow_categories ADD COLUMN description TEXT DEFAULT ''")
+        if "aliases" not in knowhow_category_columns:
+            await self.db.execute("ALTER TABLE knowhow_categories ADD COLUMN aliases TEXT DEFAULT '[]'")
+        if "example_queries" not in knowhow_category_columns:
+            await self.db.execute("ALTER TABLE knowhow_categories ADD COLUMN example_queries TEXT DEFAULT '[]'")
+        if "applies_to" not in knowhow_category_columns:
+            await self.db.execute("ALTER TABLE knowhow_categories ADD COLUMN applies_to TEXT DEFAULT ''")
 
     # ===== RBAC User/Group CRUD =====
 
@@ -1635,6 +1673,12 @@ class StorageService:
         self,
         category: str,
         rule_text: str,
+        title: str = "",
+        trigger_terms: str = "[]",
+        exclude_terms: str = "[]",
+        applies_when: str = "",
+        not_applies_when: str = "",
+        examples: str = "[]",
         weight: int = 2,
         source: str = "user",
         owner_id: Optional[str] = None,
@@ -1642,28 +1686,61 @@ class StorageService:
         rid = gen_id()
         now = utc_now_iso()
         await self.db.execute(
-            "INSERT INTO knowhow_rules (id, category, rule_text, weight, source, owner_id, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (rid, category, rule_text, weight, source, owner_id, now, now),
+            "INSERT INTO knowhow_rules ("
+            "id, category, title, rule_text, trigger_terms, exclude_terms, applies_when, not_applies_when, "
+            "examples, weight, source, owner_id, created_at, updated_at"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                rid,
+                category,
+                title,
+                rule_text,
+                trigger_terms,
+                exclude_terms,
+                applies_when,
+                not_applies_when,
+                examples,
+                weight,
+                source,
+                owner_id,
+                now,
+                now,
+            ),
         )
         await self.db.commit()
         return rid
 
-    async def ensure_knowhow_category(self, name: str) -> None:
+    async def ensure_knowhow_category(
+        self,
+        name: str,
+        *,
+        description: str = "",
+        aliases: str = "[]",
+        example_queries: str = "[]",
+        applies_to: str = "",
+    ) -> None:
         normalized = str(name or "").strip()
         if not normalized:
             return
         now = utc_now_iso()
         await self.db.execute(
-            "INSERT INTO knowhow_categories (name, created_at, updated_at) VALUES (?,?,?) "
-            "ON CONFLICT(name) DO UPDATE SET updated_at=excluded.updated_at",
-            (normalized, now, now),
+            "INSERT INTO knowhow_categories ("
+            "name, description, aliases, example_queries, applies_to, created_at, updated_at"
+            ") VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET "
+            "description=CASE WHEN TRIM(COALESCE(excluded.description, '')) <> '' THEN excluded.description ELSE knowhow_categories.description END, "
+            "aliases=CASE WHEN TRIM(COALESCE(excluded.aliases, '')) <> '[]' THEN excluded.aliases ELSE knowhow_categories.aliases END, "
+            "example_queries=CASE WHEN TRIM(COALESCE(excluded.example_queries, '')) <> '[]' THEN excluded.example_queries ELSE knowhow_categories.example_queries END, "
+            "applies_to=CASE WHEN TRIM(COALESCE(excluded.applies_to, '')) <> '' THEN excluded.applies_to ELSE knowhow_categories.applies_to END, "
+            "updated_at=excluded.updated_at",
+            (normalized, description, aliases, example_queries, applies_to, now, now),
         )
         await self.db.commit()
 
     async def list_knowhow_categories(self) -> list[dict]:
         return await self._fetchall(
-            "SELECT name, created_at, updated_at FROM knowhow_categories ORDER BY created_at ASC, name ASC"
+            "SELECT name, description, aliases, example_queries, applies_to, created_at, updated_at "
+            "FROM knowhow_categories ORDER BY created_at ASC, name ASC"
         )
 
     async def rename_knowhow_category(self, old_name: str, new_name: str) -> None:
@@ -1684,6 +1761,19 @@ class StorageService:
 
     async def delete_knowhow_category(self, name: str) -> None:
         await self.db.execute("DELETE FROM knowhow_categories WHERE name=?", (name,))
+        await self.db.commit()
+
+    async def update_knowhow_category_profile(self, name: str, **updates) -> None:
+        allowed = {"description", "aliases", "example_queries", "applies_to"}
+        fields = {key: value for key, value in updates.items() if key in allowed}
+        if not fields:
+            return
+        fields["updated_at"] = utc_now_iso()
+        set_clause = ", ".join(f"{key}=?" for key in fields)
+        await self.db.execute(
+            f"UPDATE knowhow_categories SET {set_clause} WHERE name=?",
+            (*fields.values(), name),
+        )
         await self.db.commit()
 
     async def list_knowhow_rules(

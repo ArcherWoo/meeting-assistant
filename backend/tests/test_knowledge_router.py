@@ -89,7 +89,24 @@ class KnowledgeRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["failed_count"], 1)
         self.assertEqual(result["results"][0]["import_id"], "import-1")
         self.assertEqual(result["errors"][0]["filename"], "invalid.exe")
+        self.assertEqual(result["results"][0]["embedding_status"]["enabled"], False)
         ingest_mock.assert_awaited_once()
+
+    async def test_build_embedding_fn_falls_back_to_active_llm_profile(self):
+        with patch.object(knowledge_router.storage, "get_setting", AsyncMock(side_effect=["", "", ""])):
+            with patch("routers.knowledge.get_runtime_llm_config", AsyncMock(return_value={
+                "api_url": "https://example.com/v1",
+                "api_key": "sk-test",
+                "model": "deepseek-chat",
+                "profile_id": "profile-1",
+                "profile": None,
+            })):
+                embedding_fn, status = await knowledge_router._build_embedding_fn()
+
+        self.assertIsNotNone(embedding_fn)
+        self.assertTrue(status["enabled"])
+        self.assertEqual(status["source"], "active_llm_profile")
+        self.assertEqual(status["model"], "text-embedding-3-small")
 
     async def test_ingest_file_single_invalid_upload_still_raises_http_error(self):
         upload = make_upload("invalid.exe", b"binary")

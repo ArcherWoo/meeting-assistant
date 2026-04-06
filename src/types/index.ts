@@ -325,7 +325,10 @@ export interface KnowledgeStats {
   total_ppt_imports: number;
   completed_imports: number;
   total_procurement_records: number;
+  total_text_chunks?: number;
   total_vector_chunks: number;
+  embedding_configured?: boolean;
+  embedding_model?: string;
 }
 
 export interface IngestResult {
@@ -334,6 +337,13 @@ export interface IngestResult {
   file_type?: string;
   extracted_count: number;
   chunks_count: number;
+  stored_chunks_count?: number;
+  vector_chunks_count?: number;
+  embedding_status?: {
+    enabled: boolean;
+    source: string;
+    model: string;
+  };
   slide_count?: number;
   text_length?: number;
   table_count?: number;

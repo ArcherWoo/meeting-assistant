@@ -105,7 +105,7 @@ function buildAttachmentContext(attachments?: Attachment[]): string {
       : '';
 
     return (
-      `\n\n---\n📎 附件${attachments.length > 1 ? ` #${index + 1}` : ''}「${attachment.fileName}」内容（${attachment.charCount ?? originalText.length} 字符）：\n\n${compacted.text}${extraNote}`
+      `\n\n---\n📎 附件${attachments.length > 1 ? ` #${index + 1}` : ''}“${attachment.fileName}”内容（${attachment.charCount ?? originalText.length} 字符）：\n\n${compacted.text}${extraNote}`
     );
   }).join('');
 }
@@ -251,7 +251,7 @@ export default function ChatArea() {
     message: Message,
     suggestion: SkillSuggestionEvent,
   ) => {
-    setPrefillText(`请使用「${suggestion.skill_name}」技能帮我处理`);
+    setPrefillText(`请使用“${suggestion.skill_name}”技能帮我处理`);
     void updateMessageMetadata(
       message.id,
       { skillSuggestion: undefined },

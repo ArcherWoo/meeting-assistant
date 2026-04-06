@@ -159,6 +159,91 @@ chat persistence or Prompt Template / Prompt Pack runtime support.
   - low emphasis until hover/focus
 - Current implementation lives in `src/components/chat/MessageBubble.tsx`.
 
+## Knowhow Routing in Chat
+
+- Chat-side knowhow retrieval no longer does a flat all-rules keyword sweep only.
+- `backend/services/knowhow_router.py` now adds a dedicated Phase 1 routing layer for knowhow:
+  - skip small talk and obvious non-rule document-analysis prompts
+  - route rule-oriented questions into the most likely knowhow categories first
+  - use category-scoped rule scoring instead of mixing the whole rule library together
+- The first gate is now effectively LLM-first for non-trivial queries when runtime LLM config is available:
+  - whether knowhow is needed at all
+  - which candidate categories are most relevant
+- Heuristic routing is still kept as fallback when the runtime LLM is unavailable, and direct rule-text scoring now backstops weak category-profile matches.
+- `backend/routers/chat.py` now passes runtime planner settings into `context_assembler.assemble(...)`, so chat retrieval planning and knowhow routing can both use LLM intent judgment when configured.
+- `backend/services/context_assembler.py` still remains the single integration point, but its knowhow path now delegates actual routing to `knowhow_router` before prompt injection.
+- Chat auto-retrieval still depends on a valid `role_id`; requests without `role_id` do not enable `knowledge/knowhow` surfaces.
+- Latest in-process integration check on a fresh runtime confirmed:
+  - `/api/knowhow/stats` returns a non-empty category list again for default rules
+  - chat with `role_id="copilot"` produced `knowledge_count=1` and `knowhow_count=3` in `context_metadata`
+
+## Knowhow Phase 2 Baseline
+
+- Knowhow is no longer modeled as only `category + rule_text + weight` for chat retrieval.
+- `backend/services/storage.py` and `backend/services/knowhow_service.py` now support richer Phase 2 fields:
+  - category profile metadata:
+    - `description`
+    - `aliases`
+    - `example_queries`
+    - `applies_to`
+  - rule metadata:
+    - `title`
+    - `trigger_terms`
+    - `exclude_terms`
+    - `applies_when`
+    - `not_applies_when`
+    - `examples`
+- `backend/routers/knowhow.py` now exposes these fields through rule CRUD plus `PUT /api/knowhow/categories/{name}/profile`.
+- Chat-side knowhow retrieval now uses category profiles as actual routing inputs, not just category names.
+- `backend/services/context_assembler.py` now passes knowhow category profiles into `knowhow_router.retrieve_rules(...)`.
+- `backend/services/knowhow_router.py` now adds a bounded LLM rule-judge stage after heuristic recall:
+  - route first
+  - score only routed-category rules
+  - optionally let the runtime LLM keep only the truly applicable subset
+- When category profiles are temporarily unavailable, chat still falls back to rule-only scoring instead of failing knowhow retrieval entirely.
+- Knowhow export now uses `schema_version = 2`.
+- The current product direction keeps the operator UX minimal:
+  - the form still centers on `category + rule_text (+ optional weight)`
+  - `backend/services/knowhow_service.py` now auto-enriches hidden retrieval metadata on save/import
+  - explicit operator-supplied fields still win, while blank fields are auto-derived
+  - category profiles are refreshed automatically from saved rules instead of requiring a heavy manual editor
+- Regression coverage was expanded for:
+  - Phase 2 rule/category payload fields
+  - category profile routing
+  - LLM-based candidate rule pruning
+
+## Embedding Runtime Baseline
+
+- Knowledge semantic retrieval is only truly available when two things are both true:
+  - knowledge chunks have already been vectorized into LanceDB
+  - the runtime has usable embedding credentials
+- Chat retrieval already had a runtime fallback for embedding configuration, but knowledge ingestion used to depend only on dedicated embedding settings.
+- `backend/routers/knowledge.py` now falls back to the active LLM profile when dedicated embedding settings are empty, using `text-embedding-3-small` as the embedding model target.
+- Knowledge stats now expose embedding visibility signals:
+  - `embedding_configured`
+  - `embedding_model`
+  - `total_text_chunks`
+  - `total_vector_chunks`
+- Knowledge ingest results now expose chunk diagnostics:
+  - `stored_chunks_count`
+  - `vector_chunks_count`
+  - `embedding_status`
+- The frontend knowledge panel in `src/components/layout/ContextPanel.tsx` now surfaces text chunk count and current embedding configuration state, so the operator can quickly tell whether semantic retrieval is even expected to work.
+
+## No-Embedding LLM Fallback
+
+- When knowledge semantic retrieval has no vector results but runtime LLM credentials are available, the system now falls back to LLM-based reranking instead of stopping at plain keyword order.
+- `backend/services/hybrid_search.py` now supports a fallback flow:
+  - gather structured / keyword candidates first
+  - if semantic retrieval is unavailable or empty
+  - ask the runtime LLM to rerank and filter the candidate set
+- This fallback is wired into both:
+  - chat-side knowledge retrieval through `backend/services/context_assembler.py`
+  - direct knowledge query API through `backend/routers/knowledge.py`
+- The fallback is intentionally bounded:
+  - it only reranks already recalled candidates
+  - it does not ask the model to search the whole corpus blindly
+
 ## Role Naming
 
 - Runtime chat and conversation APIs use `role_id` / `roleId` as the canonical role field.

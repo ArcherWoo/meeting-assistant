@@ -146,7 +146,7 @@ export default function AdminPanel() {
       setShowAddUser(false);
       setNewUser(EMPTY_NEW_USER);
       await refresh();
-      showToast('用户创建成功');
+      showToast('用户已创建');
     } catch (e) {
       setError((e as Error).message);
       showToast((e as Error).message, false);
@@ -192,7 +192,7 @@ export default function AdminPanel() {
       await updateUser(editingUser.id, payload);
       await refresh();
       handleCancelEditUser();
-      showToast('用户修改成功');
+      showToast('用户已更新');
     } catch (e) {
       setError((e as Error).message);
       showToast((e as Error).message, false);
@@ -204,12 +204,12 @@ export default function AdminPanel() {
   const handleDeleteUser = async (id: string) => {
     const targetUser = users.find((user) => user.id === id);
     if (targetUser?.username === DEFAULT_ADMIN_USERNAME) {
-      showToast('?? admin ??????', false);
+      showToast('默认 admin 账号不可删除', false);
       return;
     }
 
     const confirmed = await confirm({
-      title: `删除用户「${targetUser?.display_name || targetUser?.username || '未命名用户'}」？`,
+      title: `删除用户“${targetUser?.display_name || targetUser?.username || '未命名用户'}”？`,
       description: '删除后该账号将无法继续登录，操作不可恢复。',
       confirmLabel: '确认删除',
       tone: 'danger',
@@ -223,7 +223,7 @@ export default function AdminPanel() {
         handleCancelEditUser();
       }
       await refresh();
-      showToast('?????');
+      showToast('用户已删除');
     } catch (e) {
       setError((e as Error).message);
       showToast((e as Error).message, false);
@@ -265,7 +265,7 @@ export default function AdminPanel() {
       setShowAddGroup(false);
       setNewGroup(EMPTY_GROUP_FORM);
       await refresh();
-      showToast('用户组创建成功');
+      showToast('用户组已创建');
     } catch (e) {
       setError((e as Error).message);
       showToast((e as Error).message, false);
@@ -305,7 +305,7 @@ export default function AdminPanel() {
       });
       await refresh();
       handleCancelEditGroup();
-      showToast('用户组修改成功');
+      showToast('用户组已更新');
     } catch (e) {
       setError((e as Error).message);
       showToast((e as Error).message, false);
@@ -317,7 +317,7 @@ export default function AdminPanel() {
   const handleDeleteGroup = async (id: string) => {
     const targetGroup = groups.find((group) => group.id === id);
     const confirmed = await confirm({
-      title: `删除用户组「${targetGroup?.name || '未命名用户组'}」？`,
+      title: `删除用户组“${targetGroup?.name || '未命名用户组'}”？`,
       description: '删除后，关联用户组授权将一并失效，请确认当前分组已不再使用。',
       confirmLabel: '确认删除',
       tone: 'danger',
@@ -331,7 +331,7 @@ export default function AdminPanel() {
         handleCancelEditGroup();
       }
       await refresh();
-      showToast('??????');
+      showToast('用户组已删除');
     } catch (e) {
       setError((e as Error).message);
       showToast((e as Error).message, false);
@@ -841,7 +841,7 @@ function GrantsTab({ users, groups }: { users: User[]; groups: Group[] }) {
       const fetchedGrants = await listGrants(resType, selectedId);
       setGrants(fetchedGrants);
       setNewGrantee('');
-      showToast('授权成功');
+      showToast('授权已更新');
     } catch (e) {
       setError((e as Error).message);
       showToast((e as Error).message, false);

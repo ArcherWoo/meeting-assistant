@@ -7,18 +7,25 @@ Combines three retrieval channels:
 3. LanceDB semantic search when embeddings are configured
 """
 import logging
+import json
 import re
 from typing import List, Optional
 
 from services.embedding_service import embedding_service
 from services.knowledge_service import knowledge_service
+from services.llm_service import LLMService
+from services.retrieval_planner import RetrievalPlannerSettings
 from services.storage import storage
+from utils.text_utils import extract_han_segments
 
 logger = logging.getLogger(__name__)
 
 
 class HybridSearchService:
     """Hybrid retrieval for structured records and document chunks."""
+
+    def __init__(self, llm_service: LLMService | None = None) -> None:
+        self._llm_service = llm_service or LLMService()
 
     MAX_QUERY_TERMS = 14
     MAX_CHINESE_SUBTERM_LENGTH = 6
@@ -112,7 +119,7 @@ class HybridSearchService:
         )
         candidates.extend(re.findall(r"[a-z0-9][a-z0-9_.-]{1,}", normalized))
 
-        for segment in re.findall(r"[\u4e00-\u9fff]{2,}", normalized):
+        for segment in extract_han_segments(normalized, min_length=2):
             cleaned = segment
             for stopword in sorted(self.QUERY_STOPWORDS, key=len, reverse=True):
                 cleaned = cleaned.replace(stopword, " ")
@@ -154,21 +161,41 @@ class HybridSearchService:
         category: Optional[str] = None,
         supplier: Optional[str] = None,
         limit: int = 10,
+        llm_settings: RetrievalPlannerSettings | None = None,
     ) -> dict:
         """
         Execute hybrid search and return:
         {"query": str, "structured": [...], "semantic": [...]}
         """
+        planner_settings = llm_settings or RetrievalPlannerSettings()
+        candidate_limit = limit
+        if planner_settings.is_configured:
+            candidate_limit = max(limit, min(limit * 2, 10))
+
         structured = await self._structured_search(
-            query, category=category, supplier=supplier, limit=limit,
+            query, category=category, supplier=supplier, limit=candidate_limit,
         )
 
-        remaining = max(limit - len(structured), 0)
+        remaining = max(candidate_limit - len(structured), 0)
         if remaining > 0:
             text_matches = await self._text_search(query, limit=remaining)
-            structured = self._merge_unique(structured, text_matches, limit)
+            structured = self._merge_unique(structured, text_matches, candidate_limit)
 
         semantic = await self._semantic_search(query, limit=min(limit, 5))
+
+        if not semantic and planner_settings.is_configured and structured:
+            reranked = await self._llm_rerank_candidates(
+                query=query,
+                candidates=structured,
+                limit=limit,
+                settings=planner_settings,
+            )
+            if reranked:
+                structured = reranked
+            else:
+                structured = structured[:limit]
+        else:
+            structured = structured[:limit]
 
         if not structured and not semantic:
             structured = await self._legacy_import_notice(limit=min(limit, 3))
@@ -178,6 +205,114 @@ class HybridSearchService:
             "structured": structured,
             "semantic": semantic,
         }
+
+    @staticmethod
+    def _candidate_snippet(item: dict) -> str:
+        parts = [
+            str(item.get("item_name") or "").strip(),
+            str(item.get("category") or "").strip(),
+            str(item.get("supplier") or "").strip(),
+            str(item.get("raw_text") or "").strip(),
+            str(item.get("content") or "").strip(),
+            str(item.get("source_file") or "").strip(),
+        ]
+        return " ".join(part for part in parts if part)[:320]
+
+    def _build_rerank_prompt(self, query: str, candidates: list[dict], limit: int) -> list[dict]:
+        lines: list[str] = []
+        for index, item in enumerate(candidates, 1):
+            lines.append(
+                f"[{index}] id={item.get('id') or ''}\n"
+                f"source={item.get('source_file') or 'structured-record'}\n"
+                f"snippet={self._candidate_snippet(item)}"
+            )
+
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "你是企业知识检索重排器。"
+                    "给定用户问题和候选知识片段，只返回最相关的结果。"
+                    "请只输出 JSON，不要输出 Markdown。"
+                    '格式：{"selected_ids":["id1","id2"],"notes":"一句话"}。'
+                    "如果都不相关，selected_ids 返回空数组。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"用户问题：{query}\n"
+                    f"最多保留 {limit} 条候选。\n"
+                    "候选片段：\n"
+                    + "\n\n".join(lines)
+                ),
+            },
+        ]
+
+    async def _llm_rerank_candidates(
+        self,
+        *,
+        query: str,
+        candidates: list[dict],
+        limit: int,
+        settings: RetrievalPlannerSettings,
+    ) -> list[dict]:
+        if not candidates:
+            return []
+        try:
+            response = await self._llm_service.chat(
+                messages=self._build_rerank_prompt(query, candidates, limit),
+                model=settings.model.strip() or "gpt-4o",
+                temperature=0.1,
+                max_tokens=600,
+                api_url=settings.api_url,
+                api_key=settings.api_key,
+            )
+            text = self._llm_service.extract_text_content(response)
+            if not text:
+                return []
+            payload = json.loads(self._extract_json_payload(text))
+            raw_ids = payload.get("selected_ids") or []
+            if not isinstance(raw_ids, list):
+                return []
+
+            candidates_by_id = {
+                str(item.get("id") or ""): item
+                for item in candidates
+                if str(item.get("id") or "")
+            }
+            selected: list[dict] = []
+            seen: set[str] = set()
+            for raw_id in raw_ids:
+                candidate_id = str(raw_id or "").strip()
+                if not candidate_id or candidate_id in seen:
+                    continue
+                item = candidates_by_id.get(candidate_id)
+                if item is None:
+                    continue
+                seen.add(candidate_id)
+                enriched = dict(item)
+                enriched["rerank_strategy"] = "llm_fallback"
+                selected.append(enriched)
+                if len(selected) >= limit:
+                    break
+            return selected
+        except Exception as exc:
+            logger.info("LLM rerank fallback failed: %s", exc)
+            return []
+
+    @staticmethod
+    def _extract_json_payload(text: str) -> str:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+            stripped = re.sub(r"\s*```$", "", stripped)
+
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            raise ValueError(f"rerank response did not contain JSON: {text[:200]}")
+        return stripped[start:end + 1]
 
     async def _structured_search(
         self,

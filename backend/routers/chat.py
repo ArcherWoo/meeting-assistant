@@ -16,6 +16,7 @@ from services.storage import storage
 from services.context_assembler import context_assembler, AssembledContext
 from services.embedding_service import embedding_service
 from services.access_control import can_access_role, is_admin
+from services.retrieval_planner import RetrievalPlannerSettings
 from services.role_config import resolve_chat_capabilities
 
 from services.system_prompt_defaults import DEFAULT_SYSTEM_PROMPTS
@@ -268,6 +269,7 @@ async def _assemble_context(
     role: Optional[dict] = None,
     runtime_api_url: str = "",
     runtime_api_key: str = "",
+    runtime_model: str = "",
 ) -> AssembledContext:
     """独立的上下文组装步骤，仅 Chat 自动增强开启时才执行检索。"""
     role_id = _request_role_id(request)
@@ -301,6 +303,11 @@ async def _assemble_context(
         return await context_assembler.assemble(
             user_query=rag_query,
             role_id=role_id,
+            planner_settings=RetrievalPlannerSettings(
+                api_url=runtime_api_url,
+                api_key=runtime_api_key,
+                model=runtime_model or request.model,
+            ),
             enabled_surfaces=enabled_surfaces,
             user=user,
         )
@@ -427,6 +434,7 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
                     role,
                     runtime_api_url=llm_config["api_url"],
                     runtime_api_key=llm_config["api_key"],
+                    runtime_model=llm_config["model"],
                 )
 
                 if assembled_ctx.has_context:
@@ -482,6 +490,7 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
             role,
             runtime_api_url=llm_config["api_url"],
             runtime_api_key=llm_config["api_key"],
+            runtime_model=llm_config["model"],
         )
         prompt_ctx = AssembledContext()
 
