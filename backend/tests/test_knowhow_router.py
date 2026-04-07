@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import unittest
 from pathlib import Path
@@ -180,6 +181,77 @@ class KnowhowRouterApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(added, 0)
         self.assertGreater(stats["total_rules"], 0)
         self.assertTrue(stats["categories"])
+
+    async def test_initialize_migrates_legacy_knowhow_rules_before_owner_group_index_creation(self):
+        await storage.close()
+        storage._db_path.unlink(missing_ok=True)
+
+        legacy_db = sqlite3.connect(storage._db_path)
+        legacy_db.executescript(
+            """
+            CREATE TABLE workspaces (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                icon TEXT DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                is_archived INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE users (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                system_role TEXT DEFAULT 'user',
+                group_id TEXT,
+                can_manage_group_knowhow INTEGER DEFAULT 0,
+                is_active INTEGER DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE roles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                icon TEXT DEFAULT '',
+                description TEXT DEFAULT '',
+                system_prompt TEXT DEFAULT '',
+                agent_prompt TEXT DEFAULT '',
+                capabilities TEXT DEFAULT '[]',
+                chat_capabilities TEXT DEFAULT '[]',
+                agent_preflight TEXT DEFAULT '[]',
+                allowed_surfaces TEXT DEFAULT '["chat"]',
+                agent_allowed_tools TEXT DEFAULT '[]',
+                is_builtin INTEGER DEFAULT 0,
+                sort_order INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE knowhow_rules (
+                id TEXT PRIMARY KEY,
+                category TEXT NOT NULL,
+                rule_text TEXT NOT NULL,
+                weight INTEGER DEFAULT 2,
+                hit_count INTEGER DEFAULT 0,
+                confidence REAL DEFAULT 0.5,
+                source TEXT DEFAULT 'user',
+                is_active INTEGER DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        legacy_db.commit()
+        legacy_db.close()
+
+        await storage.initialize()
+
+        columns = await storage._table_columns("knowhow_rules")
+        self.assertIn("owner_id", columns)
+        self.assertIn("owner_group_id", columns)
 
 
 if __name__ == "__main__":

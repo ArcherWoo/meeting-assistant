@@ -1,18 +1,58 @@
 """
-LLM 服务 - OpenAI 兼容协议
-支持流式 SSE 和非流式响应，兼容 OpenAI / DeepSeek / 通义千问 / Ollama 等
+LLM 服务。
+
+通过 OpenAI 兼容协议与各类模型服务通信，支持：
+
+- 流式聊天
+- 非流式聊天
+- 模型列表获取
+- 轻量连接探测
 """
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
 import json
 from typing import Any, AsyncGenerator
+
 import httpx
+
+from services.runtime_controls import (
+    LLMConcurrencyBusyError,
+    llm_concurrency_controller,
+    runtime_limits,
+)
 
 
 class LLMService:
-    """LLM 对话服务，通过 OpenAI 兼容协议与各类模型通信"""
+    """统一的大模型访问服务。"""
+
+    _LIMITS = httpx.Limits(
+        max_connections=runtime_limits.llm_http_max_connections,
+        max_keepalive_connections=runtime_limits.llm_http_max_keepalive_connections,
+        keepalive_expiry=float(runtime_limits.llm_http_keepalive_expiry_sec),
+    )
+
+    def __init__(self) -> None:
+        try:
+            self._client = httpx.AsyncClient(
+                follow_redirects=True,
+                http2=True,
+                limits=self._LIMITS,
+            )
+        except ImportError:
+            self._client = httpx.AsyncClient(
+                follow_redirects=True,
+                limits=self._LIMITS,
+            )
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     @staticmethod
     def extract_text_content(payload: Any) -> str:
-        """尽量从 OpenAI 兼容响应中提取首条文本内容。"""
+        """尽量从兼容响应中提取第一段文本内容。"""
         if isinstance(payload, str):
             return payload.strip()
 
@@ -65,8 +105,7 @@ class LLMService:
             for item in output:
                 if not isinstance(item, dict):
                     continue
-                content = item.get("content")
-                text = _flatten_content(content)
+                text = _flatten_content(item.get("content"))
                 if text:
                     return text
 
@@ -161,29 +200,83 @@ class LLMService:
         except httpx.HTTPStatusError as exc:
             raise RuntimeError(cls._extract_error_message(response)) from exc
 
-    async def list_models(self, api_url: str, api_key: str) -> list[str]:
-        """获取 OpenAI 兼容接口可用模型列表"""
-        # GET 请求不需要 Content-Type
+    @staticmethod
+    def _build_timeout(*, connect: float, read: float, write: float = 10.0, pool: float = 5.0) -> httpx.Timeout:
+        return httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
+
+    @classmethod
+    def _model_list_timeout(cls) -> httpx.Timeout:
+        return cls._build_timeout(connect=4.0, read=6.0, write=4.0, pool=3.0)
+
+    @classmethod
+    def _chat_timeout(cls) -> httpx.Timeout:
+        return cls._build_timeout(connect=8.0, read=120.0, write=20.0, pool=5.0)
+
+    @classmethod
+    def _stream_timeout(cls) -> httpx.Timeout:
+        return cls._build_timeout(connect=8.0, read=180.0, write=20.0, pool=5.0)
+
+    @classmethod
+    def _probe_timeout(cls) -> httpx.Timeout:
+        return cls._build_timeout(connect=5.0, read=12.0, write=8.0, pool=3.0)
+
+    async def _fetch_model_ids(self, url: str, headers: dict[str, str]) -> list[str]:
+        response = await self._client.get(
+            url,
+            headers=headers,
+            timeout=self._model_list_timeout(),
+        )
+        self._raise_for_status_with_detail(response)
+        model_ids = self._extract_model_ids(response.json())
+        if not model_ids:
+            raise RuntimeError(f"{url} 未返回任何可用模型")
+        return model_ids
+
+    async def _list_models_impl(self, api_url: str, api_key: str) -> list[str]:
         headers = self._build_headers(api_key, include_content_type=False)
         candidate_urls = self._candidate_model_urls(api_url)
+
+        tasks = [
+            asyncio.create_task(self._fetch_model_ids(url, headers))
+            for url in candidate_urls
+        ]
+
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+
         errors: list[str] = []
+        for url, result in zip(candidate_urls, results):
+            if isinstance(result, list) and result:
+                return result
+            if isinstance(result, Exception):
+                errors.append(str(result))
+            else:
+                errors.append(f"{url} 未返回任何可用模型")
 
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            for url in candidate_urls:
-                try:
-                    response = await client.get(url, headers=headers)
-                    self._raise_for_status_with_detail(response)
-                    model_ids = self._extract_model_ids(response.json())
-                    if model_ids:
-                        return model_ids
-                    errors.append(f"{url} 未返回任何可用模型")
-                except Exception as exc:
-                    errors.append(str(exc))
+        raise RuntimeError("；".join(errors) if errors else "未能获取模型列表")
 
-        error_message = "；".join(errors) if errors else "未能获取模型列表"
-        raise RuntimeError(error_message)
+    async def list_models(
+        self,
+        api_url: str,
+        api_key: str,
+        *,
+        user_id: str | None = None,
+        request_kind: str = "lightweight",
+        _skip_limits: bool = False,
+    ) -> list[str]:
+        if _skip_limits:
+            return await self._list_models_impl(api_url=api_url, api_key=api_key)
 
-    async def stream_chat(
+        async with llm_concurrency_controller.acquire(kind=request_kind, user_id=user_id):
+            return await self._list_models_impl(api_url=api_url, api_key=api_key)
+
+    async def _stream_chat_impl(
         self,
         messages: list[dict],
         model: str,
@@ -192,10 +285,6 @@ class LLMService:
         api_url: str,
         api_key: str,
     ) -> AsyncGenerator[str, None]:
-        """
-        流式聊天 - 返回 SSE 格式数据流
-        每个 chunk 格式: data: {"choices":[{"delta":{"content":"..."}}]}
-        """
         url = f"{api_url.rstrip('/')}/chat/completions"
         headers = self._build_headers(api_key)
         payload = {
@@ -206,24 +295,23 @@ class LLMService:
             "stream": True,
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                async with client.stream("POST", url, json=payload, headers=headers) as response:
-                    self._raise_for_status_with_detail(response)
-                    async for line in response.aiter_lines():
-                        if line.startswith("data: "):
-                            data = line[6:]
-                            if data.strip() == "[DONE]":
-                                yield "data: [DONE]\n\n"
-                                return
-                            yield f"data: {data}\n\n"
-        except Exception as exc:
-            # 流中途出现异常时，通过 SSE 内嵌错误事件通知前端，
-            # 避免前端把连接断开误判为正常结束（onDone）
-            error_payload = json.dumps({"stream_error": str(exc)}, ensure_ascii=False)
-            yield f"data: {error_payload}\n\n"
+        async with self._client.stream(
+            "POST",
+            url,
+            json=payload,
+            headers=headers,
+            timeout=self._stream_timeout(),
+        ) as response:
+            self._raise_for_status_with_detail(response)
+            async for line in response.aiter_lines():
+                if line.startswith("data: "):
+                    data = line[6:]
+                    if data.strip() == "[DONE]":
+                        yield "data: [DONE]\n\n"
+                        return
+                    yield f"data: {data}\n\n"
 
-    async def chat(
+    async def stream_chat(
         self,
         messages: list[dict],
         model: str,
@@ -231,8 +319,51 @@ class LLMService:
         max_tokens: int,
         api_url: str,
         api_key: str,
+        *,
+        user_id: str | None = None,
+        request_kind: str = "stream",
+        _skip_limits: bool = False,
+    ) -> AsyncGenerator[str, None]:
+        try:
+            if _skip_limits:
+                async for chunk in self._stream_chat_impl(
+                    messages=messages,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    api_url=api_url,
+                    api_key=api_key,
+                ):
+                    yield chunk
+                return
+
+            async with llm_concurrency_controller.acquire(kind=request_kind, user_id=user_id):
+                async for chunk in self._stream_chat_impl(
+                    messages=messages,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    api_url=api_url,
+                    api_key=api_key,
+                ):
+                    yield chunk
+        except LLMConcurrencyBusyError:
+            raise
+        except Exception as exc:
+            error_payload = json.dumps({"stream_error": str(exc)}, ensure_ascii=False)
+            yield f"data: {error_payload}\n\n"
+
+    async def _chat_impl(
+        self,
+        messages: list[dict],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        api_url: str,
+        api_key: str,
+        *,
+        timeout: httpx.Timeout | None = None,
     ) -> dict:
-        """非流式聊天 - 返回完整响应"""
         url = f"{api_url.rstrip('/')}/chat/completions"
         headers = self._build_headers(api_key)
         payload = {
@@ -243,53 +374,157 @@ class LLMService:
             "stream": False,
         }
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(url, json=payload, headers=headers)
-            self._raise_for_status_with_detail(response)
-            return response.json()
+        response = await self._client.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=timeout or self._chat_timeout(),
+        )
+        self._raise_for_status_with_detail(response)
+        return response.json()
 
-    async def test_connection(self, api_url: str, api_key: str, model: str = "") -> dict[str, Any]:
-        """测试 API 连通性，并尽可能返回可用模型列表"""
-        normalized_model = model.strip()
+    async def chat(
+        self,
+        messages: list[dict],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        api_url: str,
+        api_key: str,
+        *,
+        timeout: httpx.Timeout | None = None,
+        user_id: str | None = None,
+        request_kind: str = "lightweight",
+        _skip_limits: bool = False,
+    ) -> dict:
+        if _skip_limits:
+            return await self._chat_impl(
+                messages=messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                api_url=api_url,
+                api_key=api_key,
+                timeout=timeout,
+            )
 
-        try:
-            available_models = await self.list_models(api_url=api_url, api_key=api_key)
-            if not available_models:
-                raise ValueError("接口已连通，但未返回任何可用模型")
+        async with llm_concurrency_controller.acquire(kind=request_kind, user_id=user_id):
+            return await self._chat_impl(
+                messages=messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                api_url=api_url,
+                api_key=api_key,
+                timeout=timeout,
+            )
 
-            selected_model = normalized_model or available_models[0]
-            return {
-                "model": selected_model,
-                "available_models": available_models,
-                "selected_model_available": selected_model in available_models,
-                "fallback": False,
-            }
-        except Exception as model_list_error:
+    async def _probe_model(self, api_url: str, api_key: str, model: str) -> dict[str, Any]:
+        return await self.chat(
+            messages=[{"role": "user", "content": "Reply with: pong"}],
+            model=model,
+            temperature=0.0,
+            max_tokens=1,
+            api_url=api_url,
+            api_key=api_key,
+            timeout=self._probe_timeout(),
+            _skip_limits=True,
+        )
+
+    async def test_connection(
+        self,
+        api_url: str,
+        api_key: str,
+        model: str = "",
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        async with llm_concurrency_controller.acquire(kind="lightweight", user_id=user_id):
+            normalized_model = model.strip()
+
             if not normalized_model:
-                raise RuntimeError(
-                    f"无法获取模型列表：{str(model_list_error)}。如果该服务不支持 /models，请先填写模型名再测试。"
-                ) from model_list_error
+                try:
+                    available_models = await self.list_models(
+                        api_url=api_url,
+                        api_key=api_key,
+                        _skip_limits=True,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"无法获取模型列表：{str(exc)}。如果该服务不支持 /models，请先填写模型名再测试。"
+                    ) from exc
+                if not available_models:
+                    raise RuntimeError("接口已连通，但未返回任何可用模型")
+                return {
+                    "model": available_models[0],
+                    "available_models": available_models,
+                    "selected_model_available": True,
+                    "fallback": False,
+                }
 
-            try:
-                result = await self.chat(
-                    messages=[{"role": "user", "content": "Hi"}],
-                    model=normalized_model,
-                    temperature=1.0,
-                    max_tokens=5,
+            model_task = asyncio.create_task(
+                self.list_models(
                     api_url=api_url,
                     api_key=api_key,
+                    _skip_limits=True,
                 )
-            except Exception as chat_error:
-                raise RuntimeError(
-                    f"模型列表接口不可用：{str(model_list_error)}；并且使用模型“{normalized_model}”进行轻量调用也失败：{str(chat_error)}"
-                ) from chat_error
+            )
+            try:
+                probe_result = await self._probe_model(api_url=api_url, api_key=api_key, model=normalized_model)
+            except Exception as probe_error:
+                available_models: list[str] = []
+                model_list_error: Exception | None = None
+                try:
+                    available_models = await model_task
+                except Exception as exc:  # pragma: no cover
+                    model_list_error = exc
 
-            resolved_model = result.get("model", normalized_model)
+                if available_models:
+                    if normalized_model not in available_models:
+                        raise RuntimeError(
+                            f"连接已建立，但填写的模型“{normalized_model}”不在服务返回的模型列表中。"
+                        ) from probe_error
+                    raise RuntimeError(
+                        f"模型“{normalized_model}”连通性测试失败：{str(probe_error)}"
+                    ) from probe_error
+
+                if model_list_error:
+                    raise RuntimeError(
+                        f"使用模型“{normalized_model}”进行轻量探测失败：{str(probe_error)}；"
+                        f"同时获取模型列表也失败：{str(model_list_error)}"
+                    ) from probe_error
+
+                raise RuntimeError(
+                    f"使用模型“{normalized_model}”进行轻量探测失败：{str(probe_error)}"
+                ) from probe_error
+
+            resolved_model = str(probe_result.get("model") or normalized_model).strip() or normalized_model
+
+            if model_task.done():
+                try:
+                    available_models = await model_task
+                except Exception:
+                    available_models = [resolved_model]
+                    fallback = True
+                else:
+                    if not available_models:
+                        available_models = [resolved_model]
+                        fallback = True
+                    else:
+                        fallback = False
+            else:
+                model_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await model_task
+                available_models = [resolved_model]
+                fallback = True
 
             return {
                 "model": resolved_model,
-                "available_models": [resolved_model],
-                "selected_model_available": True,
-                "fallback": True,
+                "available_models": available_models,
+                "selected_model_available": resolved_model in available_models or normalized_model in available_models,
+                "fallback": fallback,
             }
 
+
+llm_service = LLMService()

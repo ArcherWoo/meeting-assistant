@@ -6,7 +6,7 @@
 import type {
   Role, LLMConfig, LLMConnectionTestResult, LLMProfile, PPTParseResult,
   SkillMeta, SkillMatch,
-  KnowhowRule, KnowhowExportData, KnowhowImportResult, KnowhowImportStrategy, KnowledgeStats, IngestResult,
+  KnowhowRule, KnowhowCategory, KnowhowExportData, KnowhowImportResult, KnowhowImportStrategy, KnowledgeStats, IngestResult,
   AgentMatchResult, AgentExecutionEvent, AgentRunCancelResponse, AgentRunRecord,
   ContextMetadata, SkillSuggestionEvent, ChatStatusEvent,
   SystemPromptPreset,
@@ -208,8 +208,10 @@ export async function streamChat(
   onDone: () => void,
   onError: (error: string) => void,
   signal?: AbortSignal,
+  conversationId?: string,
   roleId?: string,
   ragQuery?: string,
+  attachmentPrepareMs?: number,
   onMetadata?: (metadata: ContextMetadata) => void,
   onSkillSuggestion?: (suggestion: SkillSuggestionEvent) => void,
   onStatus?: (status: ChatStatusEvent) => void,
@@ -293,8 +295,10 @@ export async function streamChat(
         api_url: config.apiUrl,
         api_key: config.apiKey,
         llm_profile_id: (config as Partial<LLMProfile>).id ?? '',
+        conversation_id: conversationId ?? '',
         role_id: roleId ?? '',
         rag_query: ragQuery ?? '',
+        attachment_prepare_ms: Math.max(0, Math.round(attachmentPrepareMs ?? 0)),
       }),
       signal,
     });
@@ -656,7 +660,9 @@ export async function listKnowhowRules(category?: string, activeOnly?: boolean):
 
 /** 创建 Know-how 规则（后端返回 {id, message}） */
 export async function createKnowhowRule(
-  rule: Pick<KnowhowRule, 'category' | 'rule_text' | 'weight' | 'source'>
+  rule: Pick<KnowhowRule, 'category' | 'rule_text' | 'weight' | 'source'> & {
+    share_to_group?: boolean;
+  }
 ): Promise<{ id: string; message: string }> {
   const res = await authFetch(`${getBaseUrl()}/knowhow`, {
     method: 'POST',
@@ -670,7 +676,7 @@ export async function createKnowhowRule(
 /** 更新 Know-how 规则（后端返回完整规则对象） */
 export async function updateKnowhowRule(
   ruleId: string,
-  updates: Partial<Pick<KnowhowRule, 'category' | 'rule_text' | 'weight' | 'is_active'>>
+  updates: Partial<Pick<KnowhowRule, 'category' | 'rule_text' | 'weight' | 'is_active' | 'share_to_group'>>
 ): Promise<KnowhowRule> {
   const res = await authFetch(`${getBaseUrl()}/knowhow/${encodeURIComponent(ruleId)}`, {
     method: 'PUT',
@@ -690,7 +696,7 @@ export async function deleteKnowhowRule(ruleId: string): Promise<void> {
 }
 
 /** 获取 Know-how 分类列表（含每个分类的规则数） */
-export async function listKnowhowCategories(): Promise<{ name: string; rule_count: number }[]> {
+export async function listKnowhowCategories(): Promise<KnowhowCategory[]> {
   const res = await authFetch(`${getBaseUrl()}/knowhow/categories`);
   if (!res.ok) throw new Error('获取分类列表失败');
   const data = await res.json();
@@ -824,6 +830,7 @@ export async function extractFilesText(files: File[]): Promise<BatchExtractTextR
   }
   const formData = new FormData();
   files.forEach((file) => formData.append('files', file));
+  formData.append('fast_mode', 'true');
   const res = await authFetch(`${getBaseUrl()}/knowledge/extract-text`, {
     method: 'POST',
     body: formData,
@@ -1196,7 +1203,7 @@ export async function getMe(): Promise<User> {
 
 export async function registerUser(data: {
   username: string; display_name: string; password: string;
-  system_role?: string; group_id?: string;
+  system_role?: string; group_id?: string; can_manage_group_knowhow?: boolean;
 }): Promise<User> {
   const res = await authFetch(`${getBaseUrl()}/auth/register`, {
     method: 'POST',

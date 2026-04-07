@@ -8,6 +8,14 @@ def is_admin(user: Optional[dict]) -> bool:
     return isinstance(user, dict) and user.get("system_role") == "admin"
 
 
+def is_group_knowhow_manager(user: Optional[dict]) -> bool:
+    return bool(
+        isinstance(user, dict)
+        and user.get("group_id")
+        and bool(user.get("can_manage_group_knowhow"))
+    )
+
+
 def _user_id(user: Optional[dict]) -> str:
     if not isinstance(user, dict):
         return ""
@@ -131,3 +139,65 @@ async def filter_accessible_skills(skills: list, user: Optional[dict]) -> list:
         if await can_access_skill(skill, user):
             visible.append(skill)
     return visible
+
+
+async def can_access_knowhow_rule(rule: Optional[dict], user: Optional[dict]) -> bool:
+    if not rule:
+        return False
+
+    if is_admin(user):
+        return True
+
+    owner_group_id = str(rule.get("owner_group_id") or "").strip()
+    if owner_group_id:
+        group_id = _group_id(user)
+        if group_id and owner_group_id == group_id:
+            return True
+        return await has_access_grant("knowhow", str(rule.get("id") or ""), user)
+
+    user_id = _user_id(user)
+    if user_id and str(rule.get("owner_id") or "").strip() == user_id:
+        return True
+
+    return await has_access_grant("knowhow", str(rule.get("id") or ""), user)
+
+
+async def can_manage_knowhow_rule(rule: Optional[dict], user: Optional[dict]) -> bool:
+    if not rule:
+        return False
+
+    if is_admin(user):
+        return True
+
+    owner_group_id = str(rule.get("owner_group_id") or "").strip()
+    if owner_group_id:
+        group_id = _group_id(user)
+        return bool(
+            is_group_knowhow_manager(user)
+            and group_id
+            and owner_group_id == group_id
+        )
+
+    user_id = _user_id(user)
+    if user_id and str(rule.get("owner_id") or "").strip() == user_id:
+        return True
+
+    return False
+
+
+async def get_accessible_knowhow_rule(rule_id: str, user: Optional[dict]) -> Optional[dict]:
+    rule = await storage.get_knowhow_rule(rule_id)
+    if not rule:
+        return None
+    if await can_access_knowhow_rule(rule, user):
+        return rule
+    return None
+
+
+async def get_manageable_knowhow_rule(rule_id: str, user: Optional[dict]) -> Optional[dict]:
+    rule = await storage.get_knowhow_rule(rule_id)
+    if not rule:
+        return None
+    if await can_manage_knowhow_rule(rule, user):
+        return rule
+    return None

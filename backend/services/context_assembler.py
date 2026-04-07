@@ -82,7 +82,9 @@ class AssembledContext:
         weight_icon = "⚠️" if int(rule.get("weight", 0) or 0) >= 3 else "ℹ️"
         category = str(rule.get("category") or "").strip()
         category_prefix = f"({category}) " if category and category != "未分类" else ""
-        return f"{weight_icon} [{index}] {category_prefix}{rule.get('rule_text', '')}"
+        title = str(rule.get("title") or "").strip()
+        title_prefix = f"{title}： " if title else ""
+        return f"{weight_icon} [{index}] {category_prefix}{title_prefix}{rule.get('rule_text', '')}"
 
     @staticmethod
     def _format_knowledge_result(result: dict, index: int) -> str:
@@ -259,13 +261,44 @@ class AssembledContext:
 
     @classmethod
     def _build_knowhow_citation(cls, rule: dict, index: int) -> dict:
+        category = str(rule.get("category") or "Know-how").strip() or "Know-how"
+        title = str(rule.get("title") or "").strip() or f"规则 {index}"
+        strategy_labels = {
+            "llm_route": "LLM 意图路由",
+            "heuristic_route": "启发式路由",
+            "heuristic_rule_match": "规则直匹配",
+            "heuristic_category_match": "分类命中",
+            "legacy_rule_only": "规则兜底",
+            "library_summary": "规则库摘要",
+        }
+        location_parts = [f"分类 {category}"]
+        strategy = str(rule.get("route_strategy") or "").strip()
+        if strategy:
+            location_parts.append(f"命中方式 {strategy_labels.get(strategy, strategy)}")
+        confidence = str(rule.get("route_confidence") or "").strip()
+        if confidence:
+            confidence_labels = {"high": "高", "medium": "中", "low": "低"}
+            location_parts.append(f"置信度 {confidence_labels.get(confidence, confidence)}")
+        rationale = cls._normalize_text_snippet(
+            rule.get("llm_judge_rationale") or rule.get("route_rationale") or "",
+            max_chars=48,
+        )
+        if rationale:
+            location_parts.append(f"原因 {rationale}")
+        weight = rule.get("weight")
+        if weight is not None:
+            location_parts.append(f"权重 {weight}")
         return {
             "id": str(rule.get("id") or f"knowhow-{index}"),
             "source_type": "knowhow",
-            "label": str(rule.get("category") or "Know-how"),
-            "title": f"规则 {index}",
+            "label": category,
+            "title": title,
             "snippet": cls._normalize_text_snippet(rule.get("rule_text") or ""),
-            "location": f"权重 {rule.get('weight', 0)}",
+            "location": " · ".join(location_parts),
+            "route_strategy": strategy or None,
+            "route_confidence": confidence or None,
+            "route_rationale": str(rule.get("route_rationale") or "").strip() or None,
+            "llm_judge_rationale": str(rule.get("llm_judge_rationale") or "").strip() or None,
         }
 
     @classmethod
@@ -1129,17 +1162,36 @@ class ContextAssembler:
                 )
             else:
                 rules = await knowhow_service.list_rules(active_only=True)
-            if not rules:
-                logger.debug("[ContextAssembler] skip knowhow injection because query has no useful terms")
-                return []
             try:
-                categories = await knowhow_service.list_categories()
+                categories = await knowhow_service.list_categories(
+                    user_id=user.get("id") if isinstance(user, dict) else None,
+                    group_id=user.get("group_id") if isinstance(user, dict) else None,
+                    is_admin=is_admin(user) if isinstance(user, dict) else False,
+                )
             except Exception:
                 logger.debug(
                     "[ContextAssembler] knowhow categories unavailable, fall back to rule-only routing",
                     exc_info=True,
                 )
                 categories = None
+            library_decision = await knowhow_router.inspect_library_query(
+                query,
+                category_profiles=categories,
+                settings=planner_settings,
+            )
+            if library_decision.use_summary:
+                summary_rule = await knowhow_service.build_library_summary_rule(
+                    focus=library_decision.focus,
+                    rationale=library_decision.rationale,
+                    confidence=library_decision.confidence,
+                    user_id=user.get("id") if isinstance(user, dict) else None,
+                    group_id=user.get("group_id") if isinstance(user, dict) else None,
+                    is_admin=is_admin(user) if isinstance(user, dict) else False,
+                )
+                return [summary_rule]
+            if not rules:
+                logger.debug("[ContextAssembler] skip knowhow injection because no visible rules were found")
+                return []
             if categories is None:
                 relevant_rules = self._select_knowhow_rules_without_profiles(
                     query=query,
@@ -1166,6 +1218,8 @@ class ContextAssembler:
                 strategy,
                 routed_categories,
             )
+            if relevant_rules:
+                await knowhow_service.record_rule_hits(relevant_rules)
             return relevant_rules
         except Exception as exc:
             logger.warning("[ContextAssembler] knowhow fetch failed: %s", exc, exc_info=True)

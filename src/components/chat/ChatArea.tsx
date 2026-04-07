@@ -302,6 +302,7 @@ export default function ChatArea() {
     ragQuery: string;
     roleId: string;
     preview: GenerationPreview;
+    attachmentPrepareMs: number;
   }) => {
     const {
       conversationId,
@@ -311,6 +312,7 @@ export default function ChatArea() {
       ragQuery,
       roleId,
       preview,
+      attachmentPrepareMs,
     } = params;
 
     setStreaming(true, conversationId);
@@ -402,8 +404,10 @@ export default function ChatArea() {
       },
       handleStreamError,
       controller.signal,
+      conversationId,
       roleId,
       ragQuery,
+      attachmentPrepareMs,
       (metadata) => {
         void updateMessageMetadata(assistantMessageId, { context: metadata }, conversationId).catch(() => {});
       },
@@ -452,14 +456,19 @@ export default function ChatArea() {
       return;
     }
 
+    const historyBuildStartedAt = performance.now();
+    const history = buildHistoryMessages(historyBeforeAssistant);
+    const attachmentPrepareMs = Math.max(0, Math.round(performance.now() - historyBuildStartedAt));
+
     startAssistantStream({
       conversationId: message.conversationId,
       assistantMessageId: message.id,
-      history: buildHistoryMessages(historyBeforeAssistant),
+      history,
       llmConfig: activeLLMConfig,
       ragQuery: lastUserMessage.content,
       roleId: currentRoleId,
       preview: buildGenerationPreview(lastUserMessage.content, lastUserMessage.attachments),
+      attachmentPrepareMs,
     });
   }, [activeLLMConfig, currentRoleId, messagesByConversation, startAssistantStream]);
 
@@ -497,10 +506,12 @@ export default function ChatArea() {
       attachments: messageAttachments,
     });
 
+    const historyBuildStartedAt = performance.now();
     const history = [
       ...buildHistoryMessages(historyMessages),
       buildHistoryMessage({ role: 'user', content, attachments: messageAttachments }),
     ];
+    const attachmentPrepareMs = Math.max(0, Math.round(performance.now() - historyBuildStartedAt));
     const assistantMsgId = await addMessage({
       conversationId: targetConvId,
       role: 'assistant',
@@ -515,6 +526,7 @@ export default function ChatArea() {
       ragQuery: content,
       roleId: currentRoleId,
       preview: buildGenerationPreview(content, messageAttachments),
+      attachmentPrepareMs,
     });
   };
 

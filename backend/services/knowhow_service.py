@@ -194,6 +194,7 @@ class KnowhowService:
         serialized["category"] = cls._normalize_text(serialized.get("category")) or UNCATEGORIZED
         serialized["title"] = cls._normalize_text(serialized.get("title"))
         serialized["rule_text"] = cls._normalize_text(serialized.get("rule_text"))
+        serialized["owner_group_id"] = cls._normalize_text(serialized.get("owner_group_id")) or None
         serialized["trigger_terms"] = cls._load_list(serialized.get("trigger_terms"))
         serialized["exclude_terms"] = cls._load_list(serialized.get("exclude_terms"))
         serialized["applies_when"] = cls._normalize_text(serialized.get("applies_when"))
@@ -202,7 +203,13 @@ class KnowhowService:
         return serialized
 
     @classmethod
-    def _serialize_category(cls, category: dict, rule_count: int = 0) -> dict:
+    def _serialize_category(
+        cls,
+        category: dict,
+        rule_count: int = 0,
+        manageable_rule_count: int = 0,
+        can_manage: bool = False,
+    ) -> dict:
         serialized = dict(category)
         serialized["name"] = cls._normalize_text(serialized.get("name"))
         serialized["description"] = cls._normalize_text(serialized.get("description"))
@@ -210,6 +217,8 @@ class KnowhowService:
         serialized["example_queries"] = cls._load_list(serialized.get("example_queries"))
         serialized["applies_to"] = cls._normalize_text(serialized.get("applies_to"))
         serialized["rule_count"] = int(rule_count)
+        serialized["manageable_rule_count"] = int(manageable_rule_count)
+        serialized["can_manage"] = bool(can_manage)
         return serialized
 
     async def _sync_categories_from_rules(self) -> None:
@@ -501,6 +510,12 @@ class KnowhowService:
         )
         return [self._serialize_rule(rule) for rule in rules]
 
+    async def get_rule(self, rule_id: str) -> Optional[dict]:
+        rule = await storage.get_knowhow_rule(rule_id)
+        if not rule:
+            return None
+        return self._serialize_rule(rule)
+
     async def add_rule(
         self,
         category: str,
@@ -514,6 +529,7 @@ class KnowhowService:
         weight: int = 2,
         source: str = "user",
         owner_id: Optional[str] = None,
+        owner_group_id: Optional[str] = None,
     ) -> str:
         prepared = self._prepare_rule_fields(
             category=category,
@@ -538,6 +554,7 @@ class KnowhowService:
             weight=self._normalize_weight(weight),
             source=source,
             owner_id=owner_id,
+            owner_group_id=self._normalize_text(owner_group_id) or None,
         )
         await self._refresh_category_profile(prepared["category"])
         return rule_id
@@ -576,6 +593,8 @@ class KnowhowService:
             persisted_updates["weight"] = self._normalize_weight(updates.get("weight"), existing_raw.get("weight", 2))
         if "is_active" in updates:
             persisted_updates["is_active"] = 1 if bool(updates.get("is_active")) else 0
+        if "owner_group_id" in updates:
+            persisted_updates["owner_group_id"] = self._normalize_text(updates.get("owner_group_id")) or None
 
         set_clause = ", ".join(f"{key}=?" for key in persisted_updates)
         params = [*persisted_updates.values(), datetime.now(timezone.utc).isoformat(), rule_id]
@@ -590,8 +609,13 @@ class KnowhowService:
         return True
 
     async def delete_rule(self, rule_id: str) -> bool:
+        existing = await storage.get_knowhow_rule(rule_id)
+        if not existing:
+            return False
+        category = self._normalize_text(existing.get("category")) or UNCATEGORIZED
         await storage.db.execute("DELETE FROM knowhow_rules WHERE id=?", (rule_id,))
         await storage.db.commit()
+        await self._refresh_category_profile(category)
         return True
 
     def _extract_import_rules(self, payload: Any) -> list[dict]:
@@ -663,12 +687,32 @@ class KnowhowService:
             "confidence": confidence,
             "source": source,
             "is_active": is_active,
+            "owner_id": str(raw_rule.get("owner_id") or "").strip() or None,
+            "owner_group_id": str(raw_rule.get("owner_group_id") or "").strip() or None,
             "created_at": created_at,
             "updated_at": updated_at,
         }
 
-    async def export_rules(self) -> dict:
-        rules = await self.list_rules(active_only=False)
+    async def export_rules(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        group_id: Optional[str] = None,
+        is_admin: bool = False,
+        group_manager_scope: bool = False,
+    ) -> dict:
+        rules = await self.list_rules(
+            active_only=False,
+            user_id=user_id,
+            group_id=group_id,
+            is_admin=is_admin,
+        )
+        if group_manager_scope and group_id and not is_admin:
+            normalized_group_id = self._normalize_text(group_id)
+            rules = [
+                rule for rule in rules
+                if self._normalize_text(rule.get("owner_group_id")) == normalized_group_id
+            ]
         return {
             "kind": "knowhow_rules_export",
             "schema_version": 2,
@@ -681,12 +725,33 @@ class KnowhowService:
         self,
         payload: Any,
         strategy: Literal["append", "replace"] = "append",
+        *,
+        owner_id: Optional[str] = None,
+        owner_group_id: Optional[str] = None,
+        force_owner_scope: bool = False,
     ) -> dict:
         if strategy not in {"append", "replace"}:
             raise ValueError("不支持的导入策略")
 
         rules = self._extract_import_rules(payload)
-        existing_rules = await storage.list_knowhow_rules(active_only=False)
+        if force_owner_scope:
+            if owner_group_id:
+                existing_rules = [
+                    rule
+                    for rule in await storage.list_knowhow_rules(active_only=False)
+                    if self._normalize_text(rule.get("owner_group_id")) == self._normalize_text(owner_group_id)
+                ]
+            elif owner_id:
+                existing_rules = [
+                    rule
+                    for rule in await storage.list_knowhow_rules(active_only=False)
+                    if self._normalize_text(rule.get("owner_id")) == self._normalize_text(owner_id)
+                    and not self._normalize_text(rule.get("owner_group_id"))
+                ]
+            else:
+                existing_rules = []
+        else:
+            existing_rules = await storage.list_knowhow_rules(active_only=False)
         existing_keys = {
             (
                 self._normalize_text(rule.get("category")),
@@ -739,6 +804,16 @@ class KnowhowService:
                     rule["confidence"],
                     rule["source"],
                     rule["is_active"],
+                    (
+                        self._normalize_text(owner_id) or None
+                        if force_owner_scope
+                        else self._normalize_text(rule.get("owner_id")) or self._normalize_text(owner_id) or None
+                    ),
+                    (
+                        self._normalize_text(owner_group_id) or None
+                        if force_owner_scope
+                        else self._normalize_text(rule.get("owner_group_id")) or self._normalize_text(owner_group_id) or None
+                    ),
                     rule["created_at"],
                     rule["updated_at"],
                 )
@@ -748,8 +823,8 @@ class KnowhowService:
             await storage.db.executemany(
                 "INSERT INTO knowhow_rules ("
                 "id, category, title, rule_text, trigger_terms, exclude_terms, applies_when, not_applies_when, "
-                "examples, weight, hit_count, confidence, source, is_active, created_at, updated_at"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "examples, weight, hit_count, confidence, source, is_active, owner_id, owner_group_id, created_at, updated_at"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 rows,
             )
         await storage.db.commit()
@@ -808,12 +883,30 @@ class KnowhowService:
                 await storage.increment_knowhow_hit(rule["id"])
         return results
 
-    async def get_stats(self) -> dict:
-        all_rules = await storage.list_knowhow_rules(active_only=False)
+    async def get_stats(
+        self,
+        *,
+        user_id: str | None = None,
+        group_id: str | None = None,
+        is_admin: bool = False,
+    ) -> dict:
+        all_rules = await storage.list_knowhow_rules(
+            active_only=False,
+            user_id=user_id,
+            group_id=group_id,
+            is_admin=is_admin,
+        )
         if all_rules:
             await self._sync_categories_from_rules()
         active = [rule for rule in all_rules if rule.get("is_active")]
-        categories = [item["name"] for item in await storage.list_knowhow_categories()]
+        categories = [
+            item["name"]
+            for item in await self.list_categories(
+                user_id=user_id,
+                group_id=group_id,
+                is_admin=is_admin,
+            )
+        ]
         total_hits = sum(rule.get("hit_count", 0) for rule in all_rules)
         return {
             "total_rules": len(all_rules),
@@ -822,16 +915,137 @@ class KnowhowService:
             "total_hits": total_hits,
         }
 
-    async def list_categories(self) -> list[dict]:
-        all_rules = await storage.list_knowhow_rules(active_only=False)
+    async def record_rule_hits(self, rules_or_ids: list[dict | str]) -> None:
+        seen: set[str] = set()
+        for item in rules_or_ids:
+            if isinstance(item, dict) and item.get("is_virtual"):
+                continue
+            rule_id = str(item.get("id") if isinstance(item, dict) else item or "").strip()
+            if not rule_id or rule_id in seen:
+                continue
+            seen.add(rule_id)
+            try:
+                await storage.increment_knowhow_hit(rule_id)
+            except Exception:
+                logger.warning("记录 knowhow 命中次数失败: %s", rule_id, exc_info=True)
+
+    async def list_categories(
+        self,
+        *,
+        user_id: str | None = None,
+        group_id: str | None = None,
+        is_admin: bool = False,
+        manageable_group_id: str | None = None,
+    ) -> list[dict]:
+        all_rules = await storage.list_knowhow_rules(
+            active_only=False,
+            user_id=user_id,
+            group_id=group_id,
+            is_admin=is_admin,
+        )
         if all_rules:
             await self._sync_categories_from_rules()
         counts: dict[str, int] = {}
         for rule in all_rules:
             category = self._normalize_text(rule.get("category")) or UNCATEGORIZED
             counts[category] = counts.get(category, 0) + 1
+        manageable_counts: dict[str, int] = {}
+        if is_admin:
+            manageable_counts = dict(counts)
+        elif manageable_group_id:
+            normalized_group_id = self._normalize_text(manageable_group_id)
+            for rule in all_rules:
+                if self._normalize_text(rule.get("owner_group_id")) != normalized_group_id:
+                    continue
+                category = self._normalize_text(rule.get("category")) or UNCATEGORIZED
+                manageable_counts[category] = manageable_counts.get(category, 0) + 1
         categories = await storage.list_knowhow_categories()
-        return [self._serialize_category(item, counts.get(item["name"], 0)) for item in categories]
+        serialized = [
+            self._serialize_category(
+                item,
+                counts.get(item["name"], 0),
+                manageable_counts.get(item["name"], 0),
+                is_admin or manageable_counts.get(item["name"], 0) > 0,
+            )
+            for item in categories
+        ]
+        if user_id and not is_admin:
+            serialized = [item for item in serialized if item["rule_count"] > 0]
+        return serialized
+
+    async def build_library_summary_rule(
+        self,
+        *,
+        focus: str = "overview",
+        rationale: str = "",
+        confidence: str = "medium",
+        user_id: str | None = None,
+        group_id: str | None = None,
+        is_admin: bool = False,
+    ) -> dict:
+        visible_rules = await self.list_rules(
+            active_only=False,
+            user_id=user_id,
+            group_id=group_id,
+            is_admin=is_admin,
+        )
+        stats = await self.get_stats(
+            user_id=user_id,
+            group_id=group_id,
+            is_admin=is_admin,
+        )
+        categories = await self.list_categories(
+            user_id=user_id,
+            group_id=group_id,
+            is_admin=is_admin,
+        )
+
+        top_categories = sorted(
+            categories,
+            key=lambda item: (int(item.get("rule_count", 0)), str(item.get("name") or "")),
+            reverse=True,
+        )[:5]
+        active_rules = [rule for rule in visible_rules if rule.get("is_active")]
+        top_rules = sorted(
+            active_rules,
+            key=lambda item: (int(item.get("hit_count", 0)), float(item.get("weight", 0))),
+            reverse=True,
+        )[:3]
+
+        summary_parts = [
+            f"当前你可访问的 Know-how 规则共 {stats['total_rules']} 条，其中启用 {stats['active_rules']} 条，覆盖 {len(categories)} 个分类。"
+        ]
+        if top_categories:
+            category_text = "；".join(
+                f"{item['name']}（{item['rule_count']}条）"
+                for item in top_categories
+            )
+            summary_parts.append(f"分类分布：{category_text}。")
+        if top_rules:
+            rule_text = "；".join(
+                f"{str(rule.get('title') or '未命名规则').strip()}（{str(rule.get('category') or UNCATEGORIZED).strip()}）"
+                for rule in top_rules
+            )
+            summary_parts.append(f"当前较常被命中的规则有：{rule_text}。")
+
+        title_map = {
+            "stats": "Know-how 规则库统计",
+            "categories": "Know-how 分类概览",
+            "overview": "Know-how 规则库概览",
+        }
+        return {
+            "id": "virtual-knowhow-library-summary",
+            "category": "规则库概览",
+            "title": title_map.get(focus, "Know-how 规则库概览"),
+            "rule_text": " ".join(summary_parts),
+            "weight": 0,
+            "is_active": 1,
+            "is_virtual": True,
+            "route_strategy": "library_summary",
+            "route_confidence": confidence,
+            "route_rationale": rationale or "library_summary",
+            "route_categories": [],
+        }
 
     async def create_category(
         self,
@@ -858,6 +1072,8 @@ class KnowhowService:
             "example_queries": self._normalize_list(example_queries),
             "applies_to": self._normalize_text(applies_to),
             "rule_count": 0,
+            "manageable_rule_count": 0,
+            "can_manage": False,
         }
 
     async def update_category(self, name: str, updates: dict[str, Any]) -> dict:
@@ -894,6 +1110,65 @@ class KnowhowService:
         await self._refresh_category_profile(normalized_new_name)
         return cursor.rowcount
 
+    async def rename_category_for_group(
+        self,
+        old_name: str,
+        new_name: str,
+        *,
+        owner_group_id: str,
+    ) -> int:
+        normalized_old_name = self._normalize_text(old_name)
+        normalized_new_name = self._normalize_text(new_name)
+        normalized_group_id = self._normalize_text(owner_group_id)
+        if not normalized_old_name or not normalized_new_name:
+            raise ValueError("分类名称不能为空")
+        if not normalized_group_id:
+            raise ValueError("缺少用户组信息")
+
+        affected_rules = [
+            rule
+            for rule in await storage.list_knowhow_rules(active_only=False)
+            if self._normalize_text(rule.get("category")) == normalized_old_name
+            and self._normalize_text(rule.get("owner_group_id")) == normalized_group_id
+        ]
+        if not affected_rules:
+            raise ValueError("没有可管理的分类规则")
+
+        existing_category = next(
+            (
+                item
+                for item in await storage.list_knowhow_categories()
+                if self._normalize_text(item.get("name")) == normalized_old_name
+            ),
+            None,
+        )
+        await storage.ensure_knowhow_category(
+            normalized_new_name,
+            description=self._normalize_text(existing_category.get("description") if existing_category else ""),
+            aliases=existing_category.get("aliases") if existing_category else None,
+            example_queries=existing_category.get("example_queries") if existing_category else None,
+            applies_to=self._normalize_text(existing_category.get("applies_to") if existing_category else ""),
+        )
+        cursor = await storage.db.execute(
+            "UPDATE knowhow_rules SET category=?, updated_at=? WHERE category=? AND owner_group_id=?",
+            (
+                normalized_new_name,
+                datetime.now(timezone.utc).isoformat(),
+                normalized_old_name,
+                normalized_group_id,
+            ),
+        )
+        await storage.db.commit()
+        await self._refresh_category_profile(normalized_new_name)
+        remaining = [
+            rule
+            for rule in await storage.list_knowhow_rules(active_only=False)
+            if self._normalize_text(rule.get("category")) == normalized_old_name
+        ]
+        if not remaining:
+            await storage.delete_knowhow_category(normalized_old_name)
+        return cursor.rowcount
+
     async def delete_category(self, name: str, delete_rules: bool = True) -> int:
         if delete_rules:
             cursor = await storage.db.execute("DELETE FROM knowhow_rules WHERE category=?", (name,))
@@ -906,6 +1181,56 @@ class KnowhowService:
             await self._refresh_category_profile(UNCATEGORIZED)
         await storage.delete_knowhow_category(name)
         await storage.db.commit()
+        return cursor.rowcount
+
+    async def delete_category_for_group(
+        self,
+        name: str,
+        *,
+        owner_group_id: str,
+        delete_rules: bool = True,
+    ) -> int:
+        normalized_name = self._normalize_text(name)
+        normalized_group_id = self._normalize_text(owner_group_id)
+        if not normalized_name:
+            raise ValueError("分类名称不能为空")
+        if not normalized_group_id:
+            raise ValueError("缺少用户组信息")
+
+        existing = [
+            rule
+            for rule in await storage.list_knowhow_rules(active_only=False)
+            if self._normalize_text(rule.get("category")) == normalized_name
+            and self._normalize_text(rule.get("owner_group_id")) == normalized_group_id
+        ]
+        if not existing:
+            raise ValueError("没有可管理的分类规则")
+
+        if delete_rules:
+            cursor = await storage.db.execute(
+                "DELETE FROM knowhow_rules WHERE category=? AND owner_group_id=?",
+                (normalized_name, normalized_group_id),
+            )
+        else:
+            cursor = await storage.db.execute(
+                "UPDATE knowhow_rules SET category=?, updated_at=? WHERE category=? AND owner_group_id=?",
+                (
+                    UNCATEGORIZED,
+                    datetime.now(timezone.utc).isoformat(),
+                    normalized_name,
+                    normalized_group_id,
+                ),
+            )
+            await storage.ensure_knowhow_category(UNCATEGORIZED)
+            await self._refresh_category_profile(UNCATEGORIZED)
+        await storage.db.commit()
+        remaining = [
+            rule
+            for rule in await storage.list_knowhow_rules(active_only=False)
+            if self._normalize_text(rule.get("category")) == normalized_name
+        ]
+        if not remaining:
+            await storage.delete_knowhow_category(normalized_name)
         return cursor.rowcount
 
 

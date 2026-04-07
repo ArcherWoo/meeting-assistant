@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Iterable, Literal
 
 from services.knowhow_service import knowhow_service
-from services.llm_service import LLMService
+from services.llm_service import LLMService, llm_service as shared_llm_service
 from services.retrieval_planner import RetrievalPlannerSettings
 from utils.text_utils import extract_han_segments
 
@@ -49,6 +49,15 @@ class KnowhowRoutingResult:
     decision: KnowhowRouteDecision
     rules: tuple[dict, ...] = ()
     candidate_categories: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class KnowhowLibraryDecision:
+    use_summary: bool
+    focus: Literal["overview", "stats", "categories"] = "overview"
+    rationale: str = ""
+    confidence: Literal["low", "medium", "high"] = "low"
+    notes: tuple[str, ...] = ()
 
 
 class KnowhowRouter:
@@ -104,6 +113,22 @@ class KnowhowRouter:
         "是否应该",
         "怎么判断",
     )
+    LIBRARY_HINTS: tuple[str, ...] = (
+        "knowhow",
+        "know-how",
+        "规则库",
+        "规则总数",
+        "几条规则",
+        "多少条规则",
+        "规则数量",
+        "分类数量",
+        "有几个分类",
+        "有哪些分类",
+        "规则概况",
+        "规则概览",
+        "规则统计",
+        "库里有什么",
+    )
     DOC_ONLY_HINTS: tuple[str, ...] = (
         "总结",
         "概括",
@@ -144,7 +169,7 @@ class KnowhowRouter:
     }
 
     def __init__(self, llm_service: LLMService | None = None) -> None:
-        self._llm_service = llm_service or LLMService()
+        self._llm_service = llm_service or shared_llm_service
 
     async def retrieve_rules(
         self,
@@ -221,6 +246,44 @@ class KnowhowRouter:
             rules=tuple(selected_rules[:limit]),
             candidate_categories=tuple(candidate_categories),
         )
+
+    async def inspect_library_query(
+        self,
+        query: str,
+        *,
+        category_profiles: list[dict] | None = None,
+        settings: RetrievalPlannerSettings | None = None,
+    ) -> KnowhowLibraryDecision:
+        normalized_query = self._normalize_text(query)
+        if len(normalized_query) < 2:
+            return KnowhowLibraryDecision(False, rationale="query_too_short", notes=("too_short",))
+
+        planner_settings = settings or RetrievalPlannerSettings()
+        if planner_settings.is_configured:
+            try:
+                return await self._inspect_library_query_with_llm(
+                    query=query,
+                    category_profiles=category_profiles or [],
+                    settings=planner_settings,
+                )
+            except Exception as exc:
+                logger.info("[KnowhowRouter] Library intent fallback: %s", exc)
+
+        if self._contains_any(normalized_query, self.LIBRARY_HINTS):
+            focus = "overview"
+            if any(term in normalized_query for term in ("分类", "类别")):
+                focus = "categories"
+            elif any(term in normalized_query for term in ("几条", "多少", "数量", "统计", "总数")):
+                focus = "stats"
+            return KnowhowLibraryDecision(
+                True,
+                focus=focus,
+                rationale="library_inventory_question",
+                confidence="medium",
+                notes=("heuristic_library_query",),
+            )
+
+        return KnowhowLibraryDecision(False, rationale="not_a_library_question", notes=("library_query_not_detected",))
 
     async def route(
         self,
@@ -424,6 +487,7 @@ class KnowhowRouter:
             max_tokens=500,
             api_url=settings.api_url,
             api_key=settings.api_key,
+            user_id=settings.user_id or None,
         )
         text = self._llm_service.extract_text_content(response)
         if not text:
@@ -442,6 +506,57 @@ class KnowhowRouter:
             rationale=" ".join(str(payload.get("rationale") or "").split()) or "llm_route_decision",
             confidence=confidence,
             notes=("llm_routed",),
+        )
+
+    async def _inspect_library_query_with_llm(
+        self,
+        *,
+        query: str,
+        category_profiles: list[dict],
+        settings: RetrievalPlannerSettings,
+    ) -> KnowhowLibraryDecision:
+        category_names = [
+            str(item.get("name") or "").strip()
+            for item in category_profiles
+            if str(item.get("name") or "").strip()
+        ]
+        response = await self._llm_service.chat(
+            messages=[
+                {"role": "system", "content": self._build_llm_library_prompt()},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "query": query,
+                            "available_categories": category_names[:12],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            model=settings.model.strip() or "gpt-4o",
+            temperature=0.1,
+            max_tokens=300,
+            api_url=settings.api_url,
+            api_key=settings.api_key,
+            user_id=settings.user_id or None,
+        )
+        text = self._llm_service.extract_text_content(response)
+        if not text:
+            raise ValueError("empty knowhow library intent response")
+        data = json.loads(self._extract_json_payload(text))
+        confidence = str(data.get("confidence") or "medium").lower()
+        if confidence not in {"low", "medium", "high"}:
+            confidence = "medium"
+        focus = str(data.get("focus") or "overview").lower()
+        if focus not in {"overview", "stats", "categories"}:
+            focus = "overview"
+        return KnowhowLibraryDecision(
+            use_summary=bool(data.get("use_library_summary")),
+            focus=focus,
+            rationale=" ".join(str(data.get("rationale") or "").split()) or "llm_library_decision",
+            confidence=confidence,
+            notes=("llm_library_query",),
         )
 
     async def _judge_rules_with_llm(
@@ -475,16 +590,33 @@ class KnowhowRouter:
             max_tokens=700,
             api_url=settings.api_url,
             api_key=settings.api_key,
+            user_id=settings.user_id or None,
         )
         text = self._llm_service.extract_text_content(response)
         if not text:
             return candidate_rules[:limit]
-        data = json.loads(self._extract_json_payload(text))
+        try:
+            data = json.loads(self._extract_json_payload(text))
+        except Exception:
+            return candidate_rules[:limit]
+        if "selected_ids" not in data:
+            return candidate_rules[:limit]
+
         selected_ids = [str(item).strip() for item in (data.get("selected_ids") or []) if str(item).strip()]
         if not selected_ids:
-            return candidate_rules[:limit]
-        selected = [rule for rule in candidate_rules if str(rule.get("id") or "") in selected_ids]
-        return selected[:limit] or candidate_rules[:limit]
+            return []
+
+        judge_rationale = " ".join(str(data.get("rationale") or "").split())
+        selected: list[dict] = []
+        selected_id_set = set(selected_ids)
+        for rule in candidate_rules:
+            if str(rule.get("id") or "") not in selected_id_set:
+                continue
+            enriched_rule = dict(rule)
+            if judge_rationale:
+                enriched_rule["llm_judge_rationale"] = judge_rationale
+            selected.append(enriched_rule)
+        return selected[:limit]
 
     def _build_category_profiles(
         self,
@@ -808,6 +940,28 @@ Rules:
 - Only choose categories from the provided candidates.
 - Return at most 3 categories.
 - If use_knowhow is false, return an empty categories array.
+""".strip()
+
+    @staticmethod
+    def _build_llm_library_prompt() -> str:
+        return """
+You determine whether the user is asking about the knowhow library itself instead of asking for business-rule application.
+
+Return JSON only. Do not use markdown.
+Schema:
+{
+  "use_library_summary": true,
+  "focus": "overview | stats | categories",
+  "confidence": "low | medium | high",
+  "rationale": "short reason"
+}
+
+Rules:
+- If the user is asking how many rules exist, how many categories exist, what categories are present, or what the knowhow library currently contains, use_library_summary should be true.
+- If the user is asking whether a business case is compliant, sufficient, reasonable, risky, or which rule applies, use_library_summary should be false.
+- focus=stats for count or quantity questions.
+- focus=categories for category listing questions.
+- focus=overview for broad library introspection.
 """.strip()
 
     @staticmethod

@@ -185,20 +185,31 @@ class ConversationsRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(msgs), 1)
         self.assertFalse(msgs[0]["id"].startswith("compensated-"))
 
-    async def test_admin_chat_state_uses_system_role_and_sees_all_conversations(self):
+    async def test_admin_chat_state_only_returns_admin_owned_conversations(self):
         first = await conversations_router.create_conversation(
             conversations_router.ConversationCreateRequest(role_id="copilot"),
             user=self.user,
         )
         second = await conversations_router.create_conversation(
             conversations_router.ConversationCreateRequest(role_id="copilot"),
-            user=self.other_user,
+            user=self.admin,
         )
 
         state = await conversations_router.get_chat_state(user=self.admin)
         ids = {conversation["id"] for conversation in state["conversations"]}
-        self.assertIn(first["conversation"]["id"], ids)
+        self.assertNotIn(first["conversation"]["id"], ids)
         self.assertIn(second["conversation"]["id"], ids)
+
+    async def test_admin_cannot_access_other_users_conversation_messages(self):
+        created = await conversations_router.create_conversation(
+            conversations_router.ConversationCreateRequest(role_id="copilot"),
+            user=self.user,
+        )
+
+        with self.assertRaises(HTTPException) as ctx:
+            await conversations_router.list_messages(created["conversation"]["id"], user=self.admin)
+
+        self.assertEqual(ctx.exception.status_code, 403)
 
     async def test_cross_user_message_update_is_forbidden(self):
         created = await conversations_router.create_conversation(

@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import sys
 import unittest
@@ -18,6 +19,8 @@ from routers import conversations as conversations_router
 from routers import knowhow as knowhow_router
 from routers import settings as settings_router
 from routers import skills as skills_router
+from services.context_assembler import context_assembler
+from services.retrieval_planner import RetrievalPlannerSettings
 from services.skill_manager import skill_manager
 from services.storage import storage
 
@@ -214,6 +217,665 @@ class AuthPermissionTests(unittest.IsolatedAsyncioTestCase):
             user=created_user,
         )
         self.assertIn(rule_result["id"], {rule["id"] for rule in rules["rules"]})
+
+    async def test_non_admin_cannot_manage_shared_knowhow_or_library_level_actions(self):
+        group = await storage.create_group("team-c", "Team C")
+        created_user = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="shared-rule-reader",
+                display_name="Shared Rule Reader",
+                password="pw123456",
+                system_role="user",
+                group_id=group["id"],
+            ),
+            _admin=self.admin,
+        )
+
+        shared_rule = await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="采购预审",
+                rule_text="需要核对供应商资质和单一来源说明",
+                weight=3,
+                source="user",
+            ),
+            user=self.admin,
+        )
+        await auth_router.set_grant(
+            auth_router.SetGrantRequest(
+                resource_type="knowhow",
+                resource_id=shared_rule["id"],
+                grant_type="group",
+                grantee_id=group["id"],
+            ),
+            _admin=self.admin,
+        )
+
+        with self.assertRaises(HTTPException) as update_context:
+            await knowhow_router.update_rule(
+                shared_rule["id"],
+                knowhow_router.KnowhowRuleUpdate(rule_text="试图篡改共享规则"),
+                user=created_user,
+            )
+        self.assertEqual(update_context.exception.status_code, 403)
+
+        with self.assertRaises(HTTPException) as delete_context:
+            await knowhow_router.delete_rule(shared_rule["id"], user=created_user)
+        self.assertEqual(delete_context.exception.status_code, 403)
+
+        with self.assertRaises(HTTPException) as export_context:
+            await knowhow_router.export_rules(user=created_user)
+        self.assertEqual(export_context.exception.status_code, 403)
+
+        with self.assertRaises(HTTPException) as import_context:
+            await knowhow_router.import_rules(
+                payload={"rules": []},
+                strategy="append",
+                user=created_user,
+            )
+        self.assertEqual(import_context.exception.status_code, 403)
+
+        with self.assertRaises(HTTPException) as create_category_context:
+            await knowhow_router.create_category(
+                knowhow_router.CategoryCreateRequest(name="普通用户新分类"),
+                user=created_user,
+            )
+        self.assertEqual(create_category_context.exception.status_code, 403)
+
+        with self.assertRaises(HTTPException) as rename_category_context:
+            await knowhow_router.rename_category(
+                "采购预审",
+                knowhow_router.CategoryRenameRequest(new_name="采购预审-改名"),
+                user=created_user,
+            )
+        self.assertEqual(rename_category_context.exception.status_code, 403)
+
+        with self.assertRaises(HTTPException) as delete_category_context:
+            await knowhow_router.delete_category("采购预审", delete_rules=True, user=created_user)
+        self.assertEqual(delete_category_context.exception.status_code, 403)
+
+    async def test_non_admin_only_sees_categories_with_visible_rules(self):
+        group = await storage.create_group("team-d", "Team D")
+        created_user = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="category-viewer",
+                display_name="Category Viewer",
+                password="pw123456",
+                system_role="user",
+                group_id=group["id"],
+            ),
+            _admin=self.admin,
+        )
+
+        visible_rule = await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="采购预审",
+                rule_text="共享给小组的规则",
+                weight=2,
+                source="user",
+            ),
+            user=self.admin,
+        )
+        await auth_router.set_grant(
+            auth_router.SetGrantRequest(
+                resource_type="knowhow",
+                resource_id=visible_rule["id"],
+                grant_type="group",
+                grantee_id=group["id"],
+            ),
+            _admin=self.admin,
+        )
+
+        await knowhow_router.create_category(
+            knowhow_router.CategoryCreateRequest(name="机密分类"),
+            user=self.admin,
+        )
+        await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="机密分类",
+                rule_text="只有管理员可见的机密规则",
+                weight=4,
+                source="user",
+            ),
+            user=self.admin,
+        )
+
+        categories = await knowhow_router.list_categories(user=created_user)
+        category_names = {item["name"] for item in categories["categories"]}
+
+        self.assertIn("采购预审", category_names)
+        self.assertNotIn("机密分类", category_names)
+
+    async def test_group_knowhow_manager_can_manage_group_owned_rules_and_import_export_scope(self):
+        group = await storage.create_group("team-e", "Team E")
+        manager = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="group-knowhow-manager",
+                display_name="Group Knowhow Manager",
+                password="pw123456",
+                system_role="user",
+                group_id=group["id"],
+                can_manage_group_knowhow=True,
+            ),
+            _admin=self.admin,
+        )
+        member = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="group-member",
+                display_name="Group Member",
+                password="pw123456",
+                system_role="user",
+                group_id=group["id"],
+            ),
+            _admin=self.admin,
+        )
+        other_group = await storage.create_group("team-f", "Team F")
+        other_manager = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="other-group-manager",
+                display_name="Other Group Manager",
+                password="pw123456",
+                system_role="user",
+                group_id=other_group["id"],
+                can_manage_group_knowhow=True,
+            ),
+            _admin=self.admin,
+        )
+
+        created_rule = await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="team-playbook",
+                rule_text="This rule belongs to Team E knowhow.",
+                weight=2,
+                source="user",
+                share_to_group=True,
+            ),
+            user=manager,
+        )
+        stored_rule = await storage.get_knowhow_rule(created_rule["id"])
+        self.assertIsNotNone(stored_rule)
+        self.assertEqual(stored_rule["owner_group_id"], group["id"])
+
+        visible_for_member = await knowhow_router.list_rules(
+            category="team-playbook",
+            active_only=False,
+            user=member,
+        )
+        self.assertIn(created_rule["id"], {rule["id"] for rule in visible_for_member["rules"]})
+
+        with self.assertRaises(HTTPException) as member_update_context:
+            await knowhow_router.update_rule(
+                created_rule["id"],
+                knowhow_router.KnowhowRuleUpdate(rule_text="member should not update this"),
+                user=member,
+            )
+        self.assertEqual(member_update_context.exception.status_code, 403)
+
+        updated_rule = await knowhow_router.update_rule(
+            created_rule["id"],
+            knowhow_router.KnowhowRuleUpdate(rule_text="Updated by the group knowhow manager"),
+            user=manager,
+        )
+        self.assertEqual(updated_rule["rule_text"], "Updated by the group knowhow manager")
+
+        with self.assertRaises(HTTPException) as other_group_context:
+            await knowhow_router.update_rule(
+                created_rule["id"],
+                knowhow_router.KnowhowRuleUpdate(rule_text="other group must not edit"),
+                user=other_manager,
+            )
+        self.assertEqual(other_group_context.exception.status_code, 403)
+
+        export_response = await knowhow_router.export_rules(user=manager)
+        export_payload = json.loads(export_response.body.decode("utf-8"))
+        self.assertEqual(export_payload["total_rules"], 1)
+        self.assertEqual(export_payload["rules"][0]["owner_group_id"], group["id"])
+
+        import_result = await knowhow_router.import_rules(
+            payload={
+                "rules": [
+                    {
+                        "category": "team-playbook",
+                        "rule_text": "Imported by group manager",
+                        "weight": 3,
+                        "owner_id": self.admin["id"],
+                        "owner_group_id": other_group["id"],
+                    }
+                ]
+            },
+            strategy="append",
+            user=manager,
+        )
+        self.assertEqual(import_result["imported_count"], 1)
+
+        imported_rules = await knowhow_router.list_rules(
+            category="team-playbook",
+            active_only=False,
+            user=member,
+        )
+        imported_rule = next(
+            rule for rule in imported_rules["rules"]
+            if rule["rule_text"] == "Imported by group manager"
+        )
+        self.assertEqual(imported_rule["owner_group_id"], group["id"])
+        self.assertEqual(imported_rule["owner_id"], manager["id"])
+
+        with self.assertRaises(HTTPException) as replace_import_context:
+            await knowhow_router.import_rules(
+                payload={"rules": []},
+                strategy="replace",
+                user=manager,
+            )
+        self.assertEqual(replace_import_context.exception.status_code, 403)
+
+    async def test_group_manager_can_choose_private_or_group_shared_rules(self):
+        group = await storage.create_group("team-g", "Team G")
+        manager = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="group-rule-author",
+                display_name="Group Rule Author",
+                password="pw123456",
+                system_role="user",
+                group_id=group["id"],
+                can_manage_group_knowhow=True,
+            ),
+            _admin=self.admin,
+        )
+        member = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="group-rule-reader",
+                display_name="Group Rule Reader",
+                password="pw123456",
+                system_role="user",
+                group_id=group["id"],
+            ),
+            _admin=self.admin,
+        )
+
+        private_rule = await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="team-g-playbook",
+                rule_text="Private rule for the manager only",
+                weight=2,
+                source="user",
+                share_to_group=False,
+            ),
+            user=manager,
+        )
+        shared_rule = await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="team-g-playbook",
+                rule_text="Shared baseline for Team G",
+                weight=3,
+                source="user",
+                share_to_group=True,
+            ),
+            user=manager,
+        )
+
+        member_rules = await knowhow_router.list_rules(
+            category="team-g-playbook",
+            active_only=False,
+            user=member,
+        )
+        member_rule_ids = {rule["id"] for rule in member_rules["rules"]}
+        self.assertIn(shared_rule["id"], member_rule_ids)
+        self.assertNotIn(private_rule["id"], member_rule_ids)
+
+    async def test_group_rule_management_is_revoked_after_manager_loses_group_permission(self):
+        group = await storage.create_group("team-h", "Team H")
+        manager = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="former-group-manager",
+                display_name="Former Group Manager",
+                password="pw123456",
+                system_role="user",
+                group_id=group["id"],
+                can_manage_group_knowhow=True,
+            ),
+            _admin=self.admin,
+        )
+
+        created_rule = await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="team-h-playbook",
+                rule_text="Shared rule that should lose manager access later",
+                weight=2,
+                source="user",
+                share_to_group=True,
+            ),
+            user=manager,
+        )
+
+        updated_manager = await auth_router.update_user(
+            manager["id"],
+            auth_router.UpdateUserRequest(group_id="", can_manage_group_knowhow=False),
+            _admin=self.admin,
+        )
+
+        with self.assertRaises(HTTPException) as update_context:
+            await knowhow_router.update_rule(
+                created_rule["id"],
+                knowhow_router.KnowhowRuleUpdate(rule_text="former manager must not update"),
+                user=updated_manager,
+            )
+        self.assertEqual(update_context.exception.status_code, 403)
+
+        with self.assertRaises(HTTPException) as delete_context:
+            await knowhow_router.delete_rule(created_rule["id"], user=updated_manager)
+        self.assertEqual(delete_context.exception.status_code, 403)
+
+        visible_rules = await knowhow_router.list_rules(
+            category="team-h-playbook",
+            active_only=False,
+            user=updated_manager,
+        )
+        self.assertEqual(visible_rules["total"], 0)
+
+    async def test_group_manager_category_operations_only_affect_group_rules(self):
+        group = await storage.create_group("team-i", "Team I")
+        manager = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="category-manager",
+                display_name="Category Manager",
+                password="pw123456",
+                system_role="user",
+                group_id=group["id"],
+                can_manage_group_knowhow=True,
+            ),
+            _admin=self.admin,
+        )
+        member = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="category-member",
+                display_name="Category Member",
+                password="pw123456",
+                system_role="user",
+                group_id=group["id"],
+            ),
+            _admin=self.admin,
+        )
+
+        await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="shared-category",
+                rule_text="Admin private rule should stay untouched",
+                weight=1,
+                source="user",
+            ),
+            user=self.admin,
+        )
+        group_rule = await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="shared-category",
+                rule_text="Group shared rule",
+                weight=2,
+                source="user",
+                share_to_group=True,
+            ),
+            user=manager,
+        )
+
+        rename_result = await knowhow_router.rename_category(
+            "shared-category",
+            knowhow_router.CategoryRenameRequest(new_name="team-i-category"),
+            user=manager,
+        )
+        self.assertEqual(rename_result["affected_rules"], 1)
+
+        member_rules = await knowhow_router.list_rules(
+            category="team-i-category",
+            active_only=False,
+            user=member,
+        )
+        self.assertIn(group_rule["id"], {rule["id"] for rule in member_rules["rules"]})
+
+        admin_old_category_rules = await knowhow_router.list_rules(
+            category="shared-category",
+            active_only=False,
+            user=self.admin,
+        )
+        self.assertEqual(len(admin_old_category_rules["rules"]), 1)
+        self.assertEqual(admin_old_category_rules["rules"][0]["rule_text"], "Admin private rule should stay untouched")
+
+    async def test_group_manager_import_deduplicates_within_group_scope_only(self):
+        group = await storage.create_group("team-j", "Team J")
+        manager = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="import-scope-manager",
+                display_name="Import Scope Manager",
+                password="pw123456",
+                system_role="user",
+                group_id=group["id"],
+                can_manage_group_knowhow=True,
+            ),
+            _admin=self.admin,
+        )
+        member = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="import-scope-member",
+                display_name="Import Scope Member",
+                password="pw123456",
+                system_role="user",
+                group_id=group["id"],
+            ),
+            _admin=self.admin,
+        )
+
+        await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="scope-playbook",
+                rule_text="Duplicate text across different scopes",
+                weight=2,
+                source="user",
+            ),
+            user=self.admin,
+        )
+
+        import_result = await knowhow_router.import_rules(
+            payload={
+                "rules": [
+                    {
+                        "category": "scope-playbook",
+                        "rule_text": "Duplicate text across different scopes",
+                        "weight": 3,
+                    }
+                ]
+            },
+            strategy="append",
+            user=manager,
+        )
+        self.assertEqual(import_result["imported_count"], 1)
+
+        member_rules = await knowhow_router.list_rules(
+            category="scope-playbook",
+            active_only=False,
+            user=member,
+        )
+        self.assertEqual(len(member_rules["rules"]), 1)
+        self.assertEqual(member_rules["rules"][0]["owner_group_id"], group["id"])
+
+    async def test_chat_knowhow_context_respects_group_user_visibility(self):
+        group_a = await storage.create_group("team-k", "Team K")
+        group_b = await storage.create_group("team-l", "Team L")
+        manager_a = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="chat-manager-a",
+                display_name="Chat Manager A",
+                password="pw123456",
+                system_role="user",
+                group_id=group_a["id"],
+                can_manage_group_knowhow=True,
+            ),
+            _admin=self.admin,
+        )
+        member_a = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="chat-member-a",
+                display_name="Chat Member A",
+                password="pw123456",
+                system_role="user",
+                group_id=group_a["id"],
+            ),
+            _admin=self.admin,
+        )
+        manager_b = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="chat-manager-b",
+                display_name="Chat Manager B",
+                password="pw123456",
+                system_role="user",
+                group_id=group_b["id"],
+                can_manage_group_knowhow=True,
+            ),
+            _admin=self.admin,
+        )
+        user_b = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="chat-user-b",
+                display_name="Chat User B",
+                password="pw123456",
+                system_role="user",
+                group_id=group_b["id"],
+            ),
+            _admin=self.admin,
+        )
+
+        await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="procurement_review",
+                rule_text="Group A shared rule: supplier qualification documents must be complete",
+                weight=3,
+                source="user",
+                share_to_group=True,
+            ),
+            user=manager_a,
+        )
+        await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="procurement_review",
+                rule_text="Personal rule: payment terms must include milestone acceptance",
+                weight=2,
+                source="user",
+            ),
+            user=member_a,
+        )
+        await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="procurement_review",
+                rule_text="Group B shared rule: NDA and data boundary must be explicit",
+                weight=3,
+                source="user",
+                share_to_group=True,
+            ),
+            user=manager_b,
+        )
+        await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="procurement_review",
+                rule_text="Other user private rule only for self",
+                weight=1,
+                source="user",
+            ),
+            user=user_b,
+        )
+        await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="procurement_review",
+                rule_text="Admin private rule for admin only",
+                weight=4,
+                source="user",
+            ),
+            user=self.admin,
+        )
+
+        settings = RetrievalPlannerSettings(api_url="", api_key="", model="deepseek-chat")
+        visible_rules = await context_assembler.get_knowhow_rules(
+            "What should I review about supplier qualification documents and milestone payment terms?",
+            limit=10,
+            user=member_a,
+            planner_settings=settings,
+        )
+        visible_texts = {rule["rule_text"] for rule in visible_rules}
+
+        self.assertEqual(
+            visible_texts,
+            {
+                "Group A shared rule: supplier qualification documents must be complete",
+                "Personal rule: payment terms must include milestone acceptance",
+            },
+        )
+
+    async def test_chat_knowhow_library_summary_uses_visible_scope(self):
+        group = await storage.create_group("team-m", "Team M")
+        manager = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="summary-manager",
+                display_name="Summary Manager",
+                password="pw123456",
+                system_role="user",
+                group_id=group["id"],
+                can_manage_group_knowhow=True,
+            ),
+            _admin=self.admin,
+        )
+        member = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="summary-member",
+                display_name="Summary Member",
+                password="pw123456",
+                system_role="user",
+                group_id=group["id"],
+            ),
+            _admin=self.admin,
+        )
+
+        await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="procurement_review",
+                rule_text="Group shared procurement rule",
+                weight=2,
+                source="user",
+                share_to_group=True,
+            ),
+            user=manager,
+        )
+        await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="procurement_review",
+                rule_text="Member private procurement rule",
+                weight=2,
+                source="user",
+            ),
+            user=member,
+        )
+        await knowhow_router.add_rule(
+            knowhow_router.KnowhowRuleCreate(
+                category="procurement_review",
+                rule_text="Admin private procurement rule",
+                weight=2,
+                source="user",
+            ),
+            user=self.admin,
+        )
+
+        settings = RetrievalPlannerSettings(api_url="", api_key="", model="deepseek-chat")
+        member_summary = await context_assembler.get_knowhow_rules(
+            "How many knowhow rules are available right now?",
+            limit=10,
+            user=member,
+            planner_settings=settings,
+        )
+        admin_summary = await context_assembler.get_knowhow_rules(
+            "How many knowhow rules are available right now?",
+            limit=10,
+            user=self.admin,
+            planner_settings=settings,
+        )
+
+        self.assertEqual(len(member_summary), 1)
+        self.assertIn("共 2 条", member_summary[0]["rule_text"])
+        self.assertEqual(len(admin_summary), 1)
+        self.assertIn("共 3 条", admin_summary[0]["rule_text"])
 
     async def test_invalid_access_grant_payload_returns_400(self):
         with self.assertRaises(HTTPException) as context:

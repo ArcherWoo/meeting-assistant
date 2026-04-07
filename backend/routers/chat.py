@@ -5,12 +5,15 @@
 import json
 import logging
 import re
-from typing import AsyncGenerator, Optional
+import time
+from dataclasses import dataclass, field
+from typing import Any, AsyncGenerator, Callable, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
-from services.llm_service import LLMService
+from services.context_assembler import RetrievalTraceHandler
+from services.llm_service import llm_service
 from services.llm_profiles import get_runtime_llm_config
 from services.storage import storage
 from services.context_assembler import context_assembler, AssembledContext
@@ -18,6 +21,11 @@ from services.embedding_service import embedding_service
 from services.access_control import can_access_role, is_admin
 from services.retrieval_planner import RetrievalPlannerSettings
 from services.role_config import resolve_chat_capabilities
+from services.runtime_controls import (
+    LLMConcurrencyBusyError,
+    conversation_generation_registry,
+    llm_concurrency_controller,
+)
 
 from services.system_prompt_defaults import DEFAULT_SYSTEM_PROMPTS
 from routers.auth import get_current_user
@@ -25,14 +33,119 @@ from routers.auth import get_current_user
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-llm_service = LLMService()
 
 _ATTACHMENT_SEPARATOR = "\n\n---\n📎 附件"
+
+
+def _elapsed_ms(start: float, end: Optional[float] = None) -> int:
+    return max(0, round(((end if end is not None else time.perf_counter()) - start) * 1000))
+
+
+def _finalize_stream_timings(
+    metrics: "ChatTimingMetrics",
+    llm_started_at: float,
+    request_started_at: float,
+) -> None:
+    if metrics.llm_total_ms is None:
+        metrics.llm_total_ms = _elapsed_ms(llm_started_at)
+    if metrics.end_to_end_ms is None:
+        metrics.end_to_end_ms = _elapsed_ms(request_started_at)
+
+
+@dataclass
+class ChatTimingMetrics:
+    attachment_ms: Optional[int] = None
+    message_build_ms: Optional[int] = None
+    retrieval_ms: Optional[int] = None
+    planner_ms: Optional[int] = None
+    knowledge_ms: Optional[int] = None
+    knowhow_ms: Optional[int] = None
+    skill_ms: Optional[int] = None
+    llm_first_token_ms: Optional[int] = None
+    llm_total_ms: Optional[int] = None
+    end_to_end_ms: Optional[int] = None
+
+    def to_payload(self) -> dict[str, int]:
+        payload: dict[str, int] = {}
+        for key in (
+            "attachment_ms",
+            "message_build_ms",
+            "retrieval_ms",
+            "planner_ms",
+            "knowledge_ms",
+            "knowhow_ms",
+            "skill_ms",
+            "llm_first_token_ms",
+            "llm_total_ms",
+            "end_to_end_ms",
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                payload[key] = value
+        return payload
+
+
+@dataclass
+class RetrievalTimingTrace(RetrievalTraceHandler):
+    _step_counter: int = 0
+    _step_starts: dict[int, tuple[str, float]] = field(default_factory=dict)
+    step_durations_ms: dict[str, int] = field(default_factory=dict)
+
+    async def on_stage_start(
+        self,
+        step_key: str,
+        *,
+        description: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        self._step_counter += 1
+        self._step_starts[self._step_counter] = (step_key, time.perf_counter())
+        return self._step_counter
+
+    async def on_stage_complete(
+        self,
+        step_index: int,
+        step_key: str,
+        result: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._store_duration(step_index, step_key)
+
+    async def on_stage_error(
+        self,
+        step_index: int,
+        step_key: str,
+        error: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._store_duration(step_index, step_key)
+
+    def _store_duration(self, step_index: int, step_key: str) -> None:
+        _, started_at = self._step_starts.pop(step_index, (step_key, time.perf_counter()))
+        self.step_durations_ms[step_key] = _elapsed_ms(started_at)
+
+    def apply_to_metrics(self, metrics: ChatTimingMetrics) -> None:
+        key_map = {
+            "planner": "planner_ms",
+            "retrieve_knowledge": "knowledge_ms",
+            "retrieve_knowhow": "knowhow_ms",
+            "retrieve_skill": "skill_ms",
+        }
+        for step_key, metric_name in key_map.items():
+            duration = self.step_durations_ms.get(step_key)
+            if duration is not None:
+                setattr(metrics, metric_name, duration)
 
 
 def _request_role_id(request: "ChatRequest") -> str:
     role_id = (request.role_id or getattr(request, "mode", "") or "").strip()
     return "executor" if role_id == "agent" else role_id
+
+
+def _request_conversation_id(request: "ChatRequest") -> str:
+    return (request.conversation_id or "").strip()
 
 
 def _strip_attachment_context(content: str) -> str:
@@ -220,6 +333,8 @@ class ChatRequest(BaseModel):
     role_id: str = ""
     mode: str = ""
     rag_query: str = ""
+    attachment_prepare_ms: float = 0.0
+    conversation_id: str = ""
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -270,6 +385,7 @@ async def _assemble_context(
     runtime_api_url: str = "",
     runtime_api_key: str = "",
     runtime_model: str = "",
+    trace_handler: RetrievalTraceHandler | None = None,
 ) -> AssembledContext:
     """独立的上下文组装步骤，仅 Chat 自动增强开启时才执行检索。"""
     role_id = _request_role_id(request)
@@ -307,9 +423,11 @@ async def _assemble_context(
                 api_url=runtime_api_url,
                 api_key=runtime_api_key,
                 model=runtime_model or request.model,
+                user_id=str(user.get("id") or "") if user else "",
             ),
             enabled_surfaces=enabled_surfaces,
             user=user,
+            trace_handler=trace_handler,
         )
     except Exception as e:
         logger.warning(f"[RAG] 上下文组装失败，降级为无增强回答: {e}")
@@ -319,9 +437,10 @@ async def _assemble_context(
 def _build_context_metadata_payload(
     ctx: AssembledContext,
     retrieved_ctx: Optional[AssembledContext] = None,
+    timings: Optional[dict[str, int]] = None,
 ) -> Optional[dict]:
     raw_ctx = retrieved_ctx or ctx
-    if not (ctx.has_context or raw_ctx.has_context):
+    if not (ctx.has_context or raw_ctx.has_context or timings):
         return None
 
     payload = ctx.to_metadata_payload()
@@ -337,6 +456,9 @@ def _build_context_metadata_payload(
         payload["retrieved_knowhow_count"] = retrieved_payload["knowhow_count"]
         payload["retrieved_skill_count"] = retrieved_payload["skill_count"]
         payload["retrieved_citations"] = retrieved_payload["citations"]
+
+    if timings:
+        payload["timings"] = timings
 
     return payload
 
@@ -361,12 +483,20 @@ async def _stream_with_metadata(
     ctx: AssembledContext,
     retrieved_ctx: Optional[AssembledContext] = None,
     suggested_skill: Optional[dict] = None,
+    timings: Optional[ChatTimingMetrics] = None,
+    before_metadata: Optional[Callable[[], None]] = None,
 ) -> AsyncGenerator[str, None]:
     """包装 LLM 流式输出，在 [DONE] 之前注入 context_metadata 和 skill_suggestion 事件。"""
     async for chunk in raw_stream:
         if chunk.strip() == "data: [DONE]":
+            if before_metadata:
+                before_metadata()
             # 在 [DONE] 之前注入元数据
-            context_payload = _build_context_metadata_payload(ctx, retrieved_ctx)
+            context_payload = _build_context_metadata_payload(
+                ctx,
+                retrieved_ctx,
+                timings.to_payload() if timings else None,
+            )
             if context_payload:
                 metadata = {
                     "type": "context_metadata",
@@ -402,6 +532,13 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
         raise HTTPException(status_code=400, detail="未找到可用的 LLM 配置，请先由管理员完成配置")
 
     role_id = _request_role_id(request)
+    conversation_id = _request_conversation_id(request)
+    if conversation_id:
+        conversation_owner_id = await storage.get_conversation_owner_id(conversation_id)
+        if not conversation_owner_id:
+            raise HTTPException(status_code=404, detail="对话不存在")
+        if conversation_owner_id != user.get("id"):
+            raise HTTPException(status_code=403, detail="无权访问该对话")
     role: Optional[dict] = None
     if role_id:
         role = await storage.get_role(role_id)
@@ -411,66 +548,108 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
             raise HTTPException(status_code=400, detail="角色不存在")
 
     if request.stream:
+        if conversation_id and not await conversation_generation_registry.try_acquire(conversation_id):
+            raise HTTPException(status_code=409, detail="当前对话已有回答在生成中，请稍候或先停止当前生成")
+
+        try:
+            stream_slot_cm = llm_concurrency_controller.acquire(
+                kind="stream",
+                user_id=str(user.get("id") or ""),
+            )
+            await stream_slot_cm.__aenter__()
+        except LLMConcurrencyBusyError as exc:
+            if conversation_id:
+                await conversation_generation_registry.release(conversation_id)
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+
         async def event_stream() -> AsyncGenerator[str, None]:
-            messages = await _build_messages(request)
-            enabled_surfaces = _resolve_enabled_surfaces(role_id, role)
-            should_retrieve = _has_retrieval_intent(request, messages, enabled_surfaces)
-            attachment_analysis = _looks_like_attachment_analysis(messages)
-
-            yield _format_status_event("queued", "已收到请求", "正在准备消息")
-
-            assembled_ctx = AssembledContext()
-            prompt_ctx = AssembledContext()
-
-            if should_retrieve:
-                detail = "正在检索相关知识和规则"
-                if attachment_analysis:
-                    detail = "正在整理附件问题并检索相关上下文"
-                yield _format_status_event("retrieving", "正在准备上下文", detail)
-                assembled_ctx = await _assemble_context(
-                    request,
-                    messages,
-                    user,
-                    role,
-                    runtime_api_url=llm_config["api_url"],
-                    runtime_api_key=llm_config["api_key"],
-                    runtime_model=llm_config["model"],
+            try:
+                request_started_at = time.perf_counter()
+                timing_metrics = ChatTimingMetrics(
+                    attachment_ms=max(1, round(request.attachment_prepare_ms))
+                    if request.attachment_prepare_ms > 0
+                    else None,
                 )
 
-                if assembled_ctx.has_context:
-                    fitted_ctx = assembled_ctx.fit_to_budget(_calculate_context_budget_chars(messages, request))
-                    if fitted_ctx.has_context:
-                        suffix = fitted_ctx.to_prompt_suffix()
-                        if messages and messages[0]["role"] == "system":
-                            messages[0]["content"] += f"\n\n{suffix}"
-                        else:
-                            messages = [{"role": "system", "content": suffix}] + messages
-                        prompt_ctx = fitted_ctx
+                message_build_started_at = time.perf_counter()
+                messages = await _build_messages(request)
+                timing_metrics.message_build_ms = _elapsed_ms(message_build_started_at)
+                enabled_surfaces = _resolve_enabled_surfaces(role_id, role)
+                should_retrieve = _has_retrieval_intent(request, messages, enabled_surfaces)
+                attachment_analysis = _looks_like_attachment_analysis(messages)
 
-            connect_detail = "模型开始输出后会立即显示"
-            if attachment_analysis:
-                connect_detail = "附件内容较长时，首字可能仍需几秒，请稍候"
-            yield _format_status_event("calling_model", "正在请求模型", connect_detail)
+                yield _format_status_event("queued", "已收到请求", "正在准备消息")
 
-            raw_stream = llm_service.stream_chat(
-                messages=messages,
-                model=llm_config["model"],
-                temperature=request.temperature,
-                max_tokens=request.max_tokens,
-                api_url=llm_config["api_url"],
-                api_key=llm_config["api_key"],
-            )
-            has_emitted_streaming = False
-            async for chunk in _stream_with_metadata(
-                raw_stream,
-                prompt_ctx,
-                assembled_ctx,
-                assembled_ctx.matched_skills[0] if assembled_ctx.matched_skills else None,
-            ):
-                if not has_emitted_streaming and _is_content_sse_chunk(chunk):
-                    has_emitted_streaming = True
-                    yield _format_status_event("streaming", "正在生成回答", "回答已开始输出")
-                yield chunk
+                assembled_ctx = AssembledContext()
+                prompt_ctx = AssembledContext()
+
+                if should_retrieve:
+                    retrieval_trace = RetrievalTimingTrace()
+                    retrieval_started_at = time.perf_counter()
+                    detail = "正在检索相关知识和规则"
+                    if attachment_analysis:
+                        detail = "正在整理附件问题并检索相关上下文"
+                    yield _format_status_event("retrieving", "正在准备上下文", detail)
+                    assembled_ctx = await _assemble_context(
+                        request,
+                        messages,
+                        user,
+                        role,
+                        runtime_api_url=llm_config["api_url"],
+                        runtime_api_key=llm_config["api_key"],
+                        runtime_model=llm_config["model"],
+                        trace_handler=retrieval_trace,
+                    )
+                    timing_metrics.retrieval_ms = _elapsed_ms(retrieval_started_at)
+                    retrieval_trace.apply_to_metrics(timing_metrics)
+
+                    if assembled_ctx.has_context:
+                        fitted_ctx = assembled_ctx.fit_to_budget(_calculate_context_budget_chars(messages, request))
+                        if fitted_ctx.has_context:
+                            suffix = fitted_ctx.to_prompt_suffix()
+                            if messages and messages[0]["role"] == "system":
+                                messages[0]["content"] += f"\n\n{suffix}"
+                            else:
+                                messages = [{"role": "system", "content": suffix}] + messages
+                            prompt_ctx = fitted_ctx
+
+                connect_detail = "模型开始输出后会立即显示"
+                if attachment_analysis:
+                    connect_detail = "附件内容较长时，首字可能仍需几秒，请稍候"
+                yield _format_status_event("calling_model", "正在请求模型", connect_detail)
+
+                llm_started_at = time.perf_counter()
+                raw_stream = llm_service.stream_chat(
+                    messages=messages,
+                    model=llm_config["model"],
+                    temperature=request.temperature,
+                    max_tokens=request.max_tokens,
+                    api_url=llm_config["api_url"],
+                    api_key=llm_config["api_key"],
+                    user_id=str(user.get("id") or ""),
+                    _skip_limits=True,
+                )
+                has_emitted_streaming = False
+                async for chunk in _stream_with_metadata(
+                    raw_stream,
+                    prompt_ctx,
+                    assembled_ctx,
+                    assembled_ctx.matched_skills[0] if assembled_ctx.matched_skills else None,
+                    timing_metrics,
+                    lambda: _finalize_stream_timings(timing_metrics, llm_started_at, request_started_at),
+                ):
+                    if not has_emitted_streaming and _is_content_sse_chunk(chunk):
+                        has_emitted_streaming = True
+                        timing_metrics.llm_first_token_ms = _elapsed_ms(llm_started_at)
+                        yield _format_status_event("streaming", "正在生成回答", "回答已开始输出")
+                    yield chunk
+            except LLMConcurrencyBusyError as exc:
+                error_payload = json.dumps({"stream_error": str(exc)}, ensure_ascii=False)
+                yield f"data: {error_payload}\n\n"
+            finally:
+                if conversation_id:
+                    await conversation_generation_registry.release(conversation_id)
+                await stream_slot_cm.__aexit__(None, None, None)
 
         return StreamingResponse(
             event_stream(),
@@ -482,45 +661,83 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
             },
         )
     else:
-        messages = await _build_messages(request)
-        assembled_ctx = await _assemble_context(
-            request,
-            messages,
-            user,
-            role,
-            runtime_api_url=llm_config["api_url"],
-            runtime_api_key=llm_config["api_key"],
-            runtime_model=llm_config["model"],
-        )
-        prompt_ctx = AssembledContext()
+        if conversation_id and not await conversation_generation_registry.try_acquire(conversation_id):
+            raise HTTPException(status_code=409, detail="当前对话已有回答在生成中，请稍候或先停止当前生成")
+        try:
+            request_started_at = time.perf_counter()
+            timing_metrics = ChatTimingMetrics(
+                attachment_ms=max(1, round(request.attachment_prepare_ms))
+                if request.attachment_prepare_ms > 0
+                else None,
+            )
 
-        if assembled_ctx.has_context:
-            fitted_ctx = assembled_ctx.fit_to_budget(_calculate_context_budget_chars(messages, request))
-            if fitted_ctx.has_context:
-                suffix = fitted_ctx.to_prompt_suffix()
-                if messages and messages[0]["role"] == "system":
-                    messages[0]["content"] += f"\n\n{suffix}"
-                else:
-                    messages = [{"role": "system", "content": suffix}] + messages
-                prompt_ctx = fitted_ctx
+            message_build_started_at = time.perf_counter()
+            messages = await _build_messages(request)
+            timing_metrics.message_build_ms = _elapsed_ms(message_build_started_at)
 
-        result = await llm_service.chat(
-            messages=messages,
-            model=llm_config["model"],
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-            api_url=llm_config["api_url"],
-            api_key=llm_config["api_key"],
-        )
-        response = dict(result)
-        context_payload = _build_context_metadata_payload(prompt_ctx, assembled_ctx)
-        if context_payload:
-            response["context_metadata"] = context_payload
-        top_skill = assembled_ctx.matched_skills[0] if assembled_ctx.matched_skills else None
-        skill_payload = _build_skill_suggestion_payload(top_skill)
-        if skill_payload:
-            response["skill_suggestion"] = skill_payload
-        return response
+            enabled_surfaces = _resolve_enabled_surfaces(role_id, role)
+            should_retrieve = _has_retrieval_intent(request, messages, enabled_surfaces)
+
+            assembled_ctx = AssembledContext()
+            if should_retrieve:
+                retrieval_trace = RetrievalTimingTrace()
+                retrieval_started_at = time.perf_counter()
+                assembled_ctx = await _assemble_context(
+                    request,
+                    messages,
+                    user,
+                    role,
+                    runtime_api_url=llm_config["api_url"],
+                    runtime_api_key=llm_config["api_key"],
+                    runtime_model=llm_config["model"],
+                    trace_handler=retrieval_trace,
+                )
+                timing_metrics.retrieval_ms = _elapsed_ms(retrieval_started_at)
+                retrieval_trace.apply_to_metrics(timing_metrics)
+
+            prompt_ctx = AssembledContext()
+
+            if assembled_ctx.has_context:
+                fitted_ctx = assembled_ctx.fit_to_budget(_calculate_context_budget_chars(messages, request))
+                if fitted_ctx.has_context:
+                    suffix = fitted_ctx.to_prompt_suffix()
+                    if messages and messages[0]["role"] == "system":
+                        messages[0]["content"] += f"\n\n{suffix}"
+                    else:
+                        messages = [{"role": "system", "content": suffix}] + messages
+                    prompt_ctx = fitted_ctx
+
+            llm_started_at = time.perf_counter()
+            result = await llm_service.chat(
+                messages=messages,
+                model=llm_config["model"],
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+                api_url=llm_config["api_url"],
+                api_key=llm_config["api_key"],
+                user_id=str(user.get("id") or ""),
+                request_kind="stream",
+            )
+            timing_metrics.llm_total_ms = _elapsed_ms(llm_started_at)
+            timing_metrics.end_to_end_ms = _elapsed_ms(request_started_at)
+            response = dict(result)
+            context_payload = _build_context_metadata_payload(
+                prompt_ctx,
+                assembled_ctx,
+                timing_metrics.to_payload(),
+            )
+            if context_payload:
+                response["context_metadata"] = context_payload
+            top_skill = assembled_ctx.matched_skills[0] if assembled_ctx.matched_skills else None
+            skill_payload = _build_skill_suggestion_payload(top_skill)
+            if skill_payload:
+                response["skill_suggestion"] = skill_payload
+            return response
+        except LLMConcurrencyBusyError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        finally:
+            if conversation_id:
+                await conversation_generation_registry.release(conversation_id)
 
 
 @router.post("/chat/auto-title")
@@ -566,6 +783,7 @@ async def generate_auto_title(request: AutoTitleRequest, user: dict = Depends(ge
             max_tokens=30,
             api_url=llm_config["api_url"],
             api_key=llm_config["api_key"],
+            user_id=str(user.get("id") or ""),
         )
         title = llm_service.extract_text_content(result)
         title = re.sub(r'^["“”‘’\s]+|["“”‘’\s]+$', "", title).strip()
@@ -575,6 +793,8 @@ async def generate_auto_title(request: AutoTitleRequest, user: dict = Depends(ge
         if not title or title == "新对话":
             title = _fallback_auto_title(dialogue_lines)
         return {"title": title or "新对话"}
+    except LLMConcurrencyBusyError as e:
+        raise HTTPException(status_code=429, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"标题生成失败: {str(e)}")
 
@@ -589,9 +809,12 @@ async def test_connection(config: ConfigUpdateRequest, user: dict = Depends(get_
             api_url=config.api_url,
             api_key=config.api_key,
             model=config.model,
+            user_id=str(user.get("id") or ""),
         )
         model_count = len(result.get("available_models", []))
         message = f"连接成功，发现 {model_count} 个可用模型" if model_count else "连接成功"
         return {"success": True, "message": message, **result}
+    except LLMConcurrencyBusyError as e:
+        raise HTTPException(status_code=429, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"连接失败: {str(e)}")

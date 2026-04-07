@@ -7,6 +7,7 @@ GET  /api/knowledge/stats         - 知识库统计
 GET  /api/knowledge/imports       - 已导入文件列表
 DELETE /api/knowledge/imports/{id} - 删除已导入记录
 """
+import asyncio
 import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -17,6 +18,7 @@ from services.knowledge_service import knowledge_service
 from services.hybrid_search import hybrid_search
 from services.embedding_service import embedding_service
 from services.retrieval_planner import RetrievalPlannerSettings
+from services.runtime_controls import AttachmentParseBusyError, attachment_parse_controller
 from services.storage import storage
 from routers.auth import get_current_user
 
@@ -157,16 +159,19 @@ async def ingest_file(
                 if not embedding_fn_ready:
                     embedding_fn, embedding_status = await _build_embedding_fn()
                     embedding_fn_ready = True
-                result = await knowledge_service.ingest_file(
-                    file_content=content,
-                    filename=validated_filename,
-                    llm_fn=None,
-                    embedding_fn=embedding_fn,
-                    owner_id=user.get("id"),
-                    is_encrypted=is_encrypted,
-                )
+                async with attachment_parse_controller.acquire(mode="ingest"):
+                    result = await knowledge_service.ingest_file(
+                        file_content=content,
+                        filename=validated_filename,
+                        llm_fn=None,
+                        embedding_fn=embedding_fn,
+                        owner_id=user.get("id"),
+                        is_encrypted=is_encrypted,
+                    )
                 result["embedding_status"] = dict(embedding_status)
                 results.append(result)
+            except AttachmentParseBusyError as e:
+                errors.append({"filename": filename, "error": str(e), "status_code": 429})
             except ValueError as e:
                 errors.append({"filename": filename, "error": str(e)})
             except Exception as e:
@@ -178,7 +183,7 @@ async def ingest_file(
 
     if not batch_mode:
         if errors and not results:
-            raise HTTPException(status_code=400, detail=errors[0]["error"])
+            raise HTTPException(status_code=int(errors[0].get("status_code") or 400), detail=errors[0]["error"])
         if results:
             return results[0]
 
@@ -210,6 +215,7 @@ async def query_knowledge(request: QueryRequest, user: dict = Depends(get_curren
                 api_url=llm_runtime["api_url"],
                 api_key=llm_runtime["api_key"],
                 model=llm_runtime["model"],
+                user_id=str(user.get("id") or ""),
             ),
         )
         return results
@@ -238,6 +244,7 @@ async def get_stats(user: dict = Depends(get_current_user)) -> dict:
 async def extract_text(
     file: UploadFile | None = File(None),
     files: list[UploadFile] | None = File(None),
+    fast_mode: bool = Form(True),
     user: dict = Depends(get_current_user),
 ) -> dict:
     """
@@ -248,24 +255,34 @@ async def extract_text(
     if not uploads:
         raise HTTPException(status_code=400, detail="至少上传一个文件")
 
-    results: list[dict] = []
-    errors: list[dict] = []
+    extractor = (
+        knowledge_service.extract_text_fast
+        if fast_mode
+        else knowledge_service.extract_text_structured
+    )
 
-    try:
-        for upload in uploads:
-            filename = upload.filename or "未命名文件"
-            try:
-                validated_filename, content = await _validate_and_read_upload(upload)
-                result = await knowledge_service.extract_text(
+    async def _extract_single(upload: UploadFile) -> tuple[dict | None, dict | None]:
+        filename = upload.filename or "未命名文件"
+        try:
+            validated_filename, content = await _validate_and_read_upload(upload)
+            async with attachment_parse_controller.acquire(mode="fast" if fast_mode else "ingest"):
+                result = await extractor(
                     file_content=content,
                     filename=validated_filename,
                 )
-                results.append(result)
-            except ValueError as e:
-                errors.append({"filename": filename, "error": str(e)})
-            except Exception as e:
-                logger.error(f"文件文本提取失败: {filename} - {e}")
-                errors.append({"filename": filename, "error": f"文本提取失败: {str(e)}"})
+            return result, None
+        except AttachmentParseBusyError as e:
+            return None, {"filename": filename, "error": str(e), "status_code": 429}
+        except ValueError as e:
+            return None, {"filename": filename, "error": str(e)}
+        except Exception as e:
+            logger.error(f"文件文本提取失败: {filename} - {e}")
+            return None, {"filename": filename, "error": f"文本提取失败: {str(e)}"}
+
+    try:
+        extracted_items = await asyncio.gather(*[_extract_single(upload) for upload in uploads])
+        results = [result for result, _ in extracted_items if result is not None]
+        errors = [error for _, error in extracted_items if error is not None]
     except Exception as e:
         logger.error(f"文件文本提取失败: {e}")
         raise HTTPException(status_code=500, detail=f"文本提取失败: {str(e)}")

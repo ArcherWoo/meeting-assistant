@@ -13,7 +13,7 @@ from typing import List, Optional
 
 from services.embedding_service import embedding_service
 from services.knowledge_service import knowledge_service
-from services.llm_service import LLMService
+from services.llm_service import LLMService, llm_service as shared_llm_service
 from services.retrieval_planner import RetrievalPlannerSettings
 from services.storage import storage
 from utils.text_utils import extract_han_segments
@@ -25,7 +25,7 @@ class HybridSearchService:
     """Hybrid retrieval for structured records and document chunks."""
 
     def __init__(self, llm_service: LLMService | None = None) -> None:
-        self._llm_service = llm_service or LLMService()
+        self._llm_service = llm_service or shared_llm_service
 
     MAX_QUERY_TERMS = 14
     MAX_CHINESE_SUBTERM_LENGTH = 6
@@ -267,6 +267,7 @@ class HybridSearchService:
                 max_tokens=600,
                 api_url=settings.api_url,
                 api_key=settings.api_key,
+                user_id=settings.user_id or None,
             )
             text = self._llm_service.extract_text_content(response)
             if not text:

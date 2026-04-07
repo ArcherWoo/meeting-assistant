@@ -1,4 +1,4 @@
-# Current State
+﻿# Current State
 
 This document supersedes any older design notes that still mention localStorage
 chat persistence or Prompt Template / Prompt Pack runtime support.
@@ -243,6 +243,68 @@ chat persistence or Prompt Template / Prompt Pack runtime support.
 - The fallback is intentionally bounded:
   - it only reranks already recalled candidates
   - it does not ask the model to search the whole corpus blindly
+
+## 2026-04-07 Chat / Know-how 权限与会话可见性
+
+- Chat 链路现在会按当前登录用户过滤 Know-how，可见范围不再是全库默认开放。
+- `backend/routers/chat.py` 会把当前登录用户传入 `context_assembler.assemble(...)`。
+- `backend/services/context_assembler.py` 在拉取 Know-how 规则、分类和规则库摘要时，统一带上：
+  - `user_id`
+  - `group_id`
+  - `is_admin`
+- `backend/services/storage.py::list_knowhow_rules(...)` 当前生效的 Chat / 列表可见范围是：
+  - 自己的个人规则
+  - 自己所在用户组的共享规则
+  - 显式授权给自己的规则
+  - 显式授权给自己所在用户组的规则
+  - `public` 授权规则
+  - 管理员可见全部规则
+- 因此，Chat 下 Know-how 的真实权限语义是“个人 / 本组共享 / 显式授权 / 管理员全量”。
+- `backend/services/access_control.py` 已与 `storage.py` 的 Know-how 权限口径对齐：
+  - 组共享规则由当前组内 `can_manage_group_knowhow=1` 的用户管理
+  - 个人规则由 owner 管理
+  - 管理员保留全量管理能力
+- 组内 Know-how manager 现在支持双轨建规则：
+  - 可创建个人专属规则
+  - 可创建共享给本组的 baseline 规则
+- 组内 Know-how manager 的分类管理与导入导出也已按作用域收口：
+  - 管理员管理全局分类和全量导入导出
+  - 组内 manager 只能管理本组共享规则实际使用到的分类
+  - 组内 manager 只能追加导入、导出本组作用域内的规则
+  - 导入去重按其可管理范围计算，不再拿全库静默去重
+- Chat 命中 Know-how 后会真实回写 `hit_count`，后续排序可逐步反映真实使用热度。
+- Chat 中的 Know-how 引用元数据已经增强，支持展示：
+  - 命中分类
+  - 命中方式
+  - 命中置信度
+  - 命中原因
+- “规则库问答”和“规则应用召回”已经分流：
+  - 询问“规则库里有多少条规则 / 有哪些分类”时，走规则库摘要分支
+  - 规则库摘要按当前用户可见范围实时生成，不回答全库数字
+
+## 2026-04-07 会话隐私口径
+
+- 会话列表、会话详情、消息列表与消息读写，现在统一按“仅本人可见 / 可操作”处理。
+- 不再存在“管理员默认可见所有人对话”的产品行为。
+- 当前统一口径：
+  - 管理员只看自己的会话
+  - 组内 manager 只看自己的会话
+  - 普通用户只看自己的会话
+- `backend/routers/conversations.py` 已收口两处关键逻辑：
+  - `GET /api/chat/state` 只返回当前用户自己的会话
+  - 会话访问校验不再给管理员开全量直通
+- 这意味着前端新建对话、左侧会话列表、消息加载都会天然遵循“仅本人会话”的可见性。
+
+## 2026-04-07 回归验证
+
+- Know-how Chat 权限回归已补齐：
+  - 组用户在 Chat 中只能命中自己可见的 Know-how
+  - 规则库统计问法返回的是当前可见范围的规则数
+- 会话隐私回归已补齐：
+  - 管理员的聊天状态只返回自己创建的会话
+  - 管理员不能读取其他用户会话消息
+- 当前通过的回归基线：
+  - `pytest backend/tests -q` -> `120 passed`
 
 ## Role Naming
 

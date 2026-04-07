@@ -57,6 +57,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # surfacing a noisy traceback.
         logger.info("Lifespan cancelled during shutdown")
     finally:
+        from services.llm_service import llm_service
+
+        await llm_service.aclose()
         await storage.close()
         logger.info("Resources cleaned up")
 

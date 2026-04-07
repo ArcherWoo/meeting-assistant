@@ -13,6 +13,7 @@ if BACKEND_ROOT not in sys.path:
     sys.path.insert(0, BACKEND_ROOT)
 
 from routers import knowledge as knowledge_router
+from services.runtime_controls import AttachmentParseBusyError
 
 
 def make_upload(filename: str, content: bytes) -> UploadFile:
@@ -28,7 +29,7 @@ class KnowledgeRouterTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             knowledge_router.knowledge_service,
-            "extract_text",
+            "extract_text_fast",
             AsyncMock(return_value={
                 "filename": "note.txt",
                 "file_type": "txt",
@@ -50,7 +51,7 @@ class KnowledgeRouterTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             knowledge_router.knowledge_service,
-            "extract_text",
+            "extract_text_fast",
             AsyncMock(side_effect=[
                 {"filename": "first.txt", "file_type": "txt", "text": "A", "char_count": 1},
                 {"filename": "second.txt", "file_type": "txt", "text": "B", "char_count": 1},
@@ -62,6 +63,39 @@ class KnowledgeRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["success_count"], 2)
         self.assertEqual(result["failed_count"], 0)
         self.assertEqual([item["filename"] for item in result["files"]], ["first.txt", "second.txt"])
+
+    async def test_extract_text_can_switch_to_structured_mode(self):
+        upload = make_upload("note.txt", b"meeting notes")
+
+        with patch.object(
+            knowledge_router.knowledge_service,
+            "extract_text_structured",
+            AsyncMock(return_value={
+                "filename": "note.txt",
+                "file_type": "txt",
+                "text": "structured notes",
+                "char_count": 16,
+                "warnings": [],
+            }),
+        ) as structured_mock:
+            result = await knowledge_router.extract_text(file=upload, files=None, fast_mode=False)
+
+        self.assertEqual(result["text"], "structured notes")
+        structured_mock.assert_awaited_once()
+
+    async def test_extract_text_returns_429_when_parse_slots_are_exhausted(self):
+        upload = make_upload("note.txt", b"meeting notes")
+
+        with patch.object(
+            knowledge_router.knowledge_service,
+            "extract_text_fast",
+            AsyncMock(side_effect=AttachmentParseBusyError("当前附件解析任务较多，请稍后再试")),
+        ):
+            with self.assertRaises(HTTPException) as context:
+                await knowledge_router.extract_text(file=upload, files=None)
+
+        self.assertIn(context.exception.status_code, {400, 429})
+        self.assertIn("解析任务较多", context.exception.detail)
 
     async def test_ingest_file_batch_returns_partial_failures_without_raising(self):
         uploads = [

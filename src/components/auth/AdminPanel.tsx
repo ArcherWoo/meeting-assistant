@@ -31,10 +31,12 @@ type CreateUserFormState = {
   password: string;
   system_role: 'user' | 'admin';
   group_id: string;
+  can_manage_group_knowhow: boolean;
 };
 type EditUserFormState = {
   display_name: string;
   group_id: string;
+  can_manage_group_knowhow: boolean;
   password: string;
 };
 type GroupFormState = {
@@ -56,10 +58,12 @@ const EMPTY_NEW_USER: CreateUserFormState = {
   password: '',
   system_role: 'user',
   group_id: '',
+  can_manage_group_knowhow: false,
 };
 const EMPTY_EDIT_USER: EditUserFormState = {
   display_name: '',
   group_id: '',
+  can_manage_group_knowhow: false,
   password: '',
 };
 const EMPTY_GROUP_FORM: GroupFormState = {
@@ -142,6 +146,7 @@ export default function AdminPanel() {
         display_name: displayName,
         password,
         group_id: newUser.group_id || undefined,
+        can_manage_group_knowhow: newUser.group_id ? newUser.can_manage_group_knowhow : false,
       });
       setShowAddUser(false);
       setNewUser(EMPTY_NEW_USER);
@@ -161,6 +166,7 @@ export default function AdminPanel() {
     setEditUserForm({
       display_name: user.display_name,
       group_id: user.group_id ?? '',
+      can_manage_group_knowhow: Boolean(user.can_manage_group_knowhow),
       password: '',
     });
   };
@@ -185,6 +191,7 @@ export default function AdminPanel() {
       const payload: Record<string, unknown> = {
         display_name: displayName,
         group_id: editUserForm.group_id,
+        can_manage_group_knowhow: editUserForm.group_id ? editUserForm.can_manage_group_knowhow : false,
       };
       if (password) {
         payload.password = password;
@@ -244,6 +251,29 @@ export default function AdminPanel() {
       await updateUser(user.id, { system_role: newRole });
       await refresh();
       showToast(newRole === 'admin' ? '已升为管理员' : '已降为普通用户');
+    } catch (e) {
+      setError((e as Error).message);
+      showToast((e as Error).message, false);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleToggleGroupKnowhowManager = async (user: User) => {
+    if (user.system_role === 'admin') {
+      return;
+    }
+    if (!user.group_id) {
+      showToast('请先为该用户绑定用户组，再设置组内 Know-how 管理权限', false);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const nextValue = !user.can_manage_group_knowhow;
+      await updateUser(user.id, { can_manage_group_knowhow: nextValue });
+      await refresh();
+      showToast(nextValue ? '已开启组内 Know-how 管理权限' : '已关闭组内 Know-how 管理权限');
     } catch (e) {
       setError((e as Error).message);
       showToast((e as Error).message, false);
@@ -439,13 +469,29 @@ export default function AdminPanel() {
                 <select
                   className={inputCls}
                   value={newUser.group_id}
-                  onChange={(e) => setNewUser({ ...newUser, group_id: e.target.value })}
+                  onChange={(e) => setNewUser({
+                    ...newUser,
+                    group_id: e.target.value,
+                    can_manage_group_knowhow: e.target.value ? newUser.can_manage_group_knowhow : false,
+                  })}
                 >
                   <option value="">无分组</option>
                   {groups.map((group) => (
                     <option key={group.id} value={group.id}>{group.name}</option>
                   ))}
                 </select>
+                <p className="md:col-span-2 text-xs text-text-secondary">
+                  先绑定用户组，再决定是否授予“本组 Know-how 管理员”权限。
+                </p>
+                <label className="flex items-center gap-2 rounded-md border border-surface-divider bg-surface px-3 py-2 text-sm text-text-secondary dark:border-dark-divider dark:bg-dark-sidebar">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(newUser.can_manage_group_knowhow) && Boolean(newUser.group_id)}
+                    disabled={!newUser.group_id}
+                    onChange={(e) => setNewUser({ ...newUser, can_manage_group_knowhow: e.target.checked })}
+                  />
+                  <span>设为本组 Know-how 管理员</span>
+                </label>
               </div>
               <button
                 onClick={() => void handleAddUser()}
@@ -478,13 +524,29 @@ export default function AdminPanel() {
                 <select
                   className={inputCls}
                   value={editUserForm.group_id}
-                  onChange={(e) => setEditUserForm({ ...editUserForm, group_id: e.target.value })}
+                  onChange={(e) => setEditUserForm({
+                    ...editUserForm,
+                    group_id: e.target.value,
+                    can_manage_group_knowhow: e.target.value ? editUserForm.can_manage_group_knowhow : false,
+                  })}
                 >
                   <option value="">无分组</option>
                   {groups.map((group) => (
                     <option key={group.id} value={group.id}>{group.name}</option>
                   ))}
                 </select>
+                <p className="md:col-span-2 text-xs text-text-secondary">
+                  绑定用户组后，可授予该用户管理本组 Know-how 规则的权限。
+                </p>
+                <label className="flex items-center gap-2 rounded-md border border-surface-divider bg-surface px-3 py-2 text-sm text-text-secondary dark:border-dark-divider dark:bg-dark-sidebar">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(editUserForm.can_manage_group_knowhow) && Boolean(editUserForm.group_id)}
+                    disabled={!editUserForm.group_id}
+                    onChange={(e) => setEditUserForm({ ...editUserForm, can_manage_group_knowhow: e.target.checked })}
+                  />
+                  <span>授予本组 Know-how 管理员权限</span>
+                </label>
                 <input
                   className={inputCls}
                   type="password"
@@ -511,12 +573,13 @@ export default function AdminPanel() {
             </div>
           )}
 
-          <UserTable
+          <EnhancedUserManagementTable
             users={users}
             groups={groups}
             onEdit={handleStartEditUser}
             onDelete={handleDeleteUser}
             onToggleRole={handleToggleRole}
+            onToggleGroupKnowhowManager={handleToggleGroupKnowhowManager}
           />
         </div>
       )}
@@ -609,7 +672,7 @@ export default function AdminPanel() {
   );
 }
 
-function UserTable({
+export function UserTable({
   users,
   groups,
   onEdit,
@@ -696,6 +759,247 @@ function UserTable({
           {users.length === 0 && (
             <tr>
               <td colSpan={5} className="px-4 py-8 text-center text-text-secondary">暂无用户</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export function UserManagementTable({
+  users,
+  groups,
+  onEdit,
+  onDelete,
+  onToggleRole,
+}: {
+  users: User[];
+  groups: Group[];
+  onEdit: (user: User) => void;
+  onDelete: (id: string) => Promise<void>;
+  onToggleRole: (user: User) => Promise<void>;
+}) {
+  const getGroupName = (groupId: string | null) => {
+    if (!groupId) return '-';
+    return groups.find((group) => group.id === groupId)?.name ?? groupId;
+  };
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-surface-divider dark:border-dark-divider">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="bg-surface text-text-secondary dark:bg-dark-sidebar">
+            <th className="px-4 py-2 text-left font-medium">用户名</th>
+            <th className="px-4 py-2 text-left font-medium">显示名</th>
+            <th className="px-4 py-2 text-left font-medium">角色</th>
+            <th className="px-4 py-2 text-left font-medium">用户组</th>
+            <th className="px-4 py-2 text-left font-medium">组内 Know-how 管理</th>
+            <th className="px-4 py-2 text-right font-medium">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {users.map((user) => {
+            const isDefaultAdmin = user.username === DEFAULT_ADMIN_USERNAME && user.system_role === 'admin';
+            return (
+              <tr
+                key={user.id}
+                className="border-t border-surface-divider bg-white dark:border-dark-divider dark:bg-dark-card"
+              >
+                <td className="px-4 py-2 text-text-primary dark:text-text-dark-primary">{user.username}</td>
+                <td className="px-4 py-2 text-text-primary dark:text-text-dark-primary">{user.display_name}</td>
+                <td className="px-4 py-2">
+                  <span
+                    className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${
+                      user.system_role === 'admin'
+                        ? 'bg-primary/10 text-primary'
+                        : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+                    }`}
+                  >
+                    {user.system_role === 'admin' ? '管理员' : '用户'}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-text-secondary">{getGroupName(user.group_id)}</td>
+                <td className="px-4 py-2">
+                  {user.group_id ? (
+                    <span
+                      className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${
+                        user.can_manage_group_knowhow
+                          ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300'
+                          : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+                      }`}
+                    >
+                      {user.can_manage_group_knowhow ? '已开启' : '未开启'}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-text-secondary">未绑定用户组</span>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-right">
+                  <div className="flex flex-wrap justify-end gap-3">
+                    <button
+                      onClick={() => onEdit(user)}
+                      className="text-xs text-text-secondary transition-colors hover:text-primary"
+                    >
+                      修改
+                    </button>
+                    {!isDefaultAdmin && (
+                      <button
+                        onClick={() => void onToggleRole(user)}
+                        className="text-xs text-text-secondary transition-colors hover:text-primary"
+                      >
+                        {user.system_role === 'admin' ? '降为用户' : '升为管理员'}
+                      </button>
+                    )}
+                    {isDefaultAdmin && (
+                      <span className="text-xs text-text-secondary">默认 admin 不可降级或删除</span>
+                    )}
+                    {!isDefaultAdmin && (
+                      <button
+                        onClick={() => void onDelete(user.id)}
+                        className="text-xs text-text-secondary transition-colors hover:text-red-500"
+                      >
+                        删除
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+          {users.length === 0 && (
+            <tr>
+              <td colSpan={6} className="px-4 py-8 text-center text-text-secondary">暂无用户</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function EnhancedUserManagementTable({
+  users,
+  groups,
+  onEdit,
+  onDelete,
+  onToggleRole,
+  onToggleGroupKnowhowManager,
+}: {
+  users: User[];
+  groups: Group[];
+  onEdit: (user: User) => void;
+  onDelete: (id: string) => Promise<void>;
+  onToggleRole: (user: User) => Promise<void>;
+  onToggleGroupKnowhowManager: (user: User) => Promise<void>;
+}) {
+  const getGroupName = (groupId: string | null) => {
+    if (!groupId) return '-';
+    return groups.find((group) => group.id === groupId)?.name ?? groupId;
+  };
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-surface-divider dark:border-dark-divider">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="bg-surface text-text-secondary dark:bg-dark-sidebar">
+            <th className="px-4 py-2 text-left font-medium">用户名</th>
+            <th className="px-4 py-2 text-left font-medium">显示名</th>
+            <th className="px-4 py-2 text-left font-medium">角色</th>
+            <th className="px-4 py-2 text-left font-medium">用户组</th>
+            <th className="px-4 py-2 text-left font-medium">组内 Know-how 管理</th>
+            <th className="px-4 py-2 text-right font-medium">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {users.map((user) => {
+            const isAdmin = user.system_role === 'admin';
+            const isDefaultAdmin = isAdmin && user.username === DEFAULT_ADMIN_USERNAME;
+
+            return (
+              <tr
+                key={user.id}
+                className="border-t border-surface-divider bg-white dark:border-dark-divider dark:bg-dark-card"
+              >
+                <td className="px-4 py-2 text-text-primary dark:text-text-dark-primary">{user.username}</td>
+                <td className="px-4 py-2 text-text-primary dark:text-text-dark-primary">{user.display_name}</td>
+                <td className="px-4 py-2">
+                  <span
+                    className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${
+                      isAdmin
+                        ? 'bg-primary/10 text-primary'
+                        : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+                    }`}
+                  >
+                    {isAdmin ? '管理员' : '用户'}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-text-secondary">{getGroupName(user.group_id)}</td>
+                <td className="px-4 py-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {isAdmin ? (
+                      <span className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-primary/10 text-primary">
+                        全局可管
+                      </span>
+                    ) : user.group_id ? (
+                      <>
+                        <span
+                          className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${
+                            user.can_manage_group_knowhow
+                              ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300'
+                              : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+                          }`}
+                        >
+                          {user.can_manage_group_knowhow ? '已开启' : '未开启'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => void onToggleGroupKnowhowManager(user)}
+                          className="text-xs text-text-secondary transition-colors hover:text-primary"
+                        >
+                          {user.can_manage_group_knowhow ? '关闭' : '开启'}
+                        </button>
+                      </>
+                    ) : (
+                      <span className="text-xs text-text-secondary">需先绑定用户组</span>
+                    )}
+                  </div>
+                </td>
+                <td className="px-4 py-2 text-right">
+                  <div className="flex flex-wrap justify-end gap-3">
+                    <button
+                      onClick={() => onEdit(user)}
+                      className="text-xs text-text-secondary transition-colors hover:text-primary"
+                    >
+                      修改
+                    </button>
+                    {!isDefaultAdmin && (
+                      <button
+                        onClick={() => void onToggleRole(user)}
+                        className="text-xs text-text-secondary transition-colors hover:text-primary"
+                      >
+                        {isAdmin ? '降为用户' : '升为管理员'}
+                      </button>
+                    )}
+                    {isDefaultAdmin && (
+                      <span className="text-xs text-text-secondary">默认 admin 不可降级或删除</span>
+                    )}
+                    {!isDefaultAdmin && (
+                      <button
+                        onClick={() => void onDelete(user.id)}
+                        className="text-xs text-text-secondary transition-colors hover:text-red-500"
+                      >
+                        删除
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+          {users.length === 0 && (
+            <tr>
+              <td colSpan={6} className="px-4 py-8 text-center text-text-secondary">暂无用户</td>
             </tr>
           )}
         </tbody>

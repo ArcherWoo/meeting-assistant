@@ -1,9 +1,12 @@
+import asyncio
 import os
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from fastapi import HTTPException
 
 
 BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -13,8 +16,12 @@ if BACKEND_ROOT not in sys.path:
 from services.llm_service import LLMService
 from services.context_assembler import AssembledContext, ContextAssembler
 from services.retrieval_planner import RetrievalPlan, RetrievalPlanAction
+from services.runtime_controls import LLMConcurrencyBusyError
+from routers import chat as chat_router
 from routers.chat import (
+    ChatTimingMetrics,
     ChatRequest,
+    _build_context_metadata_payload,
     _calculate_context_budget_chars,
     _format_status_event,
     _is_content_sse_chunk,
@@ -26,6 +33,9 @@ from routers.chat import (
 class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.service = LLMService()
+
+    async def asyncTearDown(self):
+        await self.service.aclose()
 
     def test_candidate_model_urls_supports_v1_base(self):
         self.assertEqual(
@@ -75,6 +85,31 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertIn("请先填写模型名再测试", str(context.exception))
+
+    async def test_test_connection_returns_quickly_when_probe_succeeds_before_model_list(self):
+        async def slow_list_models(*args, **kwargs):
+            await asyncio.sleep(1.0)
+            return ["deepseek-chat", "deepseek-reasoner"]
+
+        with patch.object(self.service, "list_models", side_effect=slow_list_models):
+            with patch.object(
+                self.service,
+                "chat",
+                AsyncMock(return_value={"model": "deepseek-chat"}),
+            ):
+                result = await asyncio.wait_for(
+                    self.service.test_connection(
+                        api_url="https://api.deepseek.com/v1",
+                        api_key="sk-test",
+                        model="deepseek-chat",
+                    ),
+                    timeout=0.25,
+                )
+
+        self.assertEqual(result["model"], "deepseek-chat")
+        self.assertEqual(result["available_models"], ["deepseek-chat"])
+        self.assertTrue(result["selected_model_available"])
+        self.assertTrue(result["fallback"])
 
     def test_strip_attachment_context_keeps_only_user_query(self):
         polluted = "帮我分析采购价格\n\n---\n📎 附件“报价单.xlsx”内容（123 字符）：\n\n很长的附件正文"
@@ -144,6 +179,56 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(citation["char_end"], 268)
         self.assertIn("A 供应商服务器报价", citation["snippet"])
 
+    def test_context_metadata_payload_includes_knowhow_route_details(self):
+        ctx = AssembledContext(
+            knowhow_rules=[
+                {
+                    "id": "kh-1",
+                    "category": "采购预审",
+                    "title": "供应商资质要求",
+                    "rule_text": "供应商必须提供 ISO 9001 质量管理体系认证或相关行业资质。",
+                    "weight": 4,
+                    "route_strategy": "llm_route",
+                    "route_confidence": "high",
+                    "route_rationale": "采购风险判断",
+                    "llm_judge_rationale": "供应商资质是当前问题的核心",
+                }
+            ],
+            source_summary="Know-how(1条)",
+        )
+
+        payload = ctx.to_metadata_payload()
+        citation = payload["citations"][0]
+
+        self.assertEqual(citation["title"], "供应商资质要求")
+        self.assertEqual(citation["label"], "采购预审")
+        self.assertIn("分类 采购预审", citation["location"])
+        self.assertIn("命中方式 LLM 意图路由", citation["location"])
+        self.assertIn("原因 供应商资质是当前问题的核心", citation["location"])
+        self.assertEqual(citation["route_strategy"], "llm_route")
+        self.assertEqual(citation["route_confidence"], "high")
+        self.assertEqual(citation["route_rationale"], "采购风险判断")
+        self.assertEqual(citation["llm_judge_rationale"], "供应商资质是当前问题的核心")
+
+    def test_context_metadata_payload_keeps_timings_without_retrieval_context(self):
+        payload = _build_context_metadata_payload(
+            AssembledContext(),
+            timings={
+                "attachment_ms": 32,
+                "llm_total_ms": 1680,
+                "end_to_end_ms": 1815,
+            },
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["knowledge_count"], 0)
+        self.assertEqual(payload["knowhow_count"], 0)
+        self.assertEqual(payload["skill_count"], 0)
+        self.assertEqual(payload["timings"]["attachment_ms"], 32)
+        self.assertEqual(payload["timings"]["llm_total_ms"], 1680)
+        self.assertEqual(payload["timings"]["end_to_end_ms"], 1815)
+
     async def test_stream_with_metadata_injects_events_before_done(self):
         async def raw_stream():
             yield 'data: {"choices":[{"delta":{"content":"你好"}}]}\n\n'
@@ -164,7 +249,17 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
             source_summary="知识库(1条) + Skill(1个)",
         )
 
-        chunks = [chunk async for chunk in _stream_with_metadata(raw_stream(), ctx)]
+        chunks = [
+            chunk async for chunk in _stream_with_metadata(
+                raw_stream(),
+                ctx,
+                timings=ChatTimingMetrics(
+                    retrieval_ms=420,
+                    llm_first_token_ms=780,
+                    llm_total_ms=1560,
+                ),
+            )
+        ]
 
         self.assertIn('"content":"你好"', chunks[0])
         self.assertIn('"type": "context_metadata"', chunks[1])
@@ -173,6 +268,7 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"file_name": "采购台账.xlsx"', chunks[1])
         self.assertIn('"title": "IT - 服务器"', chunks[1])
         self.assertIn('"schema_version": 2', chunks[1])
+        self.assertIn('"timings": {"retrieval_ms": 420, "llm_first_token_ms": 780, "llm_total_ms": 1560}', chunks[1])
         self.assertIn('"type": "skill_suggestion"', chunks[2])
         self.assertIn('"matched_keywords": ["采购", "预审"]', chunks[2])
         self.assertEqual(chunks[3], 'data: [DONE]\n\n')
@@ -272,6 +368,64 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([rule["id"] for rule in filtered], ["supplier-rule"])
 
+    async def test_context_assembler_records_knowhow_hits_for_retrieved_rules(self):
+        assembler = ContextAssembler()
+        routed_rules = [
+            {
+                "id": "supplier-rule",
+                "category": "采购预审",
+                "title": "供应商资质要求",
+                "rule_text": "供应商必须提供 ISO 9001 质量管理体系认证或相关行业资质",
+                "weight": 3,
+                "route_strategy": "heuristic_category_match",
+                "route_confidence": "high",
+                "route_rationale": "资质问题",
+            }
+        ]
+        routing_result = SimpleNamespace(
+            rules=tuple(routed_rules),
+            decision=SimpleNamespace(strategy="heuristic_category_match", categories=("采购预审",)),
+        )
+
+        with patch("services.context_assembler.knowhow_service.list_rules", AsyncMock(return_value=routed_rules)):
+            with patch("services.context_assembler.knowhow_service.list_categories", AsyncMock(return_value=[{"name": "采购预审"}])):
+                with patch("services.context_assembler.knowhow_router.retrieve_rules", AsyncMock(return_value=routing_result)):
+                    with patch("services.context_assembler.knowhow_service.record_rule_hits", AsyncMock()) as record_hits:
+                        filtered = await assembler._get_knowhow_rules("这份采购材料需要重点看供应商资质和认证吗")
+
+        self.assertEqual([rule["id"] for rule in filtered], ["supplier-rule"])
+        record_hits.assert_awaited_once()
+        recorded_rules = record_hits.await_args.args[0]
+        self.assertEqual([rule["id"] for rule in recorded_rules], ["supplier-rule"])
+
+    async def test_context_assembler_returns_library_summary_for_knowhow_stats_question(self):
+        assembler = ContextAssembler()
+        summary_rule = {
+            "id": "virtual-knowhow-library-summary",
+            "category": "规则库概览",
+            "title": "Know-how 规则库统计",
+            "rule_text": "当前你可访问的 Know-how 规则共 12 条，其中启用 10 条，覆盖 4 个分类。",
+            "weight": 0,
+            "is_virtual": True,
+            "route_strategy": "library_summary",
+            "route_confidence": "high",
+            "route_rationale": "规则库统计问题",
+        }
+
+        with patch("services.context_assembler.knowhow_service.list_rules", AsyncMock(return_value=[])):
+            with patch("services.context_assembler.knowhow_service.list_categories", AsyncMock(return_value=[{"name": "采购预审", "rule_count": 5}])):
+                with patch("services.context_assembler.knowhow_router.inspect_library_query", AsyncMock(return_value=SimpleNamespace(
+                    use_summary=True,
+                    focus="stats",
+                    rationale="规则库统计问题",
+                    confidence="high",
+                ))):
+                    with patch("services.context_assembler.knowhow_service.build_library_summary_rule", AsyncMock(return_value=summary_rule)) as build_summary:
+                        filtered = await assembler._get_knowhow_rules("Knowhow 规则库现在有几条规则？")
+
+        self.assertEqual([rule["id"] for rule in filtered], ["virtual-knowhow-library-summary"])
+        build_summary.assert_awaited_once()
+
     async def test_context_assembler_sorts_knowhow_rules_by_relevance_then_weight(self):
         assembler = ContextAssembler()
         rules = [
@@ -338,6 +492,63 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ctx.knowledge_results), 1)
         self.assertEqual(len(ctx.knowhow_rules), 1)
         self.assertEqual(ctx.source_summary, "知识库(1条) + Know-how(1条)")
+
+
+class ChatConcurrencyGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_completions_rejects_busy_conversation(self):
+        request = chat_router.ChatRequest(
+            messages=[chat_router.ChatMessage(role="user", content="你好")],
+            api_key="sk-test",
+            stream=True,
+            conversation_id="conv-1",
+        )
+        user = {"id": "user-1", "system_role": "user"}
+
+        with patch("routers.chat.get_runtime_llm_config", AsyncMock(return_value={
+            "api_url": "https://example.com/v1",
+            "api_key": "sk-test",
+            "model": "deepseek-chat",
+            "profile_id": "",
+            "profile": None,
+        })):
+            with patch.object(chat_router.storage, "get_conversation_owner_id", AsyncMock(return_value="user-1")):
+                with patch.object(chat_router.conversation_generation_registry, "try_acquire", AsyncMock(return_value=False)):
+                    with self.assertRaises(HTTPException) as context:
+                        await chat_router.chat_completions(request, user=user)
+
+        self.assertEqual(context.exception.status_code, 409)
+        self.assertIn("生成中", context.exception.detail)
+
+
+class ChatConcurrencyOverloadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_completions_returns_429_before_stream_when_llm_slots_are_exhausted(self):
+        request = chat_router.ChatRequest(
+            messages=[chat_router.ChatMessage(role="user", content="浣犲ソ")],
+            api_key="sk-test",
+            stream=True,
+            conversation_id="conv-1",
+        )
+        user = {"id": "user-1", "system_role": "user"}
+
+        with patch("routers.chat.get_runtime_llm_config", AsyncMock(return_value={
+            "api_url": "https://example.com/v1",
+            "api_key": "sk-test",
+            "model": "deepseek-chat",
+            "profile_id": "",
+            "profile": None,
+        })):
+            with patch.object(chat_router.storage, "get_conversation_owner_id", AsyncMock(return_value="user-1")):
+                with patch.object(chat_router.conversation_generation_registry, "try_acquire", AsyncMock(return_value=True)):
+                    with patch.object(
+                        chat_router.llm_concurrency_controller,
+                        "acquire",
+                        side_effect=LLMConcurrencyBusyError("当前模型服务繁忙，请稍后重试"),
+                    ):
+                        with self.assertRaises(HTTPException) as context:
+                            await chat_router.chat_completions(request, user=user)
+
+        self.assertEqual(context.exception.status_code, 429)
+        self.assertIn("模型服务繁忙", context.exception.detail)
 
 
 if __name__ == "__main__":

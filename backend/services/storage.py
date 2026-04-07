@@ -125,6 +125,8 @@ CREATE TABLE IF NOT EXISTS knowhow_rules (
     confidence  REAL DEFAULT 0.5,
     source      TEXT DEFAULT 'user',
     is_active   INTEGER DEFAULT 1,
+    owner_id    TEXT,
+    owner_group_id TEXT,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -268,6 +270,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     system_role   TEXT DEFAULT 'user',
     group_id      TEXT,
+    can_manage_group_knowhow INTEGER DEFAULT 0,
     is_active     INTEGER DEFAULT 1,
     created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -327,8 +330,10 @@ class StorageService:
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")  # 提升并发性能
         await self._db.execute("PRAGMA foreign_keys=ON")
-        await self._db.executescript(_SCHEMA_SQL)
+        deferred_schema_statements = await self._apply_schema_sql()
         await self._run_migrations()
+        for statement in deferred_schema_statements:
+            await self._db.execute(statement)
         self._conversation_columns = await self._table_columns("conversations")
         await self._db.commit()
         # 确保默认工作区存在
@@ -356,6 +361,22 @@ class StorageService:
         cursor = await self.db.execute(f"PRAGMA table_info({table_name})")
         rows = await cursor.fetchall()
         return {str(row["name"]) for row in rows}
+
+    async def _apply_schema_sql(self) -> list[str]:
+        deferred_statements: list[str] = []
+        for raw_statement in _SCHEMA_SQL.split(";"):
+            statement = raw_statement.strip()
+            if not statement:
+                continue
+            try:
+                await self.db.execute(statement)
+            except aiosqlite.OperationalError as exc:
+                message = str(exc).lower()
+                if statement.upper().startswith("CREATE INDEX IF NOT EXISTS") and "no such column" in message:
+                    deferred_statements.append(statement)
+                    continue
+                raise
+        return deferred_statements
 
     async def _run_migrations(self) -> None:
         """补齐历史数据库缺失字段，将旧 conversations 表升级为角色会话模型。"""
@@ -518,6 +539,11 @@ class StorageService:
             await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN not_applies_when TEXT DEFAULT ''")
         if "examples" not in knowhow_rule_columns:
             await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN examples TEXT DEFAULT '[]'")
+        if "owner_group_id" not in knowhow_rule_columns:
+            await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN owner_group_id TEXT")
+        await self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_knowhow_owner_group ON knowhow_rules(owner_group_id)"
+        )
 
         knowhow_category_columns = await self._table_columns("knowhow_categories")
         if "description" not in knowhow_category_columns:
@@ -529,22 +555,41 @@ class StorageService:
         if "applies_to" not in knowhow_category_columns:
             await self.db.execute("ALTER TABLE knowhow_categories ADD COLUMN applies_to TEXT DEFAULT ''")
 
+        user_columns = await self._table_columns("users")
+        if "can_manage_group_knowhow" not in user_columns:
+            await self.db.execute(
+                "ALTER TABLE users ADD COLUMN can_manage_group_knowhow INTEGER DEFAULT 0"
+            )
+
     # ===== RBAC User/Group CRUD =====
 
     async def create_user(
         self, username: str, display_name: str, password_hash: str,
         system_role: str = "user", group_id: Optional[str] = None,
+        can_manage_group_knowhow: bool = False,
     ) -> dict:
         uid = gen_id()
         now = utc_now_iso()
         await self.db.execute(
-            "INSERT INTO users (id, username, display_name, password_hash, system_role, group_id, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (uid, username, display_name, password_hash, system_role, group_id, now, now),
+            "INSERT INTO users (id, username, display_name, password_hash, system_role, group_id, can_manage_group_knowhow, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                uid,
+                username,
+                display_name,
+                password_hash,
+                system_role,
+                group_id,
+                1 if can_manage_group_knowhow else 0,
+                now,
+                now,
+            ),
         )
         await self.db.commit()
         return {"id": uid, "username": username, "display_name": display_name,
-                "system_role": system_role, "group_id": group_id, "is_active": 1,
+                "system_role": system_role, "group_id": group_id,
+                "can_manage_group_knowhow": 1 if can_manage_group_knowhow else 0,
+                "is_active": 1,
                 "created_at": now, "updated_at": now}
 
     async def get_user_by_username(self, username: str) -> Optional[dict]:
@@ -554,10 +599,20 @@ class StorageService:
         return await self._fetchone("SELECT * FROM users WHERE id=?", (user_id,))
 
     async def list_users(self) -> list[dict]:
-        return await self._fetchall("SELECT id, username, display_name, system_role, group_id, is_active, created_at, updated_at FROM users ORDER BY created_at ASC")
+        return await self._fetchall(
+            "SELECT id, username, display_name, system_role, group_id, can_manage_group_knowhow, is_active, created_at, updated_at "
+            "FROM users ORDER BY created_at ASC"
+        )
 
     async def update_user(self, user_id: str, **kwargs) -> Optional[dict]:
-        allowed = {"display_name", "system_role", "group_id", "is_active", "password_hash"}
+        allowed = {
+            "display_name",
+            "system_role",
+            "group_id",
+            "can_manage_group_knowhow",
+            "is_active",
+            "password_hash",
+        }
         fields = {k: v for k, v in kwargs.items() if k in allowed}
         if not fields:
             return await self.get_user_by_id(user_id)
@@ -611,7 +666,14 @@ class StorageService:
         row = await self._fetchone("SELECT id FROM groups WHERE id=?", (group_id,))
         if not row:
             return False
-        await self.db.execute("UPDATE users SET group_id=NULL WHERE group_id=?", (group_id,))
+        await self.db.execute(
+            "UPDATE users SET group_id=NULL, can_manage_group_knowhow=0 WHERE group_id=?",
+            (group_id,),
+        )
+        await self.db.execute(
+            "UPDATE knowhow_rules SET owner_group_id=NULL, updated_at=? WHERE owner_group_id=?",
+            (utc_now_iso(), group_id),
+        )
         await self.db.execute("DELETE FROM access_grants WHERE grant_type='group' AND grantee_id=?", (group_id,))
         await self.db.execute("DELETE FROM groups WHERE id=?", (group_id,))
         await self.db.commit()
@@ -1682,14 +1744,15 @@ class StorageService:
         weight: int = 2,
         source: str = "user",
         owner_id: Optional[str] = None,
+        owner_group_id: Optional[str] = None,
     ) -> str:
         rid = gen_id()
         now = utc_now_iso()
         await self.db.execute(
             "INSERT INTO knowhow_rules ("
             "id, category, title, rule_text, trigger_terms, exclude_terms, applies_when, not_applies_when, "
-            "examples, weight, source, owner_id, created_at, updated_at"
-            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "examples, weight, source, owner_id, owner_group_id, created_at, updated_at"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 rid,
                 category,
@@ -1703,6 +1766,7 @@ class StorageService:
                 weight,
                 source,
                 owner_id,
+                owner_group_id,
                 now,
                 now,
             ),
@@ -1795,8 +1859,11 @@ class StorageService:
             conditions.append("is_active=1")
 
         if user_id and not is_admin:
-            rbac_parts = ["owner_id=?"]
+            rbac_parts = ["(owner_id=? AND COALESCE(owner_group_id, '')='')"]
             rbac_params: list = [user_id]
+            if group_id:
+                rbac_parts.append("owner_group_id=?")
+                rbac_params.append(group_id)
             rbac_parts.append(
                 "id IN (SELECT resource_id FROM access_grants"
                 " WHERE resource_type='knowhow' AND grant_type='public')"

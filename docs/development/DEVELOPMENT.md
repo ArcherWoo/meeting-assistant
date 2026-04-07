@@ -1,4 +1,4 @@
-# Meeting Assistant — 开发总结文档
+﻿# Meeting Assistant — 开发总结文档
 
 > **项目形态**：纯 Web 应用（Vite 前端 + Python FastAPI 后端）。Electron 桌面版已废弃。
 
@@ -569,3 +569,77 @@ OCR 相关实现集中在 `backend/services/document_parsing/parsers/ocr_utils.p
 - scanned PDF OCR block segmentation
 - OCR table recovery
 - citation locator rich metadata
+---
+
+## 2026-04-07 开发补充记录：Know-how 权限收口与会话隐私调整
+
+### 1. Chat 与 Know-how 权限链路
+
+- 重新核查并确认了 `chat -> context_assembler -> knowhow_service -> storage/access_control` 这条链路已经打通。
+- Chat 下 Know-how 的可见范围现在按当前登录用户计算，不再默认把规则库当成全局资源注入。
+- 当前生效口径为：
+  - 个人规则
+  - 本组共享规则
+  - 显式授权给当前用户的规则
+  - 显式授权给当前用户组的规则
+  - `public` 规则
+  - 管理员全量
+
+### 2. Know-how 管理作用域
+
+- 组内 `can_manage_group_knowhow=1` 的用户具备“本组 Know-how manager”能力，但仅在本组作用域内生效。
+- 组内 manager 支持双轨建规则：
+  - 创建自己的个人规则
+  - 创建共享给本组的 baseline 规则
+- 分类管理权限已与作用域对齐：
+  - 管理员管理全局分类
+  - 组内 manager 只能管理本组共享规则实际使用到的分类
+- 导入 / 导出也已按作用域收口：
+  - 管理员可全量导入导出
+  - 组内 manager 只能追加导入、导出本组规则
+  - 导入去重按其可管理范围计算
+
+### 3. Chat 命中闭环
+
+- Chat 命中的 Know-how 规则现在会回写 `hit_count`。
+- Know-how 引用元数据已增强，可携带：
+  - 命中分类
+  - 命中方式
+  - 命中置信度
+  - 命中原因
+- “规则库问答”与“规则应用召回”已经分流：
+  - 问规则库本身时，走规则库摘要
+  - 问业务判断时，走规则召回
+- 规则库摘要按当前用户可见范围实时生成，不再回答全库数字。
+
+### 4. 会话隐私模型
+
+- 会话列表和会话访问权限已统一调整为“仅本人可见 / 可操作”。
+- 本次明确移除了管理员查看所有用户会话的默认行为。
+- 当前统一口径：
+  - 管理员只看自己的会话
+  - 组内 manager 只看自己的会话
+  - 普通用户只看自己的会话
+
+### 5. 关键实现文件
+
+- `backend/routers/chat.py`
+- `backend/services/context_assembler.py`
+- `backend/services/knowhow_service.py`
+- `backend/services/knowhow_router.py`
+- `backend/services/storage.py`
+- `backend/services/access_control.py`
+- `backend/routers/knowhow.py`
+- `backend/routers/conversations.py`
+- `backend/tests/test_auth_permissions.py`
+- `backend/tests/test_conversations_router.py`
+
+### 6. 本次验证结果
+
+- `pytest backend/tests -q` -> `120 passed`
+- 本次验证重点覆盖：
+  - Chat 下 Know-how 权限作用域
+  - 规则库统计问法的可见范围
+  - 组内 manager 的规则 / 分类 / 导入导出作用域
+  - 管理员仅可见自己的会话
+  - 管理员不能访问他人会话消息

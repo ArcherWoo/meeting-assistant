@@ -1,21 +1,33 @@
-/**
- * Know-how 规则库管理界面
- * 支持规则的 CRUD 操作、分类筛选、启用/禁用
- * 分类增删改操作内联在筛选行中，无独立 Tab
- */
-import { useState, useEffect, useCallback, useMemo, useRef, type ChangeEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
 import clsx from 'clsx';
-import { emitAppDataInvalidation } from '@/utils/appInvalidation';
-import {
-  listKnowhowRules, createKnowhowRule, updateKnowhowRule,
-  deleteKnowhowRule, getKnowhowStats, listKnowhowCategories,
-  renameKnowhowCategory, deleteKnowhowCategory,
-  exportKnowhowRules, importKnowhowRules, createKnowhowCategory,
-} from '@/services/api';
-import type { KnowhowExportData, KnowhowImportStrategy, KnowhowRule } from '@/types';
 
-/** 规则分类选项 */
+import { useAuthStore } from '@/stores/authStore';
+import {
+  createKnowhowCategory,
+  createKnowhowRule,
+  deleteKnowhowCategory,
+  deleteKnowhowRule,
+  exportKnowhowRules,
+  getKnowhowStats,
+  importKnowhowRules,
+  listKnowhowCategories,
+  listKnowhowRules,
+  renameKnowhowCategory,
+  updateKnowhowRule,
+} from '@/services/api';
+import { emitAppDataInvalidation } from '@/utils/appInvalidation';
+import type {
+  KnowhowCategory,
+  KnowhowExportData,
+  KnowhowImportStrategy,
+  KnowhowRule,
+} from '@/types';
+
 type RuleStatusFilter = 'all' | 'active' | 'inactive';
+
+interface Props {
+  standalone?: boolean;
+}
 
 function getImportRuleCount(payload: unknown): number {
   if (Array.isArray(payload)) return payload.length;
@@ -62,38 +74,42 @@ function buildImportNotice(result: {
   deleted_count: number;
   total_after_import: number;
 }): string {
-  const action = result.strategy === 'replace' ? `已覆盖导入，先清空了 ${result.deleted_count} 条旧规则。` : '已追加导入。';
+  const action = result.strategy === 'replace'
+    ? `已覆盖导入，并先清空 ${result.deleted_count} 条旧规则。`
+    : '已追加导入。';
   const skipped = result.skipped_count > 0 ? `跳过重复 ${result.skipped_count} 条。` : '';
   return `${action} 本次读取 ${result.total_in_file} 条，成功导入 ${result.imported_count} 条。${skipped} 当前共有 ${result.total_after_import} 条规则。`;
 }
 
-interface Props {
-  /** 是否作为独立面板展示（vs 嵌入 ContextPanel） */
-  standalone?: boolean;
+function getRuleOwnershipLabel(rule: KnowhowRule): string {
+  return rule.owner_group_id ? '本组共享' : '个人规则';
 }
 
 export default function KnowhowManager({ standalone = true }: Props) {
+  const user = useAuthStore((state) => state.user);
+  const userIsAdmin = user?.system_role === 'admin';
+  const userCanManageGroupKnowhow = Boolean(user?.group_id && user?.can_manage_group_knowhow);
+  const allowGroupSharing = !userIsAdmin && userCanManageGroupKnowhow;
+  const canManageLibrary = userIsAdmin || userCanManageGroupKnowhow;
+
   const [rules, setRules] = useState<KnowhowRule[]>([]);
-  // 后端返回 { total_rules, active_rules, categories: string[], total_hits }
   const [stats, setStats] = useState<{ total_rules: number; active_rules: number; categories: string[]; total_hits: number } | null>(null);
-  const [categories, setCategories] = useState<Array<{ name: string; rule_count: number }>>([]);
-  const [filterCategory, setFilterCategory] = useState<string>('');
+  const [categories, setCategories] = useState<KnowhowCategory[]>([]);
+  const [filterCategory, setFilterCategory] = useState('');
   const [statusFilter, setStatusFilter] = useState<RuleStatusFilter>('all');
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<'import' | 'export' | ''>('');
   const [editingRule, setEditingRule] = useState<Partial<KnowhowRule> | null>(null);
-  const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
-  const [pendingImport, setPendingImport] = useState<{ fileName: string; ruleCount: number; payload: unknown } | null>(null);
-  const [importStrategy, setImportStrategy] = useState<KnowhowImportStrategy>('append');
-
-  // 分类内联管理状态
-  const [renamingCat, setRenamingCat] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState('');
-  const [deletingCat, setDeletingCat] = useState<string | null>(null);
-  const [deleteRules, setDeleteRulesFlag] = useState(true);
+  const [notice, setNotice] = useState('');
   const [addingCategory, setAddingCategory] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
+  const [renamingCategory, setRenamingCategory] = useState('');
+  const [renameValue, setRenameValue] = useState('');
+  const [deletingCategory, setDeletingCategory] = useState('');
+  const [deleteRules, setDeleteRules] = useState(true);
+  const [pendingImport, setPendingImport] = useState<{ fileName: string; ruleCount: number; payload: unknown } | null>(null);
+  const [importStrategy, setImportStrategy] = useState<KnowhowImportStrategy>('append');
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const categoryOptions = useMemo(
@@ -102,8 +118,30 @@ export default function KnowhowManager({ standalone = true }: Props) {
       ...rules.map((rule) => rule.category),
       ...(editingRule?.category ? [editingRule.category] : []),
     ].filter(Boolean))),
-    [categories, editingRule?.category, rules]
+    [categories, editingRule?.category, rules],
   );
+
+  const visibleRules = useMemo(() => rules.filter((rule) => {
+    const categoryMatched = !filterCategory || rule.category === filterCategory;
+    const statusMatched =
+      statusFilter === 'all'
+        ? true
+        : statusFilter === 'active'
+          ? Boolean(rule.is_active)
+          : !rule.is_active;
+    return categoryMatched && statusMatched;
+  }), [filterCategory, rules, statusFilter]);
+
+  const statusCounts = useMemo(() => {
+    const scopedRules = filterCategory
+      ? rules.filter((rule) => rule.category === filterCategory)
+      : rules;
+    return {
+      all: scopedRules.length,
+      active: scopedRules.filter((rule) => Boolean(rule.is_active)).length,
+      inactive: scopedRules.filter((rule) => !rule.is_active).length,
+    };
+  }, [filterCategory, rules]);
 
   const categoryCounts = useMemo(() => {
     const counts = rules.reduce<Record<string, number>>((acc, rule) => {
@@ -116,31 +154,37 @@ export default function KnowhowManager({ standalone = true }: Props) {
     return counts;
   }, [categories, rules]);
 
-  const statusCounts = useMemo(() => {
-    const scopedRules = filterCategory
-      ? rules.filter((rule) => rule.category === filterCategory)
-      : rules;
+  const canManageRule = useCallback((rule: KnowhowRule) => {
+    if (userIsAdmin) return true;
+    if (!user?.id) return false;
+    if (rule.owner_group_id) {
+      return Boolean(userCanManageGroupKnowhow && user.group_id === rule.owner_group_id);
+    }
+    return rule.owner_id === user.id;
+  }, [user?.group_id, user?.id, userCanManageGroupKnowhow, userIsAdmin]);
 
-    return {
-      all: scopedRules.length,
-      active: scopedRules.filter((rule) => Boolean(rule.is_active)).length,
-      inactive: scopedRules.filter((rule) => !rule.is_active).length,
-    };
-  }, [filterCategory, rules]);
+  const canManageCategory = useCallback((name: string) => {
+    const category = categories.find((item) => item.name === name);
+    return Boolean(category?.can_manage);
+  }, [categories]);
 
-  const visibleRules = useMemo(() => rules.filter((rule) => {
-    const categoryMatched = !filterCategory || rule.category === filterCategory;
-    const statusMatched =
-      statusFilter === 'all'
-        ? true
-        : statusFilter === 'active'
-          ? Boolean(rule.is_active)
-          : !rule.is_active;
+  const openCreateRule = useCallback(() => {
+    setEditingRule({
+      category: categoryOptions[0] ?? '采购预审',
+      rule_text: '',
+      weight: 1.0,
+      source: 'manual',
+      share_to_group: false,
+    });
+  }, [categoryOptions]);
 
-    return categoryMatched && statusMatched;
-  }), [filterCategory, rules, statusFilter]);
+  const openEditRule = useCallback((rule: KnowhowRule) => {
+    setEditingRule({
+      ...rule,
+      share_to_group: Boolean(allowGroupSharing && user?.group_id && rule.owner_group_id === user.group_id),
+    });
+  }, [allowGroupSharing, user?.group_id]);
 
-  /** 加载规则列表和统计 */
   const loadData = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -153,49 +197,66 @@ export default function KnowhowManager({ standalone = true }: Props) {
       setRules(ruleList);
       setStats(statsData);
       setCategories(categoryList);
-    } catch (e: unknown) {
-      setError((e as Error).message);
+    } catch (err) {
+      setError((err as Error).message);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
 
-  /** 确认重命名分类 */
-  const handleRenameCategory = async () => {
-    if (!renamingCat || !renameValue.trim()) return;
+  const handleSave = useCallback(async () => {
+    if (!editingRule?.rule_text?.trim() || !editingRule.category) return;
     try {
-      const nextName = renameValue.trim();
-      await renameKnowhowCategory(renamingCat, nextName);
-      if (filterCategory === renamingCat) setFilterCategory(nextName);
-      setRenamingCat(null);
-      setRenameValue('');
-      setNotice(`分类“${renamingCat}”已重命名为“${nextName}”`);
+      if (editingRule.id) {
+        await updateKnowhowRule(editingRule.id, {
+          category: editingRule.category,
+          rule_text: editingRule.rule_text,
+          weight: editingRule.weight,
+          is_active: editingRule.is_active,
+          share_to_group: allowGroupSharing ? Boolean(editingRule.share_to_group) : undefined,
+        });
+      } else {
+        await createKnowhowRule({
+          category: editingRule.category,
+          rule_text: editingRule.rule_text,
+          weight: editingRule.weight ?? 1.0,
+          source: editingRule.source ?? 'manual',
+          share_to_group: allowGroupSharing ? Boolean(editingRule.share_to_group) : undefined,
+        });
+      }
+      setEditingRule(null);
       await loadData();
       emitAppDataInvalidation(['knowhow']);
-    } catch (e: unknown) {
-      setError((e as Error).message);
+    } catch (err) {
+      setError((err as Error).message);
     }
-  };
+  }, [allowGroupSharing, editingRule, loadData]);
 
-  /** 确认删除分类 */
-  const handleDeleteCategory = async () => {
-    if (!deletingCat) return;
+  const handleDeleteRule = useCallback(async (ruleId: string) => {
     try {
-      await deleteKnowhowCategory(deletingCat, deleteRules);
-      if (filterCategory === deletingCat) setFilterCategory('');
-      setDeletingCat(null);
-      setDeleteRulesFlag(true);
+      await deleteKnowhowRule(ruleId);
       await loadData();
       emitAppDataInvalidation(['knowhow']);
-    } catch (e: unknown) {
-      setError((e as Error).message);
+    } catch (err) {
+      setError((err as Error).message);
     }
-  };
+  }, [loadData]);
 
-  /** 确认新建分类（新建一条该分类的空规则编辑表单） */
-  const handleAddCategory = async () => {
+  const handleToggleRule = useCallback(async (rule: KnowhowRule) => {
+    try {
+      await updateKnowhowRule(rule.id, { is_active: rule.is_active ? 0 : 1 });
+      await loadData();
+      emitAppDataInvalidation(['knowhow']);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }, [loadData]);
+
+  const handleAddCategory = useCallback(async () => {
     const name = newCategoryName.trim();
     if (!name) return;
     try {
@@ -206,105 +267,80 @@ export default function KnowhowManager({ standalone = true }: Props) {
       setNotice(`分类“${name}”已创建`);
       await loadData();
       emitAppDataInvalidation(['knowhow']);
-    } catch (e: unknown) {
-      setError((e as Error).message);
+    } catch (err) {
+      setError((err as Error).message);
     }
-  };
+  }, [loadData, newCategoryName]);
 
-  /** 保存规则（新建或更新） */
-  const handleSave = async () => {
-    if (!editingRule?.rule_text?.trim() || !editingRule?.category) return;
+  const handleRenameCategory = useCallback(async () => {
+    const nextName = renameValue.trim();
+    if (!renamingCategory || !nextName) return;
     try {
-      if (editingRule.id) {
-        await updateKnowhowRule(editingRule.id, {
-          category: editingRule.category,
-          rule_text: editingRule.rule_text,
-          weight: editingRule.weight,
-          is_active: editingRule.is_active,
-        });
-      } else {
-        await createKnowhowRule({
-          category: editingRule.category,
-          rule_text: editingRule.rule_text,
-          weight: editingRule.weight ?? 1.0,
-          source: editingRule.source ?? 'manual',
-        });
-      }
-      setEditingRule(null);
+      await renameKnowhowCategory(renamingCategory, nextName);
+      if (filterCategory === renamingCategory) setFilterCategory(nextName);
+      setNotice(`分类“${renamingCategory}”已重命名为“${nextName}”`);
+      setRenamingCategory('');
+      setRenameValue('');
       await loadData();
       emitAppDataInvalidation(['knowhow']);
-    } catch (e: unknown) {
-      setError((e as Error).message);
+    } catch (err) {
+      setError((err as Error).message);
     }
-  };
+  }, [filterCategory, loadData, renameValue, renamingCategory]);
 
-  /** 删除规则 */
-  const handleDelete = async (ruleId: string) => {
+  const handleDeleteCategory = useCallback(async () => {
+    if (!deletingCategory) return;
     try {
-      await deleteKnowhowRule(ruleId);
+      await deleteKnowhowCategory(deletingCategory, deleteRules);
+      if (filterCategory === deletingCategory) setFilterCategory('');
+      setDeletingCategory('');
+      setDeleteRules(true);
       await loadData();
       emitAppDataInvalidation(['knowhow']);
-    } catch (e: unknown) {
-      setError((e as Error).message);
+    } catch (err) {
+      setError((err as Error).message);
     }
-  };
+  }, [deleteRules, deletingCategory, filterCategory, loadData]);
 
-  /** 切换规则启用状态 */
-  const handleToggleActive = async (rule: KnowhowRule) => {
-    try {
-      await updateKnowhowRule(rule.id, { is_active: rule.is_active ? 0 : 1 });
-      await loadData();
-      emitAppDataInvalidation(['knowhow']);
-    } catch (e: unknown) {
-      setError((e as Error).message);
-    }
-  };
-
-  /** 导出规则库 */
-  const handleExport = async () => {
+  const handleExport = useCallback(async () => {
     setBusyAction('export');
     setError('');
     try {
       const data = await exportKnowhowRules();
       downloadKnowhowExport(data);
       setNotice(`已导出 ${data.total_rules} 条规则。`);
-    } catch (e: unknown) {
+    } catch (err) {
       setNotice('');
-      setError((e as Error).message);
+      setError((err as Error).message);
     } finally {
       setBusyAction('');
     }
-  };
+  }, []);
 
-  /** 选择导入文件 */
-  const handleImportFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+  const handleImportFileChange = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
 
     setError('');
     setNotice('');
-
     try {
       const text = await file.text();
       const payload = JSON.parse(text) as unknown;
       const ruleCount = getImportRuleCount(payload);
       if (ruleCount <= 0) {
-        throw new Error('导入文件中没有可识别的规则');
+        throw new Error('导入文件中没有可识别的规则。');
       }
-
       setImportStrategy('append');
       setPendingImport({ fileName: file.name, ruleCount, payload });
     } catch {
       setPendingImport(null);
-      setError('导入文件不是有效的 Know-how JSON');
+      setError('导入文件不是有效的 Know-how JSON。');
     }
-  };
+  }, []);
 
-  /** 确认导入 */
-  const handleConfirmImport = async () => {
+  const handleConfirmImport = useCallback(async () => {
     if (!pendingImport) return;
-
     setBusyAction('import');
     setError('');
     try {
@@ -317,23 +353,22 @@ export default function KnowhowManager({ standalone = true }: Props) {
       setNotice(buildImportNotice(result));
       await loadData();
       emitAppDataInvalidation(['knowhow']);
-    } catch (e: unknown) {
+    } catch (err) {
       setNotice('');
-      setError((e as Error).message);
+      setError((err as Error).message);
     } finally {
       setBusyAction('');
     }
-  };
+  }, [importStrategy, loadData, pendingImport]);
 
   return (
     <div className={clsx('flex flex-col', standalone ? 'h-full' : 'max-h-[500px]')}>
-      {/* 头部：标题 + 统计 + 新建规则 */}
       <div className="win-toolbar flex items-center justify-between px-4 py-3">
         <div>
           <h3 className="text-sm font-medium">Know-how 规则库</h3>
           {stats && (
-            <p className="text-xs text-text-secondary mt-0.5">
-              共 {stats.total_rules} 条规则，{stats.active_rules} 条启用
+            <p className="mt-0.5 text-xs text-text-secondary">
+              共 {stats.total_rules} 条规则，启用 {stats.active_rules} 条
             </p>
           )}
         </div>
@@ -343,244 +378,281 @@ export default function KnowhowManager({ standalone = true }: Props) {
             type="file"
             accept=".json,application/json"
             className="hidden"
-            onChange={handleImportFileChange}
+            onChange={(event) => void handleImportFileChange(event)}
           />
           <button
-            onClick={handleExport}
-            disabled={busyAction === 'import' || busyAction === 'export'}
+            onClick={() => void handleExport()}
+            disabled={!canManageLibrary || busyAction !== ''}
             className="win-button h-8 px-3 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+            title={userIsAdmin ? '导出全部规则库' : '导出本组规则库'}
           >
             {busyAction === 'export' ? '导出中...' : '导出'}
           </button>
           <button
             onClick={() => importInputRef.current?.click()}
-            disabled={busyAction === 'import' || busyAction === 'export'}
+            disabled={!canManageLibrary || busyAction !== ''}
             className="win-button h-8 px-3 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+            title={userIsAdmin ? '导入规则库' : '导入到本组规则库'}
           >
             {busyAction === 'import' ? '导入中...' : '导入'}
           </button>
-          <button
-            onClick={() => setEditingRule({ category: categoryOptions[0] ?? '采购预审', rule_text: '', weight: 1.0, source: 'manual' })}
-            className="win-button-primary h-8 px-3 text-xs"
-          >
+          <button onClick={openCreateRule} className="win-button-primary h-8 px-3 text-xs">
             + 新建规则
           </button>
         </div>
       </div>
 
-      {/* 错误提示 */}
       {error && (
-        <div className="mx-4 mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">
+        <div className="mx-4 mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
           {error}
           <button onClick={() => setError('')} className="ml-2 underline">关闭</button>
         </div>
       )}
 
-      {/* 成功提示 */}
       {notice && (
-        <div className="mx-4 mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300">
+        <div className="mx-4 mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
           {notice}
           <button onClick={() => setNotice('')} className="ml-2 underline">关闭</button>
         </div>
       )}
 
-      {/* 分类筛选行（含内联增删改） */}
       <div className="flex flex-wrap gap-2 overflow-x-auto border-b border-surface-divider px-4 py-2.5 scrollbar-thin dark:border-dark-divider">
-        <FilterChip label="全部分类" active={!filterCategory} count={rules.length} onClick={() => setFilterCategory('')} />
-        {categoryOptions.map((cat) => (
+        <FilterChip
+          label="全部分类"
+          active={!filterCategory}
+          count={rules.length}
+          onClick={() => setFilterCategory('')}
+        />
+        {categoryOptions.map((categoryName) => (
           <CategoryChip
-            key={cat}
-            label={cat}
-            active={filterCategory === cat}
-            count={categoryCounts[cat] ?? 0}
-            onSelect={() => setFilterCategory(cat)}
-            onRename={() => { setRenamingCat(cat); setRenameValue(cat); }}
-            onDelete={() => { setDeletingCat(cat); setDeleteRulesFlag(true); }}
+            key={categoryName}
+            label={categoryName}
+            active={filterCategory === categoryName}
+            count={categoryCounts[categoryName] ?? 0}
+            onSelect={() => setFilterCategory(categoryName)}
+            onRename={() => {
+              setRenamingCategory(categoryName);
+              setRenameValue(categoryName);
+            }}
+            onDelete={() => {
+              setDeletingCategory(categoryName);
+              setDeleteRules(true);
+            }}
+            canManage={canManageCategory(categoryName)}
           />
         ))}
-        {/* 新建分类 */}
-        {addingCategory ? (
+        {canManageLibrary && addingCategory ? (
           <div className="flex items-center gap-1.5">
             <input
               autoFocus
               value={newCategoryName}
-              onChange={(e) => setNewCategoryName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') handleAddCategory(); if (e.key === 'Escape') { setAddingCategory(false); setNewCategoryName(''); } }}
-              className="win-input w-28 !py-1 text-xs"
+              onChange={(event) => setNewCategoryName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void handleAddCategory();
+                if (event.key === 'Escape') {
+                  setAddingCategory(false);
+                  setNewCategoryName('');
+                }
+              }}
+              className="win-input w-32 !py-1 text-xs"
               placeholder="分类名称"
             />
-            <button onClick={handleAddCategory} disabled={!newCategoryName.trim()} className="win-icon-button h-7 w-7 text-xs disabled:opacity-40">✓</button>
-            <button onClick={() => { setAddingCategory(false); setNewCategoryName(''); }} className="win-icon-button h-7 w-7 text-xs">✕</button>
+            <button
+              onClick={() => void handleAddCategory()}
+              disabled={!newCategoryName.trim()}
+              className="win-icon-button h-7 w-7 text-xs disabled:opacity-40"
+            >
+              确认
+            </button>
+            <button
+              onClick={() => {
+                setAddingCategory(false);
+                setNewCategoryName('');
+              }}
+              className="win-icon-button h-7 w-7 text-xs"
+            >
+              取消
+            </button>
           </div>
-        ) : (
-          <button
-            onClick={() => setAddingCategory(true)}
-            className="win-chip text-xs"
-          >
+        ) : canManageLibrary ? (
+          <button onClick={() => setAddingCategory(true)} className="win-chip text-xs">
             + 新建分类
           </button>
-        )}
+        ) : null}
       </div>
 
-      {/* 启用状态筛选 */}
       <div className="flex gap-2 overflow-x-auto border-b border-surface-divider px-4 py-2.5 scrollbar-thin dark:border-dark-divider">
         <FilterChip label="全部" active={statusFilter === 'all'} count={statusCounts.all} onClick={() => setStatusFilter('all')} />
         <FilterChip label="已启用" active={statusFilter === 'active'} count={statusCounts.active} onClick={() => setStatusFilter('active')} />
         <FilterChip label="已停用" active={statusFilter === 'inactive'} count={statusCounts.inactive} onClick={() => setStatusFilter('inactive')} />
       </div>
 
-      {/* 编辑表单 */}
       {editingRule && (
-        <RuleForm rule={editingRule} onSave={handleSave}
-          onCancel={() => setEditingRule(null)} onChange={setEditingRule} categoryOptions={categoryOptions} />
+        <RuleForm
+          rule={editingRule}
+          onSave={() => void handleSave()}
+          onCancel={() => setEditingRule(null)}
+          onChange={setEditingRule}
+          categoryOptions={categoryOptions}
+          allowGroupSharing={allowGroupSharing}
+        />
       )}
 
-      <div className="flex-1 overflow-y-auto scrollbar-thin bg-[#F7F8FA] p-4 space-y-2 dark:bg-dark">
+      <div className="flex-1 space-y-2 overflow-y-auto bg-[#F7F8FA] p-4 scrollbar-thin dark:bg-dark">
         {loading ? (
-          <div className="text-center py-8 text-sm text-text-secondary">加载中...</div>
+          <div className="py-8 text-center text-sm text-text-secondary">加载中...</div>
         ) : visibleRules.length === 0 ? (
-          <div className="text-center py-8 text-sm text-text-secondary">
-            <p>📋</p><p className="mt-2">当前筛选下暂无规则</p>
-          </div>
+          <div className="py-8 text-center text-sm text-text-secondary">当前筛选下暂无规则</div>
         ) : (
           visibleRules.map((rule) => (
-            <RuleCard key={rule.id} rule={rule}
-              onEdit={() => setEditingRule(rule)}
-              onDelete={() => handleDelete(rule.id)}
-              onToggle={() => handleToggleActive(rule)} />
+            <RuleCard
+              key={rule.id}
+              rule={rule}
+              ownershipLabel={getRuleOwnershipLabel(rule)}
+              isGroupShared={Boolean(rule.owner_group_id)}
+              onEdit={() => openEditRule(rule)}
+              onDelete={() => void handleDeleteRule(rule.id)}
+              onToggle={() => void handleToggleRule(rule)}
+              canManage={canManageRule(rule)}
+            />
           ))
         )}
       </div>
 
-      {/* 重命名分类对话框 */}
-      {renamingCat && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setRenamingCat(null)}>
-          <div className="win-modal w-80 p-5" onClick={(e) => e.stopPropagation()}>
-            <h4 className="text-sm font-medium mb-3">重命名分类</h4>
-            <p className="text-xs text-text-secondary mb-3">将“{renamingCat}”重命名为：</p>
-            <input
-              autoFocus
-              value={renameValue}
-              onChange={(e) => setRenameValue(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleRenameCategory()}
-              className="win-input mb-4"
-              placeholder="新分类名称"
-            />
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setRenamingCat(null)} className="win-button h-8 px-3 text-xs">取消</button>
-              <button onClick={handleRenameCategory} disabled={!renameValue.trim()} className="win-button-primary h-8 px-3 text-xs">确认重命名</button>
-            </div>
+      {renamingCategory && (
+        <Modal onClose={() => setRenamingCategory('')}>
+          <h4 className="mb-3 text-sm font-medium">重命名分类</h4>
+          <p className="mb-3 text-xs text-text-secondary">把“{renamingCategory}”改成：</p>
+          <input
+            autoFocus
+            value={renameValue}
+            onChange={(event) => setRenameValue(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') void handleRenameCategory(); }}
+            className="win-input mb-4"
+            placeholder="新分类名称"
+          />
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setRenamingCategory('')} className="win-button h-8 px-3 text-xs">取消</button>
+            <button onClick={() => void handleRenameCategory()} disabled={!renameValue.trim()} className="win-button-primary h-8 px-3 text-xs">确认</button>
           </div>
-        </div>
+        </Modal>
       )}
 
-      {/* 删除分类确认对话框 */}
-      {deletingCat && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setDeletingCat(null)}>
-          <div className="win-modal w-80 p-5" onClick={(e) => e.stopPropagation()}>
-            <h4 className="text-sm font-medium mb-3">删除分类“{deletingCat}”</h4>
-            <p className="text-xs text-text-secondary mb-3">请选择如何处理该分类下的规则：</p>
-            <div className="space-y-2 mb-4">
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input type="radio" checked={deleteRules} onChange={() => setDeleteRulesFlag(true)} className="mt-0.5" />
-                <div>
-                  <p className="text-xs font-medium">同时删除该分类下的所有规则</p>
-                  <p className="text-[10px] text-text-secondary">规则将被永久删除，无法恢复</p>
-                </div>
-              </label>
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input type="radio" checked={!deleteRules} onChange={() => setDeleteRulesFlag(false)} className="mt-0.5" />
-                <div>
-                  <p className="text-xs font-medium">仅删除分类名，保留规则</p>
-                  <p className="text-[10px] text-text-secondary">规则将移至"未分类"</p>
-                </div>
-              </label>
-            </div>
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setDeletingCat(null)} className="win-button h-8 px-3 text-xs">取消</button>
-              <button onClick={handleDeleteCategory} className="inline-flex h-8 items-center justify-center rounded-md bg-red-500 px-3 text-xs font-medium text-white shadow-sm transition-colors hover:bg-red-600">确认删除</button>
-            </div>
+      {deletingCategory && (
+        <Modal onClose={() => setDeletingCategory('')}>
+          <h4 className="mb-3 text-sm font-medium">删除分类“{deletingCategory}”</h4>
+          <p className="mb-3 text-xs text-text-secondary">请选择如何处理该分类下的规则：</p>
+          <div className="mb-4 space-y-2">
+            <label className="flex cursor-pointer items-start gap-2">
+              <input type="radio" checked={deleteRules} onChange={() => setDeleteRules(true)} className="mt-0.5" />
+              <div>
+                <p className="text-xs font-medium">同时删除该分类下的可管理规则</p>
+                <p className="text-[10px] text-text-secondary">管理员会删除全量规则，组内 manager 只影响本组规则。</p>
+              </div>
+            </label>
+            <label className="flex cursor-pointer items-start gap-2">
+              <input type="radio" checked={!deleteRules} onChange={() => setDeleteRules(false)} className="mt-0.5" />
+              <div>
+                <p className="text-xs font-medium">只删除分类名，保留规则</p>
+                <p className="text-[10px] text-text-secondary">保留的规则会被移到“未分类”。</p>
+              </div>
+            </label>
           </div>
-        </div>
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setDeletingCategory('')} className="win-button h-8 px-3 text-xs">取消</button>
+            <button onClick={() => void handleDeleteCategory()} className="inline-flex h-8 items-center justify-center rounded-md bg-red-500 px-3 text-xs font-medium text-white shadow-sm transition-colors hover:bg-red-600">
+              确认删除
+            </button>
+          </div>
+        </Modal>
       )}
 
-      {/* 导入确认对话框 */}
       {pendingImport && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => busyAction !== 'import' && setPendingImport(null)}>
-          <div className="win-modal w-96 p-5" onClick={(e) => e.stopPropagation()}>
-            <h4 className="text-sm font-medium mb-3">导入 Know-how 规则</h4>
-            <p className="text-xs text-text-secondary mb-3">
-              文件“{pendingImport.fileName}”中发现 {pendingImport.ruleCount} 条规则。
-            </p>
-            <div className="space-y-2 mb-4">
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  checked={importStrategy === 'append'}
-                  onChange={() => setImportStrategy('append')}
-                  className="mt-0.5"
-                />
-                <div>
-                  <p className="text-xs font-medium">追加导入</p>
-                  <p className="text-[10px] text-text-secondary">保留现有规则，已存在的同分类同内容规则会自动跳过。</p>
-                </div>
-              </label>
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  checked={importStrategy === 'replace'}
-                  onChange={() => setImportStrategy('replace')}
-                  className="mt-0.5"
-                />
-                <div>
-                  <p className="text-xs font-medium">覆盖导入</p>
-                  <p className="text-[10px] text-text-secondary">先清空当前规则库，再按这个文件重建。</p>
-                </div>
-              </label>
-            </div>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setPendingImport(null)}
-                disabled={busyAction === 'import'}
-                className="win-button h-8 px-3 text-xs disabled:opacity-60"
-              >
-                取消
-              </button>
-              <button
-                onClick={handleConfirmImport}
-                disabled={busyAction === 'import'}
-                className="win-button-primary h-8 px-3 text-xs disabled:opacity-60"
-              >
-                {busyAction === 'import' ? '导入中...' : '开始导入'}
-              </button>
-            </div>
+        <Modal onClose={() => { if (busyAction !== 'import') setPendingImport(null); }} widthClassName="w-96">
+          <h4 className="mb-3 text-sm font-medium">导入 Know-how 规则</h4>
+          <p className="mb-3 text-xs text-text-secondary">
+            文件“{pendingImport.fileName}”中发现 {pendingImport.ruleCount} 条规则。
+          </p>
+          <div className="mb-4 space-y-2">
+            <label className="flex cursor-pointer items-start gap-2">
+              <input
+                type="radio"
+                checked={importStrategy === 'append'}
+                onChange={() => setImportStrategy('append')}
+                className="mt-0.5"
+              />
+              <div>
+                <p className="text-xs font-medium">追加导入</p>
+                <p className="text-[10px] text-text-secondary">保留现有规则，只导入当前作用域内未重复的规则。</p>
+              </div>
+            </label>
+            <label className="flex cursor-pointer items-start gap-2">
+              <input
+                type="radio"
+                checked={importStrategy === 'replace'}
+                onChange={() => setImportStrategy('replace')}
+                className="mt-0.5"
+                disabled={!userIsAdmin}
+              />
+              <div>
+                <p className="text-xs font-medium">覆盖导入</p>
+                <p className="text-[10px] text-text-secondary">
+                  仅管理员可用，会先清空当前规则库再重建。
+                </p>
+              </div>
+            </label>
           </div>
-        </div>
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={() => setPendingImport(null)}
+              disabled={busyAction === 'import'}
+              className="win-button h-8 px-3 text-xs disabled:opacity-60"
+            >
+              取消
+            </button>
+            <button
+              onClick={() => void handleConfirmImport()}
+              disabled={busyAction === 'import'}
+              className="win-button-primary h-8 px-3 text-xs disabled:opacity-60"
+            >
+              {busyAction === 'import' ? '导入中...' : '开始导入'}
+            </button>
+          </div>
+        </Modal>
       )}
     </div>
   );
 }
 
-/** 分类筛选标签（无操作按钮，用于"全部"和状态筛选） */
 function FilterChip({ label, active, count, onClick }: {
-  label: string; active: boolean; count?: number; onClick: () => void;
+  label: string;
+  active: boolean;
+  count?: number;
+  onClick: () => void;
 }) {
   return (
-    <button onClick={onClick} className={clsx(
-      'inline-flex items-center rounded-md border px-2.5 py-1.5 text-xs whitespace-nowrap shadow-sm transition-colors',
-      active
-        ? 'border-primary/20 bg-primary text-white'
-        : 'border-surface-divider bg-white text-text-secondary hover:border-primary/20 hover:text-text-primary dark:border-dark-divider dark:bg-dark-card dark:hover:border-primary/20 dark:hover:text-text-dark-primary',
-    )}>
+    <button
+      onClick={onClick}
+      className={clsx(
+        'inline-flex items-center rounded-md border px-2.5 py-1.5 text-xs whitespace-nowrap shadow-sm transition-colors',
+        active
+          ? 'border-primary/20 bg-primary text-white'
+          : 'border-surface-divider bg-white text-text-secondary hover:border-primary/20 hover:text-text-primary dark:border-dark-divider dark:bg-dark-card dark:hover:border-primary/20 dark:hover:text-text-dark-primary',
+      )}
+    >
       {label}{count !== undefined && ` (${count})`}
     </button>
   );
 }
 
-/** 分类 Chip（带内联重命名 / 删除图标，hover 时显示） */
-function CategoryChip({ label, active, count, onSelect, onRename, onDelete }: {
-  label: string; active: boolean; count?: number;
-  onSelect: () => void; onRename: () => void; onDelete: () => void;
+function CategoryChip({ label, active, count, onSelect, onRename, onDelete, canManage }: {
+  label: string;
+  active: boolean;
+  count?: number;
+  onSelect: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+  canManage: boolean;
 }) {
   const [hovered, setHovered] = useState(false);
   return (
@@ -600,56 +672,77 @@ function CategoryChip({ label, active, count, onSelect, onRename, onDelete }: {
       >
         {label}{count !== undefined && ` (${count})`}
       </button>
-      {hovered && (
-        <div className="flex items-center ml-0.5 gap-0.5">
-          <button
-            onClick={(e) => { e.stopPropagation(); onRename(); }}
-            className="win-icon-button h-6 w-6 text-[10px]"
-            title="重命名"
-          >✏️</button>
-          <button
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="win-icon-button h-6 w-6 text-[10px]"
-            title="删除分类"
-          >🗑️</button>
+      {hovered && canManage && (
+        <div className="ml-0.5 flex items-center gap-0.5">
+          <button onClick={(event) => { event.stopPropagation(); onRename(); }} className="win-icon-button h-6 w-6 text-[10px]" title="重命名">
+            改
+          </button>
+          <button onClick={(event) => { event.stopPropagation(); onDelete(); }} className="win-icon-button h-6 w-6 text-[10px]" title="删除分类">
+            删
+          </button>
         </div>
       )}
     </div>
   );
 }
 
-/** 规则编辑表单 */
-function RuleForm({ rule, onSave, onCancel, onChange, categoryOptions }: {
+function RuleForm({ rule, onSave, onCancel, onChange, categoryOptions, allowGroupSharing }: {
   rule: Partial<KnowhowRule>;
   onSave: () => void;
   onCancel: () => void;
-  onChange: (r: Partial<KnowhowRule>) => void;
+  onChange: (nextRule: Partial<KnowhowRule>) => void;
   categoryOptions: string[];
+  allowGroupSharing: boolean;
 }) {
   return (
     <div className="win-panel mx-4 mt-3 space-y-3 p-4">
       <div className="flex gap-2">
-        <select value={rule.category || ''} onChange={(e) => onChange({ ...rule, category: e.target.value })}
-          className="win-select flex-1 !py-1.5 text-xs">
-          {categoryOptions.map((cat) => <option key={cat} value={cat}>{cat}</option>)}
-        </select>
-        <input type="number" value={rule.weight ?? 1.0} min={0} max={5} step={0.1}
-          onChange={(e) => onChange({ ...rule, weight: parseFloat(e.target.value) })}
+        <div className="flex-1">
+          <input
+            list="knowhow-category-options"
+            value={rule.category || ''}
+            onChange={(event) => onChange({ ...rule, category: event.target.value })}
+            className="win-input w-full !py-1.5 text-xs"
+            placeholder="输入或选择分类"
+          />
+          <datalist id="knowhow-category-options">
+            {categoryOptions.map((category) => <option key={category} value={category} />)}
+          </datalist>
+        </div>
+        <input
+          type="number"
+          value={rule.weight ?? 1.0}
+          min={0}
+          max={5}
+          step={0.1}
+          onChange={(event) => onChange({ ...rule, weight: parseFloat(event.target.value) })}
           className="win-input w-20 !py-1.5 text-xs"
-          placeholder="权重" />
+          placeholder="权重"
+        />
       </div>
-      <textarea value={rule.rule_text || ''} onChange={(e) => onChange({ ...rule, rule_text: e.target.value })}
+      <textarea
+        value={rule.rule_text || ''}
+        onChange={(event) => onChange({ ...rule, rule_text: event.target.value })}
         className="win-input w-full resize-none text-sm leading-6"
-        rows={3} placeholder="输入规则内容..." />
+        rows={3}
+        placeholder="输入规则内容..."
+      />
+      {allowGroupSharing && (
+        <label className="flex items-center gap-2 rounded-md border border-surface-divider bg-surface px-3 py-2 text-xs text-text-secondary dark:border-dark-divider dark:bg-dark-sidebar">
+          <input
+            type="checkbox"
+            checked={Boolean(rule.share_to_group)}
+            onChange={(event) => onChange({ ...rule, share_to_group: event.target.checked })}
+          />
+          <span>共享给本组成员使用</span>
+        </label>
+      )}
       <p className="text-[11px] leading-5 text-text-secondary">
-        系统会自动提炼关键词、适用场景和示例问法，你只需专注写好规则内容。
+        系统会自动提炼关键词、适用场景和示例问法，你只需要把规则内容写清楚。
       </p>
-      <div className="flex gap-2 justify-end">
-        <button onClick={onCancel} className="win-button h-8 px-3 text-xs">
-          取消
-        </button>
-        <button onClick={onSave} disabled={!rule.rule_text?.trim()}
-          className="win-button-primary h-8 px-3 text-xs">
+      <div className="flex justify-end gap-2">
+        <button onClick={onCancel} className="win-button h-8 px-3 text-xs">取消</button>
+        <button onClick={onSave} disabled={!rule.rule_text?.trim() || !rule.category?.trim()} className="win-button-primary h-8 px-3 text-xs">
           {rule.id ? '更新' : '创建'}
         </button>
       </div>
@@ -657,50 +750,75 @@ function RuleForm({ rule, onSave, onCancel, onChange, categoryOptions }: {
   );
 }
 
-/** 规则卡片 */
-function RuleCard({ rule, onEdit, onDelete, onToggle }: {
-  rule: KnowhowRule; onEdit: () => void; onDelete: () => void; onToggle: () => void;
+function RuleCard({ rule, ownershipLabel, isGroupShared, onEdit, onDelete, onToggle, canManage }: {
+  rule: KnowhowRule;
+  ownershipLabel: string;
+  isGroupShared: boolean;
+  onEdit: () => void;
+  onDelete: () => void;
+  onToggle: () => void;
+  canManage: boolean;
 }) {
+  const ownershipChipClassName = isGroupShared
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300'
+    : 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300';
+  const ownershipAccentClassName = isGroupShared
+    ? 'before:bg-emerald-400'
+    : 'before:bg-amber-400';
+  const ownershipHint = isGroupShared ? '本组成员可见可用' : '仅当前创建者可见';
+
   return (
-    <div className={clsx(
-      'rounded-lg border bg-white p-3 shadow-sm transition-colors dark:bg-dark-card',
-      rule.is_active
-        ? 'border-surface-divider dark:border-dark-divider'
-        : 'border-dashed border-gray-300 dark:border-gray-600 opacity-60',
-    )}>
+    <div
+      className={clsx(
+        'relative overflow-hidden rounded-lg border bg-white p-3 pl-4 shadow-sm transition-colors before:absolute before:bottom-0 before:left-0 before:top-0 before:w-1 dark:bg-dark-card',
+        ownershipAccentClassName,
+        rule.is_active
+          ? 'border-surface-divider dark:border-dark-divider'
+          : 'border-dashed border-gray-300 opacity-60 dark:border-gray-600',
+      )}
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5 mb-1">
+          <div className="mb-1 flex flex-wrap items-center gap-1.5">
             <span className="win-badge border-blue-200 bg-blue-50 text-[10px] text-blue-600 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-400">
               {rule.category}
             </span>
             <span className="text-[10px] text-text-secondary">权重: {rule.weight}</span>
-            {!rule.is_active && (
-              <span className="text-[10px] text-amber-600 dark:text-amber-400">已停用</span>
-            )}
-            {rule.hit_count > 0 && (
-              <span className="text-[10px] text-text-secondary">命中: {rule.hit_count}</span>
-            )}
+            <span className={clsx('inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium', ownershipChipClassName)}>
+              {ownershipLabel}
+            </span>
+            {!rule.is_active && <span className="text-[10px] text-amber-600 dark:text-amber-400">已停用</span>}
+            {rule.hit_count > 0 && <span className="text-[10px] text-text-secondary">命中: {rule.hit_count}</span>}
           </div>
+          <p className="mb-2 text-[11px] font-medium text-text-secondary">{ownershipHint}</p>
           <p className="text-sm leading-relaxed">{rule.rule_text}</p>
-          <p className="text-[10px] text-text-secondary mt-1">
-            来源: {rule.source} · {new Date(rule.created_at).toLocaleDateString()}
+          <p className="mt-1 text-[10px] text-text-secondary">
+            来源: {rule.source} | {new Date(rule.created_at).toLocaleDateString()}
           </p>
         </div>
-        <div className="flex items-center gap-1 flex-shrink-0">
-          <button onClick={onToggle} title={rule.is_active ? '禁用' : '启用'}
-            className="win-icon-button h-8 w-8 text-xs">
-            {rule.is_active ? '🟢' : '⚪'}
-          </button>
-          <button onClick={onEdit} title="编辑"
-            className="win-icon-button h-8 w-8 text-xs">
-            ✏️
-          </button>
-          <button onClick={onDelete} title="删除"
-            className="win-icon-button h-8 w-8 text-xs">
-            🗑️
-          </button>
-        </div>
+        {canManage && (
+          <div className="flex flex-shrink-0 items-center gap-1">
+            <button onClick={onToggle} title={rule.is_active ? '停用' : '启用'} className="win-icon-button h-8 w-8 text-xs">
+              {rule.is_active ? '停' : '启'}
+            </button>
+            <button onClick={onEdit} title="编辑" className="win-icon-button h-8 w-8 text-xs">改</button>
+            <button onClick={onDelete} title="删除" className="win-icon-button h-8 w-8 text-xs">删</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Modal({ children, onClose, widthClassName = 'w-80' }: {
+  children: ReactNode;
+  onClose: () => void;
+  widthClassName?: string;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div className={clsx('win-modal p-5', widthClassName)} onClick={(event) => event.stopPropagation()}>
+        {children}
       </div>
     </div>
   );

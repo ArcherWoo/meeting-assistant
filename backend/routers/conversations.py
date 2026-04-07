@@ -1,6 +1,5 @@
 """
-会话与消息路由
-提供前端聊天所需的数据库真相源 API。
+会话与消息路由，提供前端聊天所需的会话与消息读写接口。
 """
 import json
 from typing import Optional
@@ -9,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from routers.auth import get_current_user
-from services.access_control import can_access_role, is_admin
+from services.access_control import can_access_role
 from services.storage import storage
 
 router = APIRouter()
@@ -114,7 +113,7 @@ async def _ensure_role_allows_surface(role_id: str, surface: str, user: dict) ->
 
     allowed_surfaces = _parse_string_list(role.get("allowed_surfaces")) or ["chat"]
     if surface not in allowed_surfaces:
-        raise HTTPException(status_code=400, detail=f"角色 {role_id} 不允许在 {surface} surface 下创建会话")
+        raise HTTPException(status_code=400, detail=f"角色 {role_id} 不允许在 {surface} 场景下创建会话")
     return role
 
 
@@ -122,9 +121,6 @@ async def _ensure_conversation_access(conversation_id: str, user: dict) -> dict:
     conversation = await storage.get_conversation(conversation_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="对话不存在")
-
-    if is_admin(user):
-        return conversation
 
     owner_id = await storage.get_conversation_owner_id(conversation_id)
     if owner_id != user.get("id"):
@@ -142,37 +138,33 @@ async def _ensure_message_access(message_id: str, user: dict) -> dict:
 
 @router.get("/chat/state")
 async def get_chat_state(user: dict = Depends(get_current_user)) -> dict:
-    """一次性返回默认工作区下的所有会话与消息。"""
+    """一次性返回默认工作区下当前用户自己的会话与消息。"""
     workspace_id = await storage.get_default_workspace_id()
-    owner_id = None if is_admin(user) else user["id"]
-    conversations = await storage.list_conversations(workspace_id, owner_id=owner_id)
+    conversations = await storage.list_conversations(workspace_id, owner_id=user["id"])
     messages_by_conversation: dict[str, list[dict]] = {}
 
     for conversation in conversations:
         msgs = await storage.list_messages(conversation["id"])
 
-        # 后端补偿：对 agent surface 对话，注入尚未写回 messages 表的已完成 agent_run
+        # 对 agent 对话补偿尚未写回 messages 表的已完成 agent run。
         if conversation.get("surface") == "agent":
-            # 收集已写回消息中记录的 runId，用于去重
             persisted_run_ids: set[str] = set()
-            for m in msgs:
-                meta = m.get("metadata") or {}
-                agent_result = meta.get("agentResult") or {}
-                rid = agent_result.get("runId")
-                if rid:
-                    persisted_run_ids.add(rid)
+            for message in msgs:
+                metadata = message.get("metadata") or {}
+                agent_result = metadata.get("agentResult") or {}
+                run_id = agent_result.get("runId")
+                if run_id:
+                    persisted_run_ids.add(run_id)
 
-            # 查询该对话下所有终态 agent_run
             terminal_runs = await storage.list_agent_runs_for_conversation(conversation["id"])
             for run in terminal_runs:
                 run_id = run.get("runId") or run.get("id") or ""
                 if not run_id or run_id in persisted_run_ids:
                     continue
-                # 构造补偿消息（结构与 _normalize_message_row 输出一致）
                 final_result = run.get("finalResult") or run.get("final_result") or {}
                 summary = (final_result.get("summary") or "").strip()
                 raw_text = (final_result.get("raw_text") or "").strip()
-                content = raw_text or summary or "（Agent 已完成执行）"
+                content = raw_text or summary or "Agent 已完成执行"
                 compensation_msg = {
                     "id": f"compensated-{run_id}",
                     "conversation_id": conversation["id"],
@@ -203,8 +195,7 @@ async def get_chat_state(user: dict = Depends(get_current_user)) -> dict:
                 }
                 msgs.append(compensation_msg)
 
-            # 按 created_at 重新排序（补偿消息插在时间轴正确位置）
-            msgs.sort(key=lambda m: m.get("created_at") or "")
+            msgs.sort(key=lambda message: message.get("created_at") or "")
 
         messages_by_conversation[conversation["id"]] = msgs
 
@@ -238,7 +229,11 @@ async def create_conversation(request: ConversationCreateRequest, user: dict = D
 
 
 @router.put("/conversations/{conversation_id}")
-async def update_conversation(conversation_id: str, request: ConversationUpdateRequest, user: dict = Depends(get_current_user)) -> dict:
+async def update_conversation(
+    conversation_id: str,
+    request: ConversationUpdateRequest,
+    user: dict = Depends(get_current_user),
+) -> dict:
     existing = await _ensure_conversation_access(conversation_id, user)
 
     updates: dict = {}
@@ -272,7 +267,6 @@ async def update_conversation(conversation_id: str, request: ConversationUpdateR
 @router.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, user: dict = Depends(get_current_user)) -> dict:
     await _ensure_conversation_access(conversation_id, user)
-
     await storage.delete_conversation(conversation_id)
     return {"id": conversation_id, "message": "对话已删除"}
 
@@ -280,13 +274,16 @@ async def delete_conversation(conversation_id: str, user: dict = Depends(get_cur
 @router.get("/conversations/{conversation_id}/messages")
 async def list_messages(conversation_id: str, user: dict = Depends(get_current_user)) -> dict:
     await _ensure_conversation_access(conversation_id, user)
-
     messages = await storage.list_messages(conversation_id)
     return {"messages": messages, "total": len(messages)}
 
 
 @router.post("/conversations/{conversation_id}/messages")
-async def create_message(conversation_id: str, request: MessageCreateRequest, user: dict = Depends(get_current_user)) -> dict:
+async def create_message(
+    conversation_id: str,
+    request: MessageCreateRequest,
+    user: dict = Depends(get_current_user),
+) -> dict:
     await _ensure_conversation_access(conversation_id, user)
     metadata = _merge_message_metadata({}, request.metadata, request.attachments)
 

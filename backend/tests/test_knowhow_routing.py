@@ -188,6 +188,65 @@ class KnowhowRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([rule["id"] for rule in result.rules], ["rule-proc-2"])
         self.assertEqual(llm_service.chat.await_count, 2)
 
+    async def test_llm_rule_judge_can_return_no_matching_rules(self):
+        llm_service = AsyncMock()
+        llm_service.chat.side_effect = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"use_knowhow": true, "categories": ["procurement_review"], '
+                                '"confidence": "high", "rationale": "procurement risk intent"}'
+                            )
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"selected_ids": [], "rationale": "no rule is specific enough"}'
+                        }
+                    }
+                ]
+            },
+        ]
+        llm_service.extract_text_content = Mock(
+            side_effect=[
+                '{"use_knowhow": true, "categories": ["procurement_review"], "confidence": "high", "rationale": "procurement risk intent"}',
+                '{"selected_ids": [], "rationale": "no rule is specific enough"}',
+            ]
+        )
+        router = KnowhowRouter(llm_service=llm_service)
+
+        result = await router.retrieve_rules(
+            "Please just say hello and do not apply any procurement rule.",
+            self.rules,
+            category_profiles=self.category_profiles,
+            limit=2,
+            settings=RetrievalPlannerSettings(
+                api_url="https://example.com/v1",
+                api_key="sk-test",
+                model="deepseek-chat",
+            ),
+        )
+
+        self.assertEqual(list(result.rules), [])
+        self.assertEqual(llm_service.chat.await_count, 2)
+
+    async def test_library_query_detection_prefers_summary_mode(self):
+        router = KnowhowRouter()
+
+        decision = await router.inspect_library_query(
+            "Knowhow 规则库现在一共有几条规则？",
+            category_profiles=self.category_profiles,
+        )
+
+        self.assertTrue(decision.use_summary)
+        self.assertEqual(decision.focus, "stats")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ from typing import List, Optional, Any
 from services.document_parsing import chunk_parsed_document, document_parser_registry
 from services.document_parsing.models import ParsedDocument
 from services.document_parsing.prompt_render import render_document_for_prompt
+from services.runtime_controls import attachment_parse_controller
 from services.runtime_paths import VECTORS_DIR
 from services.storage import storage, gen_id
 from utils.decryption_handler import decrypt_esafenet_file
@@ -57,6 +58,10 @@ class KnowledgeService:
     TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml"}
     # 图片扩展名
     IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+
+    FAST_EXCEL_MAX_ROWS_PER_SHEET = 200
+    FAST_EXCEL_MAX_COLS = 20
+    FAST_PPT_MAX_TABLE_ROWS = 20
 
     def __init__(self) -> None:
         self._lance_db = None
@@ -161,6 +166,81 @@ class KnowledgeService:
 
         logger.warning(f"PDF 解析依赖缺失: {filename}")
         return f"[PDF 文件: {filename}，缺少 PDF 解析依赖，请安装 pypdf 或 PyMuPDF]"
+
+    def _extract_ppt_text_fast_sync(self, file_content: bytes, filename: str) -> str:
+        try:
+            from pptx import Presentation
+        except Exception as e:
+            return f"[PPT 文件: {filename}，缺少 python-pptx 依赖: {e}]"
+
+        try:
+            presentation = Presentation(io.BytesIO(file_content))
+        except Exception as e:
+            return f"[PPT 文件: {filename}，解析失败: {e}]"
+
+        sections: list[str] = []
+        for slide_index, slide in enumerate(presentation.slides, start=1):
+            slide_lines: list[str] = []
+            title = slide.shapes.title.text.strip() if slide.shapes.title and slide.shapes.title.text else ""
+            slide_lines.append(title or f"幻灯片 {slide_index}")
+
+            for shape in slide.shapes:
+                if getattr(shape, "has_text_frame", False):
+                    text = shape.text_frame.text.strip()
+                    if text and text != title:
+                        slide_lines.append(text)
+                elif getattr(shape, "has_table", False):
+                    for row_index, row in enumerate(shape.table.rows, start=1):
+                        if row_index > self.FAST_PPT_MAX_TABLE_ROWS:
+                            slide_lines.append("[表格内容已截断，仅保留前 20 行]")
+                            break
+                        compact_cells = [
+                            cell.text.strip()
+                            for cell in row.cells[: self.FAST_EXCEL_MAX_COLS]
+                            if cell.text and cell.text.strip()
+                        ]
+                        if compact_cells:
+                            slide_lines.append(" | ".join(compact_cells))
+
+            compact_lines = [line for line in slide_lines if line]
+            if compact_lines:
+                sections.append("\n".join([f"## {compact_lines[0]}", *compact_lines[1:]]))
+
+        return "\n\n".join(sections)
+
+    def _extract_excel_text_fast_sync(self, file_content: bytes, filename: str) -> str:
+        try:
+            import openpyxl
+        except Exception as e:
+            return f"[Excel 文件: {filename}，缺少 openpyxl 依赖: {e}]"
+
+        try:
+            workbook = openpyxl.load_workbook(
+                io.BytesIO(file_content),
+                read_only=True,
+                data_only=True,
+            )
+        except Exception as e:
+            return f"[Excel 文件: {filename}，解析失败: {e}]"
+
+        try:
+            sections: list[str] = []
+            for sheet in workbook.worksheets:
+                lines: list[str] = [f"## Sheet: {sheet.title}"]
+                non_empty_rows = 0
+                for row in sheet.iter_rows(max_col=self.FAST_EXCEL_MAX_COLS, values_only=True):
+                    cells = [str(cell).strip() for cell in row if cell is not None and str(cell).strip()]
+                    if not cells:
+                        continue
+                    non_empty_rows += 1
+                    if non_empty_rows > self.FAST_EXCEL_MAX_ROWS_PER_SHEET:
+                        lines.append("[表格内容已截断，仅保留前 200 行非空数据]")
+                        break
+                    lines.append(" | ".join(cells))
+                sections.append("\n".join(lines))
+            return "\n\n".join(sections)
+        finally:
+            workbook.close()
 
     async def _delete_vectors_for_file(self, filename: str) -> bool:
         if not self._lance_db or "doc_chunks" not in (self._lance_db.table_names() or []):
@@ -691,7 +771,7 @@ class KnowledgeService:
         text = await asyncio.to_thread(_parse)
         return await self._ingest_generic(file_content, filename, text, "excel", embedding_fn, owner_id=owner_id)
 
-    async def extract_text(self, file_content: bytes, filename: str) -> dict:
+    async def extract_text_fast(self, file_content: bytes, filename: str) -> dict:
         """
         只提取文件文本内容，不写入知识库。
         用于 📎 附件模式：将文件内容作为上下文发送给 LLM。
@@ -701,10 +781,7 @@ class KnowledgeService:
         ext = os.path.splitext(filename)[1].lower()
 
         if ext in self.PPT_EXTS:
-            from services.ppt_parser import PPTParser
-            parser = PPTParser()
-            ppt_data = await parser.parse(file_content, filename)
-            text = ppt_data.get("full_markdown", "")
+            text = await asyncio.to_thread(self._extract_ppt_text_fast_sync, file_content, filename)
         elif ext in (".pdf",):
             text = await asyncio.to_thread(self._extract_pdf_text_sync, file_content, filename)
         elif ext in (".doc", ".docx"):
@@ -734,7 +811,7 @@ class KnowledgeService:
                     return "\n".join(parts)
                 except Exception as e:
                     return f"[Excel 解析失败: {e}]"
-            text = await asyncio.to_thread(_parse_excel)
+            text = await asyncio.to_thread(self._extract_excel_text_fast_sync, file_content, filename)
         elif ext in self.IMAGE_EXTS:
             text = f"[图片文件: {filename}，大小: {len(file_content) / 1024:.1f}KB，暂不支持文本提取]"
         else:
@@ -912,7 +989,7 @@ class KnowledgeService:
             owner_id=owner_id,
         )
 
-    async def extract_text(self, file_content: bytes, filename: str) -> dict:
+    async def extract_text_structured(self, file_content: bytes, filename: str) -> dict:
         parsed_document = await self._parse_document(file_content, filename)
         text = render_document_for_prompt(parsed_document)
         ext = os.path.splitext(filename)[1].lower()

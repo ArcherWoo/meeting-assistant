@@ -32,6 +32,10 @@ export interface ContextCitation {
   title: string;
   snippet: string;
   location?: string;
+  route_strategy?: string;
+  route_confidence?: string;
+  route_rationale?: string;
+  llm_judge_rationale?: string;
   file_name?: string;
   page?: number;
   sheet?: string;
@@ -63,12 +67,26 @@ export interface RetrievalPlan {
   notes: string[];
 }
 
+export interface ContextTimingMetadata {
+  attachment_ms?: number;
+  message_build_ms?: number;
+  retrieval_ms?: number;
+  planner_ms?: number;
+  knowledge_ms?: number;
+  knowhow_ms?: number;
+  skill_ms?: number;
+  llm_first_token_ms?: number;
+  llm_total_ms?: number;
+  end_to_end_ms?: number;
+}
+
 export interface ContextMetadata {
   knowledge_count: number;
   knowhow_count: number;
   skill_count: number;
   summary: string;
   citations: ContextCitation[];
+  timings?: ContextTimingMetadata;
   retrieval_plan?: RetrievalPlan | null;
   schema_version?: number;
   truncated?: boolean;
@@ -291,14 +309,25 @@ export interface SkillMatch {
 export interface KnowhowRule {
   id: string;
   category: string;
+  title?: string;
   rule_text: string;
   weight: number;
   hit_count: number;
   confidence: number;
   source: string;
   is_active: number;
+  owner_id?: string;
+  owner_group_id?: string | null;
+  share_to_group?: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface KnowhowCategory {
+  name: string;
+  rule_count: number;
+  manageable_rule_count?: number;
+  can_manage?: boolean;
 }
 
 export type KnowhowImportStrategy = 'append' | 'replace';
@@ -485,6 +514,7 @@ export interface User {
   display_name: string;
   system_role: SystemRole;
   group_id: string | null;
+  can_manage_group_knowhow?: boolean;
 }
 
 export interface AuthResponse {

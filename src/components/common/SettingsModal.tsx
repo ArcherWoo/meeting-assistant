@@ -118,6 +118,39 @@ function createDraftProfile(index: number): LLMProfile {
   };
 }
 
+function normalizeAvailableModels(models?: string[]): string[] {
+  if (!Array.isArray(models)) return [];
+  return [...models].sort();
+}
+
+function hasModelDraftChanges(draft: LLMProfile, baseline: LLMProfile | null, isNewDraft: boolean): boolean {
+  if (isNewDraft) {
+    return Boolean(
+      draft.name.trim() ||
+      draft.apiUrl.trim() ||
+      draft.apiKey.trim() ||
+      draft.model.trim() ||
+      draft.temperature !== 0.7 ||
+      draft.maxTokens !== 4096 ||
+      draft.stream !== true ||
+      normalizeAvailableModels(draft.availableModels).length > 0
+    );
+  }
+
+  if (!baseline) return false;
+
+  return (
+    draft.name !== baseline.name ||
+    draft.apiUrl !== baseline.apiUrl ||
+    draft.model !== baseline.model ||
+    draft.temperature !== baseline.temperature ||
+    draft.maxTokens !== baseline.maxTokens ||
+    draft.stream !== baseline.stream ||
+    draft.apiKey.trim() !== '' ||
+    normalizeAvailableModels(draft.availableModels).join('|') !== normalizeAvailableModels(baseline.availableModels).join('|')
+  );
+}
+
 export default function SettingsModal() {
   const confirm = useConfirm();
   const {
@@ -528,8 +561,25 @@ export default function SettingsModal() {
 
   const draftExistsInStore = llmConfigs.some((config) => config.id === draft.id);
   const profileList = isNewDraft && !draftExistsInStore ? [...llmConfigs, draft] : llmConfigs;
+  const persistedDraft = llmConfigs.find((config) => config.id === draft.id) ?? null;
+  const modelDraftDirty = hasModelDraftChanges(draft, persistedDraft, isNewDraft);
 
-  const handleSelectProfile = (profile: LLMProfile) => {
+  const confirmDiscardModelDraft = async () => {
+    if (!modelDraftDirty) return true;
+    return confirm({
+      title: '放弃未保存的模型配置？',
+      description: '你当前修改的 LLM 连接配置还没有保存，继续操作会丢失这些改动。',
+      confirmLabel: '放弃改动',
+      cancelLabel: '继续编辑',
+      tone: 'danger',
+    });
+  };
+
+  const handleSelectProfile = async (profile: LLMProfile) => {
+    if (selectedId === profile.id && draft.id === profile.id) return;
+    const confirmed = await confirmDiscardModelDraft();
+    if (!confirmed) return;
+
     setSelectedId(profile.id);
     setDraft({ ...profile });
     setIsNewDraft(false);
@@ -538,7 +588,10 @@ export default function SettingsModal() {
     setConnectionError('');
   };
 
-  const handleAddProfile = () => {
+  const handleAddProfile = async () => {
+    const confirmed = await confirmDiscardModelDraft();
+    if (!confirmed) return;
+
     const nextProfile = createDraftProfile(llmConfigs.length + 1);
     setSelectedId(nextProfile.id);
     setDraft(nextProfile);
@@ -578,7 +631,7 @@ export default function SettingsModal() {
   const handleDelete = async () => {
     if (isNewDraft) {
       if (activeProfile) {
-        handleSelectProfile(activeProfile);
+        void handleSelectProfile(activeProfile);
       }
       return;
     }
@@ -648,7 +701,10 @@ export default function SettingsModal() {
     }
   };
 
-  const handleClose = () => {
+  const handleClose = async () => {
+    const confirmed = await confirmDiscardModelDraft();
+    if (!confirmed) return;
+
     if (activeProfile) {
       setSelectedId(activeProfile.id);
       setDraft({ ...activeProfile });

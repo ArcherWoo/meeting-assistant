@@ -204,6 +204,7 @@ async def execute_agent_stream(request: AgentExecuteRequest, user: dict | None =
                             api_url=deps.api_url,
                             api_key=deps.api_key,
                             model=deps.model,
+                            user_id=str((user or {}).get("id") or ""),
                         ),
                         enabled_surfaces=surfaces,
                         trace_handler=adapter,

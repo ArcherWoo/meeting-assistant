@@ -5,10 +5,9 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-import httpx
 from pydantic import BaseModel, Field, model_validator
 
-from services.llm_service import LLMService
+from services.llm_service import LLMService, llm_service as shared_llm_service
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +25,7 @@ class RetrievalPlannerSettings:
     api_url: str = ""
     api_key: str = ""
     model: str = "gpt-4o"
+    user_id: str = ""
 
     @property
     def is_configured(self) -> bool:
@@ -83,7 +83,7 @@ class RetrievalPlan(BaseModel):
 
 class RetrievalPlanner:
     def __init__(self, llm_service: LLMService | None = None) -> None:
-        self._llm_service = llm_service or LLMService()
+        self._llm_service = llm_service or shared_llm_service
 
     _SMALL_TALK_HINTS: tuple[str, ...] = (
         "你好",
@@ -302,34 +302,28 @@ Planning rules:
         allowed_surfaces: tuple[RetrievalSurface, ...],
         settings: RetrievalPlannerSettings,
     ) -> RetrievalPlan:
-        from pydantic_ai import Agent
-        from pydantic_ai.models.openai import OpenAIChatModel
-        from pydantic_ai.providers.openai import OpenAIProvider
-
-        async with httpx.AsyncClient(
-            timeout=45.0,
-            follow_redirects=True,
-            trust_env=False,
-        ) as http_client:
-            provider = OpenAIProvider(
-                base_url=settings.api_url.rstrip("/"),
-                api_key=settings.api_key,
-                http_client=http_client,
-            )
-            model = OpenAIChatModel(
-                settings.model.strip() or "gpt-4o",
-                provider=provider,
-            )
-            agent = Agent(
-                model=model,
-                output_type=RetrievalPlan,
-                instructions=self._build_instructions(allowed_surfaces),
-                retries=1,
-                output_retries=1,
-                defer_model_check=True,
-            )
-            result = await agent.run(self._build_user_prompt(user_query, allowed_surfaces))
-            return result.output
+        response = await self._llm_service.chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": self._build_structured_json_system_prompt(allowed_surfaces),
+                },
+                {
+                    "role": "user",
+                    "content": self._build_structured_json_user_prompt(user_query, allowed_surfaces),
+                },
+            ],
+            model=settings.model.strip() or "gpt-4o",
+            temperature=0.0,
+            max_tokens=700,
+            api_url=settings.api_url,
+            api_key=settings.api_key,
+            user_id=settings.user_id or None,
+        )
+        text = self._llm_service.extract_text_content(response)
+        if not text:
+            raise ValueError("planner returned empty text")
+        return RetrievalPlan.model_validate_json(self._extract_json_payload(text))
 
     def _build_instructions(self, allowed_surfaces: tuple[RetrievalSurface, ...]) -> str:
         allowed_lines = {
@@ -355,6 +349,45 @@ Planning rules:
             f"User query: {user_query}\n"
         )
 
+    def _build_structured_json_system_prompt(
+        self,
+        allowed_surfaces: tuple[RetrievalSurface, ...],
+    ) -> str:
+        allowed = ", ".join(allowed_surfaces) or "none"
+        return (
+            f"{self._build_instructions(allowed_surfaces)}\n\n"
+            "Return JSON only. Do not output markdown or explanation.\n"
+            f"Allowed surfaces: {allowed}\n"
+            "JSON schema:\n"
+            "{\n"
+            '  "intent": "short intent summary",\n'
+            '  "normalized_query": "retrieval-friendly query",\n'
+            '  "actions": [\n'
+            "    {\n"
+            '      "surface": "knowledge | knowhow | skill",\n'
+            '      "query": "short retrieval query",\n'
+            '      "limit": 1,\n'
+            '      "required": false,\n'
+            '      "rationale": "why retrieve from this surface"\n'
+            "    }\n"
+            "  ],\n"
+            '  "notes": ["optional notes"]\n'
+            "}\n"
+            "If retrieval is unnecessary, return an empty actions array."
+        )
+
+    @staticmethod
+    def _build_structured_json_user_prompt(
+        user_query: str,
+        allowed_surfaces: tuple[RetrievalSurface, ...],
+    ) -> str:
+        allowed = ", ".join(allowed_surfaces) or "none"
+        return (
+            f"Allowed surfaces: {allowed}\n"
+            f"User query: {user_query}\n"
+            "Generate the retrieval plan now."
+        )
+
     async def _plan_with_json_prompt(
         self,
         *,
@@ -378,6 +411,7 @@ Planning rules:
             max_tokens=900,
             api_url=settings.api_url,
             api_key=settings.api_key,
+            user_id=settings.user_id or None,
         )
         text = self._llm_service.extract_text_content(response)
         if not text:

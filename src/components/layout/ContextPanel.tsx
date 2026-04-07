@@ -14,7 +14,15 @@ import {
   getSkillContent, saveSkill, updateSkill, deleteSkill,
   uploadFiles, listKnowledgeImports, deleteKnowledgeImport,
 } from '@/services/api';
-import type { ContextCitation, ContextMetadata, Message, SkillMeta, KnowledgeStats, SkillSuggestionEvent } from '@/types';
+import type {
+  ContextCitation,
+  ContextMetadata,
+  ContextTimingMetadata,
+  Message,
+  SkillMeta,
+  KnowledgeStats,
+  SkillSuggestionEvent,
+} from '@/types';
 
 /** 已导入文件记录 */
 interface ImportRecord {
@@ -120,6 +128,42 @@ function getContextCountSummary(context: ContextMetadata, kind: 'injected' | 're
   return parts.length > 0 ? parts.join(' / ') : '无引用来源';
 }
 
+function formatDuration(ms?: number): string | null {
+  if (ms === undefined || ms === null) return null;
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = ms / 1000;
+  return seconds >= 10 ? `${seconds.toFixed(0)}s` : `${seconds.toFixed(1)}s`;
+}
+
+function buildTimingSummary(timings?: ContextTimingMetadata): { primary: string; secondary: string } | null {
+  if (!timings) return null;
+
+  const primary = [
+    timings.attachment_ms !== undefined ? `附件 ${formatDuration(timings.attachment_ms)}` : '',
+    timings.retrieval_ms !== undefined ? `检索 ${formatDuration(timings.retrieval_ms)}` : '',
+    timings.llm_first_token_ms !== undefined ? `首字 ${formatDuration(timings.llm_first_token_ms)}` : '',
+    timings.llm_total_ms !== undefined ? `模型 ${formatDuration(timings.llm_total_ms)}` : '',
+    timings.end_to_end_ms !== undefined ? `总耗时 ${formatDuration(timings.end_to_end_ms)}` : '',
+  ].filter(Boolean);
+
+  const secondary = [
+    timings.message_build_ms !== undefined ? `消息准备 ${formatDuration(timings.message_build_ms)}` : '',
+    timings.planner_ms !== undefined ? `规划 ${formatDuration(timings.planner_ms)}` : '',
+    timings.knowledge_ms !== undefined ? `知识库 ${formatDuration(timings.knowledge_ms)}` : '',
+    timings.knowhow_ms !== undefined ? `Know-how ${formatDuration(timings.knowhow_ms)}` : '',
+    timings.skill_ms !== undefined ? `Skill ${formatDuration(timings.skill_ms)}` : '',
+  ].filter(Boolean);
+
+  if (primary.length === 0 && secondary.length === 0) {
+    return null;
+  }
+
+  return {
+    primary: primary.join(' / '),
+    secondary: secondary.join(' / '),
+  };
+}
+
 function getMetadataMessage(messages: Message[]): Message | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
@@ -183,6 +227,7 @@ export default function ContextPanel({ width }: { width?: number }) {
     [visibleMessages],
   );
   const latestContext: ContextMetadata | undefined = latestMetadataMessage?.metadata?.context;
+  const latestTimingSummary = buildTimingSummary(latestContext?.timings);
   const latestSkillSuggestion: SkillSuggestionEvent | undefined = latestMetadataMessage?.metadata?.skillSuggestion;
   const latestCitations = latestContext?.citations ?? [];
   const latestRetrievedCitations = latestContext?.retrieved_citations?.length
@@ -512,6 +557,15 @@ export default function ContextPanel({ width }: { width?: number }) {
                       <p className="mt-2 text-[11px] leading-5 text-text-secondary">
                         已参考：{latestContext.summary}
                       </p>
+                    )}
+                    {latestTimingSummary && (
+                      <div className="mt-2 rounded-lg border border-slate-200/80 bg-slate-50/85 px-3 py-2 text-[11px] leading-5 text-slate-600 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/25 dark:text-slate-300">
+                        <p className="font-medium text-slate-700 dark:text-slate-200">本轮耗时</p>
+                        <p className="mt-1">{latestTimingSummary.primary}</p>
+                        {latestTimingSummary.secondary && (
+                          <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">{latestTimingSummary.secondary}</p>
+                        )}
+                      </div>
                     )}
                     {latestContext.truncated && (
                       <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50/80 px-3 py-2 text-[11px] leading-5 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">

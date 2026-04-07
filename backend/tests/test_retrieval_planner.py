@@ -1,7 +1,7 @@
 import os
 import sys
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 
 BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -89,6 +89,45 @@ class RetrievalPlannerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(plan.strategy, "llm")
         self.assertEqual(len(plan.actions), 1)
+        self.assertEqual(plan.actions[0].surface, "knowhow")
+
+    async def test_plan_with_llm_uses_shared_llm_service(self):
+        llm_service = AsyncMock()
+        llm_service.chat.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"intent":"qualification review","normalized_query":"供应商资质 风险",'
+                            '"actions":[{"surface":"knowhow","query":"供应商资质 风险","limit":4,"required":true,'
+                            '"rationale":"需要规则判断"}],"notes":["llm"]}'
+                        )
+                    }
+                }
+            ]
+        }
+        llm_service.extract_text_content = Mock(return_value=(
+            '{"intent":"qualification review","normalized_query":"供应商资质 风险",'
+            '"actions":[{"surface":"knowhow","query":"供应商资质 风险","limit":4,"required":true,'
+            '"rationale":"需要规则判断"}],"notes":["llm"]}'
+        ))
+        planner = RetrievalPlanner(llm_service=llm_service)
+
+        plan = await planner._plan_with_llm(
+            user_query="请看供应商资质和风险",
+            allowed_surfaces=("knowledge", "knowhow"),
+            settings=RetrievalPlannerSettings(
+                api_url="https://example.com/v1",
+                api_key="sk-test",
+                model="gpt-4o",
+                user_id="user-1",
+            ),
+        )
+
+        llm_service.chat.assert_awaited_once()
+        call = llm_service.chat.await_args
+        self.assertEqual(call.kwargs["user_id"], "user-1")
+        self.assertEqual(call.kwargs["model"], "gpt-4o")
         self.assertEqual(plan.actions[0].surface, "knowhow")
 
     async def test_plan_short_circuits_to_heuristic_for_small_talk_and_short_queries(self):

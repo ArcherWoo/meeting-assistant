@@ -5,7 +5,15 @@
  */
 import { lazy, memo, Suspense, useState } from 'react';
 import clsx from 'clsx';
-import type { ChatGenerationPhase, ContextCitation, ContextMetadata, GenerationPreview, Message, SkillSuggestionEvent } from '@/types';
+import type {
+  ChatGenerationPhase,
+  ContextCitation,
+  ContextMetadata,
+  ContextTimingMetadata,
+  GenerationPreview,
+  Message,
+  SkillSuggestionEvent,
+} from '@/types';
 
 const RichMarkdown = lazy(() => import('@/components/chat/RichMarkdown'));
 const RetrievalPlanCard = lazy(() => import('@/components/common/RetrievalPlanCard'));
@@ -146,6 +154,42 @@ function getContextCountSummary(context: ContextMetadata, kind: 'injected' | 're
   return parts.length > 0 ? parts.join(' / ') : '无引用来源';
 }
 
+function formatDuration(ms?: number): string | null {
+  if (ms === undefined || ms === null) return null;
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = ms / 1000;
+  return seconds >= 10 ? `${seconds.toFixed(0)}s` : `${seconds.toFixed(1)}s`;
+}
+
+function buildTimingSummary(timings?: ContextTimingMetadata): { primary: string; secondary: string } | null {
+  if (!timings) return null;
+
+  const primary = [
+    timings.attachment_ms !== undefined ? `附件 ${formatDuration(timings.attachment_ms)}` : '',
+    timings.retrieval_ms !== undefined ? `检索 ${formatDuration(timings.retrieval_ms)}` : '',
+    timings.llm_first_token_ms !== undefined ? `首字 ${formatDuration(timings.llm_first_token_ms)}` : '',
+    timings.llm_total_ms !== undefined ? `模型 ${formatDuration(timings.llm_total_ms)}` : '',
+    timings.end_to_end_ms !== undefined ? `总耗时 ${formatDuration(timings.end_to_end_ms)}` : '',
+  ].filter(Boolean);
+
+  const secondary = [
+    timings.message_build_ms !== undefined ? `消息准备 ${formatDuration(timings.message_build_ms)}` : '',
+    timings.planner_ms !== undefined ? `规划 ${formatDuration(timings.planner_ms)}` : '',
+    timings.knowledge_ms !== undefined ? `知识库 ${formatDuration(timings.knowledge_ms)}` : '',
+    timings.knowhow_ms !== undefined ? `Know-how ${formatDuration(timings.knowhow_ms)}` : '',
+    timings.skill_ms !== undefined ? `Skill ${formatDuration(timings.skill_ms)}` : '',
+  ].filter(Boolean);
+
+  if (primary.length === 0 && secondary.length === 0) {
+    return null;
+  }
+
+  return {
+    primary: primary.join(' / '),
+    secondary: secondary.join(' / '),
+  };
+}
+
 function getAttachmentSummary(message: Message): string[] {
   return (message.attachments ?? []).map((attachment) => {
     const parts = [attachment.fileType.toUpperCase()];
@@ -278,31 +322,22 @@ function MessageBubble({
   const generationError = message.metadata?.generationError;
   const isError = generationState === 'error' && message.content.trim() === '本次生成失败，请重试。';
   const senderLabel = isUser ? '你' : '智枢';
-  const context = message.metadata?.context;
+  const context = (message.metadata?.context ?? {}) as ContextMetadata;
   const agentResult = message.metadata?.agentResult;
   const skillSuggestion = message.metadata?.skillSuggestion;
   const attachments = message.attachments ?? [];
   const attachmentSummaries = getAttachmentSummary(message);
   const citations = context?.citations ?? [];
-  const retrievedCitations = context?.retrieved_citations?.length
+  const timingSummary = buildTimingSummary(context.timings) ?? { primary: '', secondary: '' };
+  const retrievedCitations = context.retrieved_citations?.length
     ? context.retrieved_citations
     : citations;
   const groupedCitations = buildCitationGroups(citations);
   const groupedRetrievedCitations = buildCitationGroups(retrievedCitations);
   const showRetrievedCitations = Boolean(
-    context?.truncated
-    && context?.retrieved_citations?.length
+    context.truncated
+    && context.retrieved_citations?.length
     && !areSameCitationSet(citations, retrievedCitations),
-  );
-  const hasContextMetadata = Boolean(
-    context && (
-      context.knowledge_count
-      || context.knowhow_count
-      || context.skill_count
-      || context.summary
-      || context.retrieval_plan
-      || citations.length
-    ),
   );
   const canCopyMessage = Boolean(message.content?.trim());
 
@@ -355,7 +390,7 @@ function MessageBubble({
           <span>{senderLabel}</span>
         </div>
 
-        {!isUser && !isError && (hasContextMetadata || skillSuggestion) && (
+        {false && !isUser && !isError && (
           <div className="mb-2 space-y-1 px-1">
             <div className="flex flex-wrap items-center gap-1.5">
               {context?.knowledge_count
@@ -377,6 +412,15 @@ function MessageBubble({
               <p className="text-[11px] text-text-secondary dark:text-text-dark-secondary">
                 已参考：{context.summary}
               </p>
+            )}
+            {timingSummary && (
+              <div className="rounded-lg border border-slate-200/80 bg-slate-50/85 px-3 py-2 text-[11px] leading-5 text-slate-600 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/25 dark:text-slate-300">
+                <p className="font-medium text-slate-700 dark:text-slate-200">本轮耗时</p>
+                <p className="mt-1">{timingSummary.primary}</p>
+                {timingSummary.secondary && (
+                  <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">{timingSummary.secondary}</p>
+                )}
+              </div>
             )}
             {context?.truncated && (
               <div className="rounded-lg border border-amber-200 bg-amber-50/80 px-3 py-2 text-[11px] leading-5 text-amber-800 shadow-sm dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
