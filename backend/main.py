@@ -19,7 +19,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from routers import agent, auth, chat, conversations, health, knowhow, knowledge, ppt, settings, skills
+from services.logging_config import configure_logging
 
+configure_logging()
 logger = logging.getLogger(__name__)
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DIST_DIR = ROOT_DIR / "dist"

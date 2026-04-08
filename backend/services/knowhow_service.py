@@ -10,6 +10,7 @@ Know-how 规则服务。
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -243,32 +244,60 @@ class KnowhowService:
             await self._sync_categories_from_rules()
             return 0
 
-        count = 0
-        for profile_name, profile in DEFAULT_CATEGORY_PROFILES.items():
-            await storage.ensure_knowhow_category(
-                profile_name,
-                description=self._normalize_text(profile.get("description")),
-                aliases=self._dump_list(profile.get("aliases")),
-                example_queries=self._dump_list(profile.get("example_queries")),
-                applies_to=self._normalize_text(profile.get("applies_to")),
-            )
+        lease_group_id = await storage.try_acquire_runtime_lease_group(
+            [
+                {
+                    "lease_type": "startup_seed",
+                    "resource_id": "knowhow_defaults",
+                    "limit": 1,
+                }
+            ],
+            ttl_ms=30000,
+            owner_id="knowhow_defaults",
+        )
+        if not lease_group_id:
+            for _ in range(50):
+                await asyncio.sleep(0.2)
+                existing = await storage.list_knowhow_rules(active_only=False)
+                if existing:
+                    await self._sync_categories_from_rules()
+                    return 0
+            return 0
 
-        for rule in DEFAULT_PROCUREMENT_RULES:
-            await self.add_rule(
-                category=rule["category"],
-                title=rule.get("title", ""),
-                rule_text=rule["rule_text"],
-                trigger_terms=rule.get("trigger_terms"),
-                exclude_terms=rule.get("exclude_terms"),
-                applies_when=rule.get("applies_when", ""),
-                not_applies_when=rule.get("not_applies_when", ""),
-                examples=rule.get("examples"),
-                weight=rule["weight"],
-                source=rule["source"],
-            )
-            count += 1
-        logger.info("Initialized %s default knowhow rules", count)
-        return count
+        count = 0
+        try:
+            existing = await storage.list_knowhow_rules(active_only=False)
+            if existing:
+                await self._sync_categories_from_rules()
+                return 0
+
+            for profile_name, profile in DEFAULT_CATEGORY_PROFILES.items():
+                await storage.ensure_knowhow_category(
+                    profile_name,
+                    description=self._normalize_text(profile.get("description")),
+                    aliases=self._dump_list(profile.get("aliases")),
+                    example_queries=self._dump_list(profile.get("example_queries")),
+                    applies_to=self._normalize_text(profile.get("applies_to")),
+                )
+
+            for rule in DEFAULT_PROCUREMENT_RULES:
+                await self.add_rule(
+                    category=rule["category"],
+                    title=rule.get("title", ""),
+                    rule_text=rule["rule_text"],
+                    trigger_terms=rule.get("trigger_terms"),
+                    exclude_terms=rule.get("exclude_terms"),
+                    applies_when=rule.get("applies_when", ""),
+                    not_applies_when=rule.get("not_applies_when", ""),
+                    examples=rule.get("examples"),
+                    weight=rule["weight"],
+                    source=rule["source"],
+                )
+                count += 1
+            logger.info("Initialized %s default knowhow rules", count)
+            return count
+        finally:
+            await storage.release_runtime_lease_group(lease_group_id)
     @staticmethod
     def _contains_chinese(text: str) -> bool:
         return contains_han_text(text)

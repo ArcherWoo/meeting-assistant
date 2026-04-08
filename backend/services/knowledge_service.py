@@ -292,6 +292,36 @@ class KnowledgeService:
         except Exception as e:
             logger.warning(f"LanceDB 初始化失败: {e}")
 
+    async def initialize(self) -> None:
+        """初始化 LanceDB 连接。启动阶段超时后降级为无向量连接模式。"""
+        import asyncio
+
+        VECTORS_DIR.mkdir(parents=True, exist_ok=True)
+        timeout_raw = os.getenv("MEETING_ASSISTANT_LANCEDB_INIT_TIMEOUT_SEC", "").strip()
+        try:
+            init_timeout_sec = max(1.0, float(timeout_raw)) if timeout_raw else 5.0
+        except ValueError:
+            init_timeout_sec = 5.0
+
+        try:
+            import lancedb
+
+            self._lance_db = await asyncio.wait_for(
+                asyncio.to_thread(lancedb.connect, str(VECTORS_DIR)),
+                timeout=init_timeout_sec,
+            )
+            logger.info(f"LanceDB 已连接: {VECTORS_DIR}")
+        except asyncio.TimeoutError:
+            self._lance_db = None
+            logger.warning(
+                "LanceDB 初始化超时（%ss），本次启动先跳过向量库连接，服务继续启动",
+                init_timeout_sec,
+            )
+        except ImportError:
+            logger.warning("lancedb 未安装，向量检索功能不可用")
+        except Exception as e:
+            logger.warning(f"LanceDB 初始化失败: {e}")
+
     async def ingest_file(
         self, file_content: bytes, filename: str,
         llm_fn: Optional[object] = None,

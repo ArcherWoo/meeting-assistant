@@ -99,7 +99,7 @@ class AgentRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_match_intent_respects_agent_preflight_switch(self):
         role = await storage.create_role(
             name="Tool Only Agent",
-            icon="🤖",
+            icon="工具",
             allowed_surfaces=["agent"],
             chat_capabilities=[],
             agent_preflight=[],

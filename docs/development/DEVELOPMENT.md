@@ -141,6 +141,39 @@ interface Role {
 补充说明：
 
 - `start.py` 会同时启动后端 `5173` 和前端 `4173`
+
+## 2026-04-09 启动与部署收敛
+
+这轮主要收口了开发启动、Windows 生产部署和生产停机体验。
+
+### 开发启动
+
+- `start.py` 现在是统一开发入口
+- 成功后会输出 `智枢前端` 和 `后端接口` 的本机地址、局域网地址
+- 输出会优先带出 `192.168.*` 这类更常用的局域网地址
+
+### Windows 生产部署
+
+- `deploy.ps1` 现在不只是启动应用，还会在检测到已安装 Nginx 时自动接管 Nginx
+- 自动化范围包括：
+  - 复制 rendered 配置
+  - 接入 `nginx.conf`
+  - 执行 `nginx -t`
+  - 启动或重载 Nginx
+  - 注册 `MeetingAssistantNginx` 开机任务
+
+如果 Nginx 不在常见目录，可以通过 `MEETING_ASSISTANT_NGINX_HOME` 指定目录。
+
+### 生产优雅关闭
+
+为避免直接杀进程导致端口残留，生产环境新增正式停机入口：
+
+- Windows：`.\deploy.ps1 -Stop`
+- Windows 应用和 Nginx 一起停：`.\deploy.ps1 -Stop -StopNginx`
+- Linux：`./deploy.sh --stop`
+- Linux 应用和 Nginx 一起停：`./deploy.sh --stop --stop-nginx`
+
+Windows 下的实现不是硬停计划任务，而是通过运行时控制目录下发停止标记，让 `service_runner` 主动收尾退出。
 - 生产部署时不再区分这两个端口，而是默认只暴露一个应用端口 `5173`
 
 ### 手动分别启动

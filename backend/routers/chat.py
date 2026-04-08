@@ -26,6 +26,7 @@ from services.runtime_controls import (
     conversation_generation_registry,
     llm_concurrency_controller,
 )
+from services.observability import log_structured, new_request_id, publish_runtime_metrics, runtime_metrics
 
 from services.system_prompt_defaults import DEFAULT_SYSTEM_PROMPTS
 from routers.auth import get_current_user
@@ -522,6 +523,8 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
     流式聊天接口 - SSE 格式返回 LLM 响应
     兼容 OpenAI Chat Completions API 协议
     """
+    request_id = new_request_id("chat")
+    user_id = str(user.get("id") or "")
     llm_config = await get_runtime_llm_config(
         profile_id=request.llm_profile_id,
         api_url=request.api_url,
@@ -549,28 +552,71 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
 
     if request.stream:
         if conversation_id and not await conversation_generation_registry.try_acquire(conversation_id):
+            runtime_metrics.record_chat_rejection(reason="conversation_busy")
+            await publish_runtime_metrics()
+            log_structured(
+                logger,
+                "warning",
+                "chat.request.rejected",
+                request_id=request_id,
+                reason="conversation_busy",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                role_id=role_id,
+                stream=True,
+            )
             raise HTTPException(status_code=409, detail="当前对话已有回答在生成中，请稍候或先停止当前生成")
 
         try:
             stream_slot_cm = llm_concurrency_controller.acquire(
                 kind="stream",
-                user_id=str(user.get("id") or ""),
+                user_id=user_id,
             )
             await stream_slot_cm.__aenter__()
         except LLMConcurrencyBusyError as exc:
             if conversation_id:
                 await conversation_generation_registry.release(conversation_id)
+            runtime_metrics.record_chat_rejection(reason="llm_busy")
+            await publish_runtime_metrics()
+            log_structured(
+                logger,
+                "warning",
+                "chat.request.rejected",
+                request_id=request_id,
+                reason="llm_busy",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                role_id=role_id,
+                stream=True,
+            )
             raise HTTPException(status_code=429, detail=str(exc)) from exc
 
+        runtime_metrics.record_chat_started(stream=True)
+        await publish_runtime_metrics()
+        log_structured(
+            logger,
+            "info",
+            "chat.request.started",
+            request_id=request_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            role_id=role_id,
+            llm_profile_id=str(llm_config.get("profile_id") or ""),
+            llm_model=llm_config["model"],
+            stream=True,
+        )
+
         async def event_stream() -> AsyncGenerator[str, None]:
+            status = "completed"
+            error_type = ""
+            llm_started_at: float | None = None
+            timing_metrics = ChatTimingMetrics(
+                attachment_ms=max(1, round(request.attachment_prepare_ms))
+                if request.attachment_prepare_ms > 0
+                else None,
+            )
             try:
                 request_started_at = time.perf_counter()
-                timing_metrics = ChatTimingMetrics(
-                    attachment_ms=max(1, round(request.attachment_prepare_ms))
-                    if request.attachment_prepare_ms > 0
-                    else None,
-                )
-
                 message_build_started_at = time.perf_counter()
                 messages = await _build_messages(request)
                 timing_metrics.message_build_ms = _elapsed_ms(message_build_started_at)
@@ -626,7 +672,7 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
                     max_tokens=request.max_tokens,
                     api_url=llm_config["api_url"],
                     api_key=llm_config["api_key"],
-                    user_id=str(user.get("id") or ""),
+                    user_id=user_id,
                     _skip_limits=True,
                 )
                 has_emitted_streaming = False
@@ -644,9 +690,54 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
                         yield _format_status_event("streaming", "正在生成回答", "回答已开始输出")
                     yield chunk
             except LLMConcurrencyBusyError as exc:
+                status = "failed"
+                error_type = type(exc).__name__
+                error_payload = json.dumps({"stream_error": str(exc)}, ensure_ascii=False)
+                yield f"data: {error_payload}\n\n"
+            except Exception as exc:  # noqa: BLE001
+                status = "failed"
+                error_type = type(exc).__name__
+                log_structured(
+                    logger,
+                    "exception",
+                    "chat.request.failed",
+                    request_id=request_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    role_id=role_id,
+                    llm_profile_id=str(llm_config.get("profile_id") or ""),
+                    llm_model=llm_config["model"],
+                    stream=True,
+                    error_type=error_type,
+                    error=str(exc),
+                )
                 error_payload = json.dumps({"stream_error": str(exc)}, ensure_ascii=False)
                 yield f"data: {error_payload}\n\n"
             finally:
+                if llm_started_at is not None:
+                    _finalize_stream_timings(timing_metrics, llm_started_at, request_started_at)
+                elif timing_metrics.end_to_end_ms is None:
+                    timing_metrics.end_to_end_ms = _elapsed_ms(request_started_at)
+                runtime_metrics.record_chat_finished(
+                    status=status,
+                    timings=timing_metrics.to_payload(),
+                )
+                await publish_runtime_metrics(force=True)
+                log_structured(
+                    logger,
+                    "info" if status == "completed" else "warning",
+                    "chat.request.completed" if status == "completed" else "chat.request.failed",
+                    request_id=request_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    role_id=role_id,
+                    llm_profile_id=str(llm_config.get("profile_id") or ""),
+                    llm_model=llm_config["model"],
+                    stream=True,
+                    status=status,
+                    error_type=error_type,
+                    timings=timing_metrics.to_payload(),
+                )
                 if conversation_id:
                     await conversation_generation_registry.release(conversation_id)
                 await stream_slot_cm.__aexit__(None, None, None)
@@ -658,19 +749,48 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                "X-Request-ID": request_id,
             },
         )
     else:
         if conversation_id and not await conversation_generation_registry.try_acquire(conversation_id):
+            runtime_metrics.record_chat_rejection(reason="conversation_busy")
+            await publish_runtime_metrics()
+            log_structured(
+                logger,
+                "warning",
+                "chat.request.rejected",
+                request_id=request_id,
+                reason="conversation_busy",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                role_id=role_id,
+                stream=False,
+            )
             raise HTTPException(status_code=409, detail="当前对话已有回答在生成中，请稍候或先停止当前生成")
+        runtime_metrics.record_chat_started(stream=False)
+        await publish_runtime_metrics()
+        log_structured(
+            logger,
+            "info",
+            "chat.request.started",
+            request_id=request_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            role_id=role_id,
+            llm_profile_id=str(llm_config.get("profile_id") or ""),
+            llm_model=llm_config["model"],
+            stream=False,
+        )
+        status = "completed"
+        error_type = ""
+        timing_metrics = ChatTimingMetrics(
+            attachment_ms=max(1, round(request.attachment_prepare_ms))
+            if request.attachment_prepare_ms > 0
+            else None,
+        )
         try:
             request_started_at = time.perf_counter()
-            timing_metrics = ChatTimingMetrics(
-                attachment_ms=max(1, round(request.attachment_prepare_ms))
-                if request.attachment_prepare_ms > 0
-                else None,
-            )
-
             message_build_started_at = time.perf_counter()
             messages = await _build_messages(request)
             timing_metrics.message_build_ms = _elapsed_ms(message_build_started_at)
@@ -715,12 +835,13 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
                 max_tokens=request.max_tokens,
                 api_url=llm_config["api_url"],
                 api_key=llm_config["api_key"],
-                user_id=str(user.get("id") or ""),
+                user_id=user_id,
                 request_kind="stream",
             )
             timing_metrics.llm_total_ms = _elapsed_ms(llm_started_at)
             timing_metrics.end_to_end_ms = _elapsed_ms(request_started_at)
             response = dict(result)
+            response["request_id"] = request_id
             context_payload = _build_context_metadata_payload(
                 prompt_ctx,
                 assembled_ctx,
@@ -734,8 +855,61 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
                 response["skill_suggestion"] = skill_payload
             return response
         except LLMConcurrencyBusyError as exc:
+            status = "failed"
+            error_type = type(exc).__name__
+            runtime_metrics.record_chat_rejection(reason="llm_busy")
+            await publish_runtime_metrics()
+            log_structured(
+                logger,
+                "warning",
+                "chat.request.rejected",
+                request_id=request_id,
+                reason="llm_busy",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                role_id=role_id,
+                stream=False,
+            )
             raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except Exception as exc:
+            status = "failed"
+            error_type = type(exc).__name__
+            log_structured(
+                logger,
+                "exception",
+                "chat.request.failed",
+                request_id=request_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                role_id=role_id,
+                llm_profile_id=str(llm_config.get("profile_id") or ""),
+                llm_model=llm_config["model"],
+                stream=False,
+                error_type=error_type,
+                error=str(exc),
+            )
+            raise
         finally:
+            runtime_metrics.record_chat_finished(
+                status=status,
+                timings=timing_metrics.to_payload(),
+            )
+            await publish_runtime_metrics(force=True)
+            log_structured(
+                logger,
+                "info" if status == "completed" else "warning",
+                "chat.request.completed" if status == "completed" else "chat.request.failed",
+                request_id=request_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                role_id=role_id,
+                llm_profile_id=str(llm_config.get("profile_id") or ""),
+                llm_model=llm_config["model"],
+                stream=False,
+                status=status,
+                error_type=error_type,
+                timings=timing_metrics.to_payload(),
+            )
             if conversation_id:
                 await conversation_generation_registry.release(conversation_id)
 
@@ -745,6 +919,8 @@ async def generate_auto_title(request: AutoTitleRequest, user: dict = Depends(ge
     """
     根据前 3 轮对话内容（最多 6 条消息），调用 LLM 生成语义化中文标题（10 字以内）
     """
+    request_id = new_request_id("autotitle")
+    user_id = str(user.get("id") or "")
     llm_config = await get_runtime_llm_config(
         profile_id=request.llm_profile_id,
         api_url=request.api_url,
@@ -776,6 +952,15 @@ async def generate_auto_title(request: AutoTitleRequest, user: dict = Depends(ge
     ]
 
     try:
+        log_structured(
+            logger,
+            "info",
+            "chat.auto_title.started",
+            request_id=request_id,
+            user_id=user_id,
+            llm_profile_id=str(llm_config.get("profile_id") or ""),
+            llm_model=llm_config["model"],
+        )
         result = await llm_service.chat(
             messages=messages_for_llm,
             model=llm_config["model"],
@@ -783,7 +968,7 @@ async def generate_auto_title(request: AutoTitleRequest, user: dict = Depends(ge
             max_tokens=30,
             api_url=llm_config["api_url"],
             api_key=llm_config["api_key"],
-            user_id=str(user.get("id") or ""),
+            user_id=user_id,
         )
         title = llm_service.extract_text_content(result)
         title = re.sub(r'^["“”‘’\s]+|["“”‘’\s]+$', "", title).strip()
@@ -792,10 +977,32 @@ async def generate_auto_title(request: AutoTitleRequest, user: dict = Depends(ge
             title = title[:10]
         if not title or title == "新对话":
             title = _fallback_auto_title(dialogue_lines)
-        return {"title": title or "新对话"}
+        resolved_title = title or "新对话"
+        log_structured(
+            logger,
+            "info",
+            "chat.auto_title.completed",
+            request_id=request_id,
+            user_id=user_id,
+            llm_profile_id=str(llm_config.get("profile_id") or ""),
+            llm_model=llm_config["model"],
+            title=resolved_title,
+        )
+        return {"title": resolved_title, "request_id": request_id}
     except LLMConcurrencyBusyError as e:
         raise HTTPException(status_code=429, detail=str(e)) from e
     except Exception as e:
+        log_structured(
+            logger,
+            "exception",
+            "chat.auto_title.failed",
+            request_id=request_id,
+            user_id=user_id,
+            llm_profile_id=str(llm_config.get("profile_id") or ""),
+            llm_model=llm_config["model"],
+            error_type=type(e).__name__,
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=f"标题生成失败: {str(e)}")
 
 
@@ -804,7 +1011,17 @@ async def test_connection(config: ConfigUpdateRequest, user: dict = Depends(get_
     """测试 LLM API 连接是否正常"""
     if not is_admin(user):
         raise HTTPException(status_code=403, detail="仅管理员可以测试 LLM 连接")
+    request_id = new_request_id("llmtest")
     try:
+        log_structured(
+            logger,
+            "info",
+            "chat.test_connection.started",
+            request_id=request_id,
+            user_id=str(user.get("id") or ""),
+            api_url=config.api_url,
+            model=config.model,
+        )
         result = await llm_service.test_connection(
             api_url=config.api_url,
             api_key=config.api_key,
@@ -813,8 +1030,30 @@ async def test_connection(config: ConfigUpdateRequest, user: dict = Depends(get_
         )
         model_count = len(result.get("available_models", []))
         message = f"连接成功，发现 {model_count} 个可用模型" if model_count else "连接成功"
-        return {"success": True, "message": message, **result}
+        log_structured(
+            logger,
+            "info",
+            "chat.test_connection.completed",
+            request_id=request_id,
+            user_id=str(user.get("id") or ""),
+            api_url=config.api_url,
+            model=result.get("model") or config.model,
+            available_model_count=model_count,
+            fallback=result.get("fallback", False),
+        )
+        return {"success": True, "message": message, "request_id": request_id, **result}
     except LLMConcurrencyBusyError as e:
         raise HTTPException(status_code=429, detail=str(e)) from e
     except Exception as e:
+        log_structured(
+            logger,
+            "exception",
+            "chat.test_connection.failed",
+            request_id=request_id,
+            user_id=str(user.get("id") or ""),
+            api_url=config.api_url,
+            model=config.model,
+            error_type=type(e).__name__,
+            error=str(e),
+        )
         raise HTTPException(status_code=400, detail=f"连接失败: {str(e)}")

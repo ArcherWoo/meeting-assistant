@@ -2,9 +2,10 @@
 SQLite 存储服务 - 统一数据库连接与 Schema 管理
 遵循 PRD §13.1 数据库设计，所有表均在 ~/.meeting-assistant/data/main.db 中
 """
+import asyncio
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Union
 
@@ -299,6 +300,28 @@ CREATE TABLE IF NOT EXISTS skill_metadata (
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_skill_metadata_owner ON skill_metadata(owner_id);
+
+-- 运行时跨 worker 协调租约
+CREATE TABLE IF NOT EXISTS runtime_coordination_leases (
+    id             TEXT PRIMARY KEY,
+    lease_group_id TEXT NOT NULL,
+    lease_type     TEXT NOT NULL,
+    resource_id    TEXT DEFAULT '',
+    owner_id       TEXT DEFAULT '',
+    created_at     TEXT NOT NULL,
+    expires_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_runtime_lease_type ON runtime_coordination_leases(lease_type, expires_at);
+CREATE INDEX IF NOT EXISTS idx_runtime_lease_resource ON runtime_coordination_leases(resource_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_runtime_lease_group ON runtime_coordination_leases(lease_group_id);
+
+-- 应用级运行指标快照
+CREATE TABLE IF NOT EXISTS runtime_application_metrics (
+    instance_id  TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_runtime_application_metrics_updated ON runtime_application_metrics(updated_at);
 """
 
 _VALID_RESOURCE_TYPES = {"role", "skill", "knowledge", "knowhow"}
@@ -361,6 +384,21 @@ class StorageService:
         cursor = await self.db.execute(f"PRAGMA table_info({table_name})")
         rows = await cursor.fetchall()
         return {str(row["name"]) for row in rows}
+
+    async def initialize(self) -> None:
+        """Initialize storage, run migrations, then seed core defaults once across instances."""
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db = await aiosqlite.connect(str(self._db_path))
+        self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA foreign_keys=ON")
+        deferred_schema_statements = await self._apply_schema_sql()
+        await self._run_migrations()
+        for statement in deferred_schema_statements:
+            await self._db.execute(statement)
+        self._conversation_columns = await self._table_columns("conversations")
+        await self._db.commit()
+        await self._ensure_core_defaults()
 
     async def _apply_schema_sql(self) -> list[str]:
         deferred_statements: list[str] = []
@@ -498,6 +536,16 @@ class StorageService:
         )
         await self.db.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_run_steps_run ON agent_run_steps(run_id, step_index)"
+        )
+        await self.db.execute(
+            "CREATE TABLE IF NOT EXISTS runtime_application_metrics ("
+            "instance_id TEXT PRIMARY KEY, "
+            "payload_json TEXT NOT NULL, "
+            "updated_at TEXT NOT NULL)"
+        )
+        await self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runtime_application_metrics_updated "
+            "ON runtime_application_metrics(updated_at)"
         )
 
         # --- RBAC migrations: add owner_id to resource tables ---
@@ -782,6 +830,80 @@ class StorageService:
 
     # ===== Workspace CRUD =====
 
+    async def ensure_default_admin(self) -> None:
+        """Ensure at least one admin user exists. Create default admin if none."""
+        row = await self._fetchone("SELECT id FROM users WHERE system_role='admin' LIMIT 1")
+        if row:
+            return
+
+        import bcrypt
+
+        password_hash = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
+        try:
+            await self.create_user("admin", "管理员", password_hash, system_role="admin")
+        except aiosqlite.IntegrityError:
+            existing_admin = await self.get_user_by_username("admin")
+            if not existing_admin:
+                raise
+
+    async def _ensure_core_defaults(self) -> None:
+        if await self._core_defaults_ready():
+            return
+
+        lease_group_id = await self._acquire_startup_defaults_lease()
+        if lease_group_id:
+            try:
+                await self._ensure_default_workspace()
+                await self._ensure_default_roles()
+                await self.ensure_default_admin()
+            finally:
+                await self.release_runtime_lease_group(lease_group_id)
+            return
+
+        await self._wait_for_core_defaults()
+
+    async def _acquire_startup_defaults_lease(self) -> Optional[str]:
+        for attempt in range(8):
+            try:
+                return await self.try_acquire_runtime_lease_group(
+                    requirements=[
+                        {
+                            "lease_type": "startup_seed",
+                            "resource_id": "core_defaults",
+                            "limit": 1,
+                        }
+                    ],
+                    ttl_ms=120000,
+                    owner_id="storage.initialize",
+                )
+            except aiosqlite.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    raise
+                await asyncio.sleep(min(0.05 * (attempt + 1), 0.3))
+        return None
+
+    async def _wait_for_core_defaults(self) -> None:
+        for _ in range(120):
+            if await self._core_defaults_ready():
+                return
+            await asyncio.sleep(0.1)
+        raise RuntimeError("startup core defaults were not ready in time")
+
+    async def _core_defaults_ready(self) -> bool:
+        workspace_row = await self._fetchone("SELECT id FROM workspaces LIMIT 1")
+        if not workspace_row:
+            return False
+
+        admin_row = await self._fetchone("SELECT id FROM users WHERE system_role='admin' LIMIT 1")
+        if not admin_row:
+            return False
+
+        role_rows = await self._fetchall(
+            "SELECT id FROM roles WHERE id IN ('copilot', 'builder', 'executor')"
+        )
+        role_ids = {str(row.get("id") or "") for row in role_rows}
+        return {"copilot", "builder", "executor"}.issubset(role_ids)
+
     async def _ensure_default_workspace(self) -> None:
         """确保存在默认工作区"""
         row = await self._fetchone("SELECT id FROM workspaces LIMIT 1")
@@ -880,15 +1002,20 @@ class StorageService:
             existing = await self._fetchone("SELECT id FROM roles WHERE id=?", (role["id"],))
             if not existing:
                 now = utc_now_iso()
-                await self.db.execute(
-                    "INSERT INTO roles (id, name, icon, description, system_prompt, agent_prompt, capabilities, "
-                    "chat_capabilities, agent_preflight, allowed_surfaces, agent_allowed_tools, is_builtin, sort_order, created_at, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (role["id"], role["name"], role["icon"], role["description"],
-                     role["system_prompt"], role["agent_prompt"], role["capabilities"],
-                     role["chat_capabilities"], role["agent_preflight"], role["allowed_surfaces"], role["agent_allowed_tools"], role["is_builtin"],
-                     role["sort_order"], now, now),
-                )
+                try:
+                    await self.db.execute(
+                        "INSERT INTO roles (id, name, icon, description, system_prompt, agent_prompt, capabilities, "
+                        "chat_capabilities, agent_preflight, allowed_surfaces, agent_allowed_tools, is_builtin, sort_order, created_at, updated_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (role["id"], role["name"], role["icon"], role["description"],
+                         role["system_prompt"], role["agent_prompt"], role["capabilities"],
+                         role["chat_capabilities"], role["agent_preflight"], role["allowed_surfaces"], role["agent_allowed_tools"], role["is_builtin"],
+                         role["sort_order"], now, now),
+                    )
+                except aiosqlite.IntegrityError:
+                    existing = await self._fetchone("SELECT id FROM roles WHERE id=?", (role["id"],))
+                    if not existing:
+                        raise
             elif existing:
                 # 若旧记录 is_builtin=1，迁移为可编辑的普通角色
                 await self.db.execute(
@@ -2142,7 +2269,237 @@ class StorageService:
         await self.db.commit()
         return lid
 
+    # ===== Runtime Coordination Leases =====
+
+    def _runtime_lease_lock(self) -> asyncio.Lock:
+        lock = getattr(self, "_runtime_lease_tx_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._runtime_lease_tx_lock = lock
+        return lock
+
+    async def try_acquire_runtime_lease_group(
+        self,
+        requirements: list[dict],
+        *,
+        ttl_ms: int,
+        owner_id: str = "",
+    ) -> Optional[str]:
+        normalized_requirements: list[dict] = []
+        for requirement in requirements:
+            lease_type = str(requirement.get("lease_type") or "").strip()
+            resource_id = str(requirement.get("resource_id") or "").strip()
+            limit = max(1, int(requirement.get("limit") or 1))
+            if not lease_type:
+                continue
+            normalized_requirements.append(
+                {
+                    "lease_type": lease_type,
+                    "resource_id": resource_id,
+                    "limit": limit,
+                }
+            )
+
+        if not normalized_requirements:
+            return None
+
+        lease_group_id = gen_id()
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        expires_at = (now + timedelta(milliseconds=max(ttl_ms, 1))).isoformat()
+
+        async with aiosqlite.connect(str(self._db_path), isolation_level=None) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys=ON")
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                await conn.execute(
+                    "DELETE FROM runtime_coordination_leases WHERE expires_at <= ?",
+                    (now_iso,),
+                )
+
+                for requirement in normalized_requirements:
+                    if requirement["resource_id"]:
+                        cursor = await conn.execute(
+                            "SELECT COUNT(*) AS cnt FROM runtime_coordination_leases "
+                            "WHERE lease_type=? AND resource_id=? AND expires_at > ?",
+                            (
+                                requirement["lease_type"],
+                                requirement["resource_id"],
+                                now_iso,
+                            ),
+                        )
+                        fetched = await cursor.fetchone()
+                    else:
+                        cursor = await conn.execute(
+                            "SELECT COUNT(*) AS cnt FROM runtime_coordination_leases "
+                            "WHERE lease_type=? AND expires_at > ?",
+                            (
+                                requirement["lease_type"],
+                                now_iso,
+                            ),
+                        )
+                        fetched = await cursor.fetchone()
+                    row = dict(fetched) if fetched else {}
+
+                    current = int((row or {}).get("cnt") or 0)
+                    if current >= requirement["limit"]:
+                        await conn.rollback()
+                        return None
+
+                rows = [
+                    (
+                        gen_id(),
+                        lease_group_id,
+                        requirement["lease_type"],
+                        requirement["resource_id"],
+                        owner_id,
+                        now_iso,
+                        expires_at,
+                    )
+                    for requirement in normalized_requirements
+                ]
+                await conn.executemany(
+                    "INSERT INTO runtime_coordination_leases ("
+                    "id, lease_group_id, lease_type, resource_id, owner_id, created_at, expires_at"
+                    ") VALUES (?,?,?,?,?,?,?)",
+                    rows,
+                )
+                await conn.commit()
+                return lease_group_id
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def release_runtime_lease_group(self, lease_group_id: str) -> None:
+        normalized = str(lease_group_id or "").strip()
+        if not normalized:
+            return
+        async with aiosqlite.connect(str(self._db_path), isolation_level=None) as conn:
+            await conn.execute(
+                "DELETE FROM runtime_coordination_leases WHERE lease_group_id=?",
+                (normalized,),
+            )
+
+    async def cleanup_expired_runtime_leases(self) -> int:
+        now_iso = utc_now_iso()
+        async with aiosqlite.connect(str(self._db_path), isolation_level=None) as conn:
+            cursor = await conn.execute(
+                "DELETE FROM runtime_coordination_leases WHERE expires_at <= ?",
+                (now_iso,),
+            )
+            return cursor.rowcount
+
+    async def count_runtime_leases(
+        self,
+        lease_type: str,
+        *,
+        resource_id: Optional[str] = None,
+    ) -> int:
+        normalized_type = str(lease_type or "").strip()
+        if not normalized_type:
+            return 0
+
+        now_iso = utc_now_iso()
+        async with aiosqlite.connect(str(self._db_path), isolation_level=None) as conn:
+            conn.row_factory = aiosqlite.Row
+            if resource_id is None:
+                cursor = await conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM runtime_coordination_leases "
+                    "WHERE lease_type=? AND expires_at > ?",
+                    (normalized_type, now_iso),
+                )
+                fetched = await cursor.fetchone()
+            else:
+                cursor = await conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM runtime_coordination_leases "
+                    "WHERE lease_type=? AND resource_id=? AND expires_at > ?",
+                    (normalized_type, str(resource_id or "").strip(), now_iso),
+                )
+                fetched = await cursor.fetchone()
+            row = dict(fetched) if fetched else {}
+        return int((row or {}).get("cnt") or 0)
+
+    async def list_runtime_lease_resources(self, lease_type: str) -> list[str]:
+        normalized_type = str(lease_type or "").strip()
+        if not normalized_type:
+            return []
+        now_iso = utc_now_iso()
+        async with aiosqlite.connect(str(self._db_path), isolation_level=None) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                "SELECT DISTINCT resource_id FROM runtime_coordination_leases "
+                "WHERE lease_type=? AND expires_at > ? AND TRIM(COALESCE(resource_id, '')) <> '' "
+                "ORDER BY resource_id ASC",
+                (normalized_type, now_iso),
+            )
+            fetched = await cursor.fetchall()
+            rows = [dict(row) for row in fetched]
+        return [str(row.get("resource_id") or "") for row in rows if str(row.get("resource_id") or "").strip()]
+
     # ===== 内部辅助方法 =====
+
+    async def upsert_runtime_application_metrics(
+        self,
+        instance_id: str,
+        payload_json: str,
+        *,
+        updated_at: Optional[str] = None,
+    ) -> None:
+        normalized_instance_id = str(instance_id or "").strip()
+        if not normalized_instance_id:
+            return
+        params = (
+            normalized_instance_id,
+            str(payload_json or "{}"),
+            str(updated_at or utc_now_iso()),
+        )
+        for attempt in range(4):
+            try:
+                async with aiosqlite.connect(str(self._db_path), isolation_level=None) as conn:
+                    await conn.execute(
+                        "INSERT INTO runtime_application_metrics (instance_id, payload_json, updated_at) "
+                        "VALUES (?,?,?) "
+                        "ON CONFLICT(instance_id) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at",
+                        params,
+                    )
+                return
+            except aiosqlite.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 3:
+                    raise
+                await asyncio.sleep(0.02 * (attempt + 1))
+
+    async def list_runtime_application_metrics(self, *, fresh_within_ms: int = 60000) -> list[dict]:
+        now = datetime.now(timezone.utc)
+        threshold = (now - timedelta(milliseconds=max(fresh_within_ms, 1))).isoformat()
+        async with aiosqlite.connect(str(self._db_path), isolation_level=None) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                "SELECT instance_id, payload_json, updated_at "
+                "FROM runtime_application_metrics "
+                "WHERE updated_at >= ? "
+                "ORDER BY instance_id ASC",
+                (threshold,),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def cleanup_stale_runtime_application_metrics(self, *, fresh_within_ms: int = 60000) -> int:
+        now = datetime.now(timezone.utc)
+        threshold = (now - timedelta(milliseconds=max(fresh_within_ms, 1))).isoformat()
+        for attempt in range(4):
+            try:
+                async with aiosqlite.connect(str(self._db_path), isolation_level=None) as conn:
+                    cursor = await conn.execute(
+                        "DELETE FROM runtime_application_metrics WHERE updated_at < ?",
+                        (threshold,),
+                    )
+                    return cursor.rowcount
+            except aiosqlite.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 3:
+                    raise
+                await asyncio.sleep(0.02 * (attempt + 1))
+        return 0
 
     async def _fetchone(self, sql: str, params: tuple = ()) -> Optional[dict]:
         cursor = await self.db.execute(sql, params)

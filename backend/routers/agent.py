@@ -1,10 +1,12 @@
 """Agent routes backed by Agent Runtime V2."""
 
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
+from routers.auth import get_current_user
 from services.access_control import can_access_role, filter_accessible_skills, get_accessible_skill
 from services.agent_runtime.errors import (
     AgentConfigurationError,
@@ -24,12 +26,13 @@ from services.agent_runtime.role_policy import (
 )
 from services.agent_runtime.run_registry import run_registry
 from services.agent_runtime.runner import execute_agent_stream
+from services.observability import log_structured, new_request_id, publish_runtime_metrics, runtime_metrics
 from services.skill_manager import skill_manager
 from services.skill_matcher import skill_matcher
 from services.storage import storage
-from routers.auth import get_current_user
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/agent/match")
@@ -92,6 +95,9 @@ async def match_intent(request: AgentMatchRequest, user: dict = Depends(get_curr
 
 @router.post("/agent/execute")
 async def execute_skill(request: AgentExecuteRequest, user: dict = Depends(get_current_user)):
+    request_id = new_request_id("agent")
+    user_id = str((user or {}).get("id") or "")
+
     role = await storage.get_role(normalize_agent_role_id(request.role_id))
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
@@ -103,17 +109,77 @@ async def execute_skill(request: AgentExecuteRequest, user: dict = Depends(get_c
         if not skill:
             raise HTTPException(status_code=403, detail="无权使用该 Skill")
 
+    runtime_metrics.record_agent_started()
+    await publish_runtime_metrics()
+    log_structured(
+        logger,
+        "info",
+        "agent.request.started",
+        request_id=request_id,
+        user_id=user_id,
+        run_id=request.run_id,
+        conversation_id=request.conversation_id,
+        role_id=request.role_id,
+        skill_id=request.skill_id,
+    )
+
     async def event_stream():
+        status = "completed"
+        terminal_event_emitted = False
         try:
             async for event in execute_agent_stream(request, user=user):
+                if isinstance(event, dict):
+                    event.setdefault("request_id", request_id)
+                    event_type = str(event.get("type") or "")
+                    if event_type == "error":
+                        status = "failed"
+                        terminal_event_emitted = True
+                    elif event_type == "cancelled":
+                        status = "cancelled"
+                        terminal_event_emitted = True
+                    elif event_type == "complete":
+                        status = "completed"
+                        terminal_event_emitted = True
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except (RoleNotAllowedForSurfaceError, AgentContinuationError) as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+            status = "failed"
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc), 'request_id': request_id}, ensure_ascii=False)}\n\n"
         except AgentConfigurationError as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+            status = "failed"
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc), 'request_id': request_id}, ensure_ascii=False)}\n\n"
         except Exception as exc:  # pragma: no cover
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
-        yield "data: [DONE]\n\n"
+            status = "failed"
+            log_structured(
+                logger,
+                "exception",
+                "agent.request.failed",
+                request_id=request_id,
+                user_id=user_id,
+                run_id=request.run_id,
+                conversation_id=request.conversation_id,
+                role_id=request.role_id,
+                skill_id=request.skill_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc), 'request_id': request_id}, ensure_ascii=False)}\n\n"
+        finally:
+            runtime_metrics.record_agent_finished(status=status)
+            await publish_runtime_metrics(force=True)
+            log_structured(
+                logger,
+                "info" if status == "completed" else "warning",
+                "agent.request.completed" if status == "completed" else "agent.request.failed",
+                request_id=request_id,
+                user_id=user_id,
+                run_id=request.run_id,
+                conversation_id=request.conversation_id,
+                role_id=request.role_id,
+                skill_id=request.skill_id,
+                status=status,
+                terminal_event_emitted=terminal_event_emitted,
+            )
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         event_stream(),
@@ -122,6 +188,7 @@ async def execute_skill(request: AgentExecuteRequest, user: dict = Depends(get_c
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            "X-Request-ID": request_id,
         },
     )
 

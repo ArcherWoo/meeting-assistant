@@ -12,6 +12,38 @@
 - 聊天、知识库、Know-how、附件解析这些耗资源链路在高并发下仍可控
 - 后续迭代有明确路线，不会做着做着丢失主线
 
+## 1.1 当前阶段进展
+
+截至 `2026-04-08`，Phase 1 和 Phase 2 的关键状态如下：
+
+- Phase 1 的并发治理主线已经落下：
+  - LLM 统一共享连接池和并发配额
+  - 同会话生成锁
+  - 附件解析配额
+  - Chat、Know-how、Knowledge、Planner 已接入统一治理
+- Phase 2 的部署和观测底座已经落下：
+  - Windows / Linux 双入口部署脚本
+  - Nginx 模板
+  - `/api/health/live`、`/api/health/ready`、`/api/health/runtime`
+  - 结构化日志和应用级运行指标
+  - Windows 多实例 `service_runner` 模式
+
+这轮又补了两个关键修复：
+
+- 启动默认数据初始化已接入跨实例租约，解决了多实例启动时的默认工作区、角色、管理员竞争
+- 运行指标写回 SQLite 已改成独立连接和轻量重试，避免高并发下把正常请求打成 `500`
+
+目前已经拿到可信的 Windows 单机多实例基线，详见：
+
+- [docs/deployment/WINDOWS_CLUSTER_LOADTEST_2026-04-08.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/deployment/WINDOWS_CLUSTER_LOADTEST_2026-04-08.md)
+
+阶段性结论：
+
+- `2` 实例 chat 压测已稳定通过
+- `4` 实例 chat 压测已稳定通过
+- 聚合运行指标已能正确显示 `cluster` 视角
+- 当前仍属于“单机多实例”能力，不等同于多机集群
+
 
 ## 2. 当前背景与核心假设
 
@@ -388,6 +420,38 @@
 验收标准：
 
 - 无需改代码即可调优生产行为
+
+### 2.4 部署入口收敛
+
+要做的事情：
+
+- 根目录只保留两个一键部署入口
+  - Windows：`deploy.ps1`
+  - Linux：`deploy.sh`
+- 两个脚本都复用 `deploy/` 目录内的共享逻辑
+- 部署脚本统一输出：
+  - 环境文件位置
+  - 健康检查地址
+  - Nginx 模板位置
+- 明确 Windows 优先部署口径，同时保留 Linux 对等能力
+
+验收标准：
+
+- 新人只需要知道两个脚本，不需要理解额外的零散部署入口
+
+### 2.5 代理层模板与运维说明
+
+要做的事情：
+
+- 提供 Windows / Linux 两套 Nginx 模板
+- 明确 SSE 路由必须关闭代理缓冲
+- 明确读超时、请求体大小、统一入口端口的建议值
+- 输出一份真正可执行的服务器部署文档
+
+验收标准：
+
+- 服务器部署不再依赖口头说明
+- Nginx 配置不会因为遗漏 SSE 细节导致流式回答假卡死
 
 
 ## Phase 3：观测、日志与压测
@@ -773,3 +837,71 @@
 - 会话级生成锁、LLM 并发配额、附件解析配额目前是“单进程内有效”
 - 如果后续部署为多 worker 或多实例，还需要继续推进进程间协调或更上层的流量治理
 - 当前仍以 SQLite 为主，Phase 1 解决的是“不乱、不抢、不容易挂”，不是数据库扩展性的最终答案
+
+### 2026-04-08：Phase 2 第一轮基线落地中
+
+本轮已完成：
+
+- 新增健康检查与运行时诊断接口：
+  - `/api/health`
+  - `/api/health/live`
+  - `/api/health/ready`
+  - `/api/health/runtime`
+- 运行时诊断已能返回：
+  - LLM 并发占用
+  - 会话生成占用
+  - 附件解析占用
+- 部署环境变量进一步外置，`deploy/server.env` 可承载：
+  - worker
+  - keep-alive
+  - backlog
+  - proxy headers
+  - forwarded allow ips
+  - limit concurrency
+  - limit max requests
+  - access log
+- 新增 Windows / Linux 两套 Nginx 模板，显式处理 SSE 代理缓冲
+- 根目录部署入口继续收敛为：
+  - `deploy.ps1`
+  - `deploy.sh`
+- 服务器部署文档已重新整理，部署、探针、Nginx 与脚本口径对齐
+- chat / agent 主链路已补 request_id 与结构化事件日志
+- `/api/health/runtime` 已能返回应用级 counters、inflight 和平均耗时
+- 新增最小可用 chat 压测脚本：`scripts/loadtest_chat.py`
+- 新增可切换的日志格式配置：`MEETING_ASSISTANT_LOG_FORMAT=json|text`
+- 新增压测说明文档，覆盖运行方式、观察点和结果记录口径
+- 会话生成锁、LLM 并发配额、附件解析配额已支持单机多 worker / 多实例的 SQLite 租约协调
+- Windows 部署口径新增“多实例单 worker”模式，避免强依赖 `uvicorn --workers`
+- `service_runner` 现在会在 Windows + SQLite 协调 + `workers>1` 时自动展开连续端口实例
+- Nginx rendered 配置会按当前 `workers` 自动生成 Windows upstream 端口列表
+- `/api/health/runtime` 已升级为跨实例聚合视角：
+  - `runtime_usage.application.scope = cluster`
+  - `runtime_usage.application.instance_count`
+  - `runtime_usage.application.instances`
+- `scripts/loadtest_chat.py` 已修正，不再伪造不存在的 `conversation_id`
+
+本轮真实联调结果：
+
+- Windows 双实例启动和 `live` 健康检查已验证通过
+- Windows 双实例下的聚合运行时视图已验证通过
+- 已新增独立记录文档：
+  - `docs/deployment/WINDOWS_CLUSTER_LOADTEST_2026-04-08.md`
+
+本轮发现的 blocker：
+
+- 在 Windows 双实例 chat 压测下，仍会出现部分 `500`
+- 当前最明确的错误是：
+  - `sqlite3.OperationalError: cannot start a transaction within a transaction`
+- 这说明 SQLite 运行时租约事务层仍有剩余稳定性问题
+- 因此本轮只能确认“多实例观测链路已通”，还不能给出可信的正式容量基线
+
+本轮目标：
+
+- 先把“部署能跑、探针能看、配置能调、代理有模板”这一层打牢
+
+本轮仍保留的边界：
+
+- 当前多 worker / 多实例协调只覆盖单机共享同一个 SQLite 数据库
+- SQLite 仍是中期容量瓶颈
+- Windows 双实例 chat 压测还没有达到“全通过”，正式容量基线需要在租约事务问题修复后重跑
+

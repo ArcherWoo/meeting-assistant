@@ -1,105 +1,343 @@
 # Meeting Assistant
 
-一个基于 `React + Vite + FastAPI` 的会议助手项目，当前主线能力包括：
+一个基于 `React + Vite + FastAPI` 的智能工作台，当前主线能力包括：
 
 - 智能对话与流式输出
-- 附件文本提取与上下文注入
+- 附件提取与上下文注入
 - 知识库导入、检索与 RAG
 - Skill / Know-how 管理
 - Agent 执行模式
+- 用户、用户组、权限与组内 Know-how 管理
 
-## 最近文档解析升级
-
-- 后端新增统一文档解析层 `backend/services/document_parsing/`，附件提取与知识库导入共用同一套解析链路。
-- `XLSX` 现在会保留 merged ranges、多层表头、公式与 `header_path`，不再只是简单摊平文本。
-- `DOCX` 现在按块级顺序解析，正文、标题、表格的原始顺序会保留。
-- `PDF` 现在优先走 layout-aware 提取；扫描版 PDF 会在可用依赖存在时自动走 OCR，并尝试恢复 OCR 表格。
-- `Image` 现在支持图片元数据读取与可选 OCR，能力与 PDF OCR 共用同一套底座。
-- 知识库 chunk 现在会落结构化 `metadata_json`，可携带 `sheet/page/row range/OCR 段号/table title` 等定位信息。
-- 聊天消息与右侧上下文面板现在会把这些 citation locator 直接展示出来，方便定位命中的来源片段。
-
-## 现在的目录分工
-
-根目录只保留运行入口、构建配置和一级导航，业务代码与文档按职责收拢：
+## 项目结构
 
 ```text
 .
 ├─ backend/               FastAPI 后端
 ├─ deploy/                生产部署核心逻辑
-├─ docs/                  产品、开发、部署、协议文档
-├─ scripts/               开发辅助脚本
+├─ docs/                  架构、开发、部署、产品文档
+├─ scripts/               开发、压测、辅助脚本
 ├─ src/                   React 前端
-├─ start.py               开发环境兼容入口
-├─ deploy.sh              Linux 部署入口
-├─ deploy.ps1             Windows 部署入口
+├─ start.py               开发环境一键启动入口
+├─ deploy.ps1             Windows 生产部署入口
+├─ deploy.sh              Linux 生产部署入口
 └─ package.json           前端脚本与依赖
 ```
 
 更细的结构说明见 [docs/architecture/PROJECT_STRUCTURE.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/architecture/PROJECT_STRUCTURE.md)。
 
-## 快速开始
+## 开发环境一键启动
 
-### 一键启动开发环境
+在项目根目录运行：
 
 ```bash
 python start.py
 ```
 
-这会同时启动：
+默认行为：
 
-- 前端：`http://localhost:4173`
-- 后端：`http://127.0.0.1:5173`
+- 自动检查 Python 和 Node.js
+- 自动安装前后端依赖
+- 自动清理旧的开发进程
+- 自动启动后端和前端
+- 自动等待服务健康可用后再输出结果
 
-启动后需要登录。系统会自动创建默认管理员账户：
+启动成功后会输出：
+
+- `智枢前端`
+  - `Local: http://localhost:4173/`
+  - `Network: http://192.168.x.x:4173/`
+  - 以及其他可用局域网地址，例如 `172.*`
+- `后端接口`
+  - `http://localhost:5173/api`
+  - 对应的局域网地址版本
+
+常用参数：
+
+```bash
+python start.py --help
+python start.py --verbose
+python start.py --skip-install
+python start.py --backend-port 5173 --frontend-port 4173
+```
+
+说明：
+
+- 默认是安静模式，详细日志会写入 `.dev-runtime/logs/`
+- 如果启动失败，脚本会自动打印关键日志尾部
+- 如果环境异常，脚本会尽量自动修复并重新尝试
+
+默认管理员账号：
 
 | 字段 | 值 |
 |------|----|
 | 用户名 | `admin` |
 | 密码 | `admin123` |
 
-> ⚠️ 生产环境请在首次登录后立即修改默认密码。
+首次进入系统后请立即修改默认密码。
 
-### 分开启动
+## 生产环境一键部署
 
-前端：
+当前生产部署分两条入口：
 
-```bash
-npm run dev:frontend
+- Windows: [deploy.ps1](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy.ps1)
+- Linux: [deploy.sh](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy.sh)
+
+这两个脚本都基于同一套 [deploy/](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy) 逻辑，负责：
+
+- 生成并校验 `deploy/server.env`
+- 创建 `.server-venv/`
+- 安装后端依赖和前端依赖
+- 构建前端到 `dist/`
+- 启动生产服务
+- 输出 `live / ready / runtime` 健康检查地址
+- 生成 Nginx rendered 配置
+
+### Windows Server + Nginx 傻瓜式部署清单
+
+这套方案适合你的当前目标：`Windows Server + Nginx + FastAPI 单机多实例 + SQLite 协调`。
+
+#### 1. 服务器先准备这些软件
+
+请先在 Windows Server 上安装：
+
+1. `Python 3.10+`
+2. `Node.js 18+`
+3. `Git`
+4. `Nginx for Windows`
+
+Nginx 建议下载：
+
+- 官网地址：`https://nginx.org/en/download.html`
+- 选择 `nginx/Windows` 稳定版 zip 包
+- 下载后直接解压，不需要安装程序
+
+#### 2. 建议目录
+
+建议把项目和 Nginx 放在固定目录，例如：
+
+```text
+C:\srv\meeting-assistant\
+  ├─ meeting-assistant-main\
+  └─ nginx\
 ```
 
-后端：
+其中：
 
-```bash
-npm run dev:backend
+- 项目目录：`C:\srv\meeting-assistant\meeting-assistant-main`
+- Nginx 目录：`C:\srv\meeting-assistant\nginx`
+
+#### 3. 拉取项目
+
+在 PowerShell 中执行：
+
+```powershell
+cd C:\srv\meeting-assistant
+git clone <你的仓库地址> meeting-assistant-main
+cd .\meeting-assistant-main
 ```
 
-### 常用命令
+如果你不是用 Git，也可以直接把项目目录完整拷贝到这台服务器。
 
-```bash
-npm run build
-npm run test:backend
-npm run dev:all
+#### 4. 先生成生产配置
+
+在管理员 PowerShell 中执行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\deploy.ps1 -Foreground
 ```
 
-## 安全说明
+第一次这样跑的目的，是先让脚本自动完成：
 
-- 密码使用 `bcrypt` 单向哈希存储，不可逆向还原。
-- 登录后系统签发 JWT Token，有效期默认 24 小时。
-- 所有 `/api/*` 接口（除 `/api/health` 和 `/api/auth/login`）必须携带有效 Token。
-- 管理员接口（`/api/auth/users`、`/api/auth/groups` 等）额外要求 `system_role=admin`。
+- 创建 `.server-venv`
+- 安装依赖
+- 构建前端
+- 生成 `deploy/server.env`
+- 生成 rendered Nginx 配置
+
+如果你不想让前台服务一直挂着，等看到“服务启动成功”后，按 `Ctrl + C` 停掉即可。
+
+#### 5. 修改生产配置
+
+打开：
+
+- [deploy/server.env](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy/server.env)
+
+至少检查这些项：
+
+```env
+MEETING_ASSISTANT_HOST=0.0.0.0
+MEETING_ASSISTANT_PORT=5173
+MEETING_ASSISTANT_WORKERS=2
+MEETING_ASSISTANT_RUNTIME_COORDINATION=sqlite
+MEETING_ASSISTANT_SERVE_FRONTEND=1
+MEETING_ASSISTANT_FRONTEND_DIST=./dist
+```
+
+Windows 单机建议起步值：
+
+- `MEETING_ASSISTANT_WORKERS=2`
+- 如果服务器配置更高，再逐步压测升到 `3` 或 `4`
+
+#### 6. 正式注册生产服务
+
+仍然在管理员 PowerShell 中执行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\deploy.ps1
+```
+
+它会自动：
+
+- 注册计划任务 `MeetingAssistant`
+- 用 `service_runner.py` 托管服务
+- 自动做存活和就绪检查
+- 输出日志位置和服务地址
+
+#### 7. 让脚本自动接管 Nginx
+
+现在的推荐方式是：只要服务器上已经安装好 Nginx，`deploy.ps1` 会自动完成这些事：
+
+- 找到 `nginx.exe`
+- 把 rendered 配置复制到 `conf\meeting-assistant.conf`
+- 自动把 `include meeting-assistant.conf;` 接进主 `nginx.conf`
+- 自动执行 `nginx -t`
+- 自动启动或重载 Nginx
+
+你只需要保证 Nginx 在这些位置之一：
+
+- `项目目录\nginx`
+- `项目上级目录\nginx`
+- `C:\nginx`
+- `C:\tools\nginx`
+- `C:\srv\meeting-assistant\nginx`
+- `C:\Program Files\nginx`
+
+如果你放在别的位置，就在 [deploy/server.env](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy/server.env) 里加：
+
+```env
+MEETING_ASSISTANT_NGINX_HOME=C:\你的Nginx目录
+```
+
+这样重新执行一次：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\deploy.ps1
+```
+
+脚本就会自动把 Nginx 接好，不需要你再手工修改 `nginx.conf`。
+
+#### 8. 如果你想手动检查 Nginx
+
+虽然现在脚本会自动处理，但你也可以自己检查：
+
+```powershell
+cd C:\srv\meeting-assistant\nginx
+.\nginx.exe -t
+.\nginx.exe -s reload
+```
+
+#### 9. 最终访问方式
+
+部署成功后：
+
+- 应用服务仍然监听在 `5173` 起的一组本地端口
+- 对外推荐通过 Nginx 暴露统一入口
+
+示例：
+
+- `http://服务器IP/`
+- 或者你后续绑定域名后用 `http://你的域名/`
+
+#### 10. 常用排查命令
+
+查看计划任务：
+
+```powershell
+Get-ScheduledTask -TaskName MeetingAssistant
+Get-ScheduledTask -TaskName MeetingAssistantNginx
+```
+
+手动启动：
+
+```powershell
+Start-ScheduledTask -TaskName MeetingAssistant
+```
+
+手动停止：
+
+```powershell
+Stop-ScheduledTask -TaskName MeetingAssistant
+```
+
+### 11. 优雅关闭生产环境
+
+开发环境的 `start.py` 可以优雅关闭，生产环境现在也有正式的优雅关闭入口。
+
+Windows：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\deploy.ps1 -Stop
+```
+
+如果连 Nginx 也一起优雅关闭：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\deploy.ps1 -Stop -StopNginx
+```
+
+说明：
+
+- 这个动作不是直接硬杀进程
+- 它会先给 `service_runner` 发停止请求
+- `service_runner` 会自己优雅停止后端实例，再退出
+- 这样更不容易留下端口占用
+
+Linux：
+
+```bash
+./deploy.sh --stop
+```
+
+如果连 Nginx 也一起优雅关闭：
+
+```bash
+./deploy.sh --stop --stop-nginx
+```
+
+查看健康检查：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:5173/api/health/live
+Invoke-RestMethod http://127.0.0.1:5173/api/health/ready
+Invoke-RestMethod http://127.0.0.1:5173/api/health/runtime
+```
+
+查看日志目录：
+
+- `.server-data\logs\runner.log`
+- `.server-data\logs\app.log`
+- `.server-data\logs\app-instance-*.log`
+
+说明：
+
+- 应用服务已经有进程守护，异常退出后会被自动拉起
+- `deploy.ps1` 也会为 Nginx 注册开机启动任务
+
+## 生产部署说明入口
+
+更详细的生产部署说明见 [docs/deployment/SERVER_DEPLOYMENT.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/deployment/SERVER_DEPLOYMENT.md)。
 
 ## 文档导航
 
-- 总导航：[docs/README.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/README.md)
+- 文档总导航：[docs/README.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/README.md)
 - 开发说明：[docs/development/DEVELOPMENT.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/development/DEVELOPMENT.md)
 - 项目结构：[docs/architecture/PROJECT_STRUCTURE.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/architecture/PROJECT_STRUCTURE.md)
 - 服务端部署：[docs/deployment/SERVER_DEPLOYMENT.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/deployment/SERVER_DEPLOYMENT.md)
+- 压测说明：[docs/deployment/LOAD_TESTING.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/deployment/LOAD_TESTING.md)
 - 产品文档：[docs/product/PRD.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/product/PRD.md)
-
-## 端口约定
-
-- 前端开发端口：`4173`
-- 后端开发端口：`5173`
-- 生产部署默认端口：`5173`
-
-开发环境下，Vite 会把 `/api` 代理到后端；生产环境下，FastAPI 可以直接托管 `dist/` 和 `/api`。

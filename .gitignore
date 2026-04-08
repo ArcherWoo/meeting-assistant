@@ -26,6 +26,8 @@ __pycache__/
 backend/build/
 backend/build_tmp/
 .integration-runtime*/
+.phase2-*/
+.tmp-*/
 tmp/
 backend/dist/
 

@@ -329,3 +329,63 @@ chat persistence or Prompt Template / Prompt Pack runtime support.
 
 - Backend tests: `pytest backend/tests -q`
 - Frontend build: `npm run build`
+## 2026-04-09 启动与部署基线
+
+当前开发启动和生产部署的入口已经统一收敛：
+
+- 开发环境入口：`python start.py`
+- Windows 生产入口：`.\deploy.ps1`
+- Linux 生产入口：`./deploy.sh`
+
+### 开发环境
+
+`start.py` 当前具备这些行为：
+
+- 自动检查 Python / Node.js
+- 自动安装依赖
+- 自动清理旧的开发进程
+- 自动等待前后端服务就绪
+- 成功后输出 `智枢前端` 和 `后端接口` 的本机地址、局域网地址
+- 失败时输出关键日志尾部
+
+### Windows 生产部署
+
+`deploy.ps1` 当前已经支持：
+
+- 自动准备生产虚拟环境和 `deploy/server.env`
+- 自动构建前端并启动应用服务
+- 自动注册 `MeetingAssistant` 计划任务做开机自启
+- 如果已经安装 Nginx，则自动：
+  - 发现 `nginx.exe`
+  - 复制 rendered 配置到 `conf/meeting-assistant.conf`
+  - 自动把 `include meeting-assistant.conf;` 接入主 `nginx.conf`
+  - 执行 `nginx -t`
+  - 启动或重载 Nginx
+  - 注册 `MeetingAssistantNginx` 计划任务
+
+说明：
+
+- Nginx 本体不会随项目一起安装，仍需在 Windows Server 上预先安装
+- 但装好后，`deploy.ps1` 已经可以自动把它接进整条部署链路
+
+### 生产优雅关闭
+
+生产环境现在也有正式的优雅关闭入口，不再建议直接杀进程或只停计划任务。
+
+Windows：
+
+- `.\deploy.ps1 -Stop`
+- `.\deploy.ps1 -Stop -StopNginx`
+
+Linux：
+
+- `./deploy.sh --stop`
+- `./deploy.sh --stop --stop-nginx`
+
+其中 Windows 关闭链路当前是：
+
+- 脚本写入运行时停止标记
+- `service_runner` 检测到后主动停止所有子实例
+- 应用健康检查真正下线后再返回
+
+这条链路比直接结束 `python.exe` 或 `Stop-ScheduledTask` 更安全，更不容易留下端口占用。

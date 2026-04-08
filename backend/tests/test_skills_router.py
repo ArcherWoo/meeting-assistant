@@ -1,9 +1,10 @@
 import os
+import shutil
 import sys
 import unittest
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
+import uuid
 
 
 BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -29,8 +30,9 @@ Demo description
 
 class SkillsRouterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.temp_dir = TemporaryDirectory()
-        root = Path(self.temp_dir.name)
+        self.temp_dir = Path(BACKEND_ROOT) / ".tmp-test-data" / f"skills-router-{uuid.uuid4().hex}"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        root = self.temp_dir
         self.backend_skills_dir = root / "backend_skills"
         self.builtin_dir = self.backend_skills_dir / "builtin"
         self.user_skills_dir = root / "user_skills"
@@ -56,7 +58,7 @@ class SkillsRouterTests(unittest.IsolatedAsyncioTestCase):
         skill_manager._deleted_builtin_ids = set()
         for patcher in reversed(self.patchers):
             patcher.stop()
-        self.temp_dir.cleanup()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     async def test_delete_builtin_skill_hides_it_without_removing_source_file(self):
         builtin_file = self.builtin_dir / "demo.skill.md"
