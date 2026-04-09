@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 from pathlib import Path
 
@@ -10,8 +11,10 @@ from common import (
     DEFAULT_VENV_DIR,
     ROOT_DIR,
     CommandExecutionError,
+    backfill_env_file,
     command_exists,
     ensure_env_file,
+    ensure_python_runtime_ready,
     ensure_runtime_dirs,
     ensure_venv,
     get_venv_python,
@@ -160,6 +163,12 @@ def _run_step(label: str, command: list[str], *, cwd: Path | None = None, env: d
 def prepare(env_file: Path) -> None:
     _assert_prerequisites()
     ensure_env_file(env_file)
+    backfill_env_file(env_file)
+    env_values = load_env_file(env_file)
+    os.environ["MEETING_ASSISTANT_VENV_SYSTEM_SITE_PACKAGES"] = env_values.get(
+        "MEETING_ASSISTANT_VENV_SYSTEM_SITE_PACKAGES",
+        "1",
+    )
     runtime_dirs = ensure_runtime_dirs(env_file)
     ensure_venv(DEFAULT_VENV_DIR)
     venv_python = get_venv_python(DEFAULT_VENV_DIR)
@@ -173,14 +182,23 @@ def prepare(env_file: Path) -> None:
     print_info(f"应用目录: {runtime_dirs['app_home']}")
     print_info(f"日志目录: {runtime_dirs['log_dir']}")
 
-    _run_step(
-        "升级 pip",
-        [str(venv_python), "-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off", "--upgrade", "pip"],
-    )
-    _run_step(
-        "安装后端依赖",
-        [str(venv_python), "-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off", "-r", "backend/requirements.txt"],
-    )
+    print_info("准备后端 Python 运行环境...")
+    try:
+        backend_runtime_summary = ensure_python_runtime_ready(
+            venv_python,
+            env_file=env_file,
+        )
+        for line in backend_runtime_summary:
+            print_block(f"  - {line}")
+        print_ok("后端 Python 运行环境已就绪")
+    except Exception as exc:  # noqa: BLE001
+        print_error("后端 Python 运行环境准备失败")
+        raise RuntimeError(
+            f"{exc}\n"
+            "部署脚本现在会优先复用当前可用的 Python 环境，并只安装缺失依赖。\n"
+            "如果公司镜像里缺少精确版本，请在 deploy/server.env 里配置 pip 镜像参数，"
+            "或确认当前服务器上的 Python 环境已经能直接运行 python start.py。"
+        ) from exc
     _run_step(
         "安装前端依赖",
         [*_npm_command(), "install", "--no-fund", "--no-audit", "--loglevel=error"],

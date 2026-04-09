@@ -23,6 +23,7 @@ from routers.chat import (
     ChatRequest,
     _build_context_metadata_payload,
     _calculate_context_budget_chars,
+    _extract_usage_from_sse_chunk,
     _format_status_event,
     _is_content_sse_chunk,
     _stream_with_metadata,
@@ -57,6 +58,23 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
         message = self.service._extract_error_message(response)
         self.assertIn("Model `gpt-4o` does not exist", message)
         self.assertIn("https://api.deepseek.com/v1/chat/completions", message)
+
+    def test_stream_usage_retry_detector_only_matches_stream_option_errors(self):
+        self.assertTrue(
+            self.service._should_retry_without_stream_usage(
+                "HTTP 400 @ https://example.com/v1/chat/completions: unknown field `stream_options`"
+            )
+        )
+        self.assertTrue(
+            self.service._should_retry_without_stream_usage(
+                "HTTP 400 @ https://example.com/v1/chat/completions: include_usage is not permitted"
+            )
+        )
+        self.assertFalse(
+            self.service._should_retry_without_stream_usage(
+                "HTTP 401 @ https://example.com/v1/chat/completions: invalid api key"
+            )
+        )
 
     async def test_test_connection_uses_chat_fallback_when_model_is_given(self):
         with patch.object(self.service, "list_models", AsyncMock(side_effect=RuntimeError("/models 404"))):
@@ -322,6 +340,14 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(_is_content_sse_chunk('data: {"choices":[{"delta":{"content":"你好"}}]}\n\n'))
         self.assertFalse(_is_content_sse_chunk('data: {"type":"status","phase":"queued"}\n\n'))
         self.assertFalse(_is_content_sse_chunk('data: [DONE]\n\n'))
+
+        self.assertEqual(
+            _extract_usage_from_sse_chunk(
+                'data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}\n\n'
+            ),
+            {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
+        )
+        self.assertIsNone(_extract_usage_from_sse_chunk('data: {"choices":[{"delta":{"content":"浣犲ソ"}}]}\n\n'))
 
     def test_context_budget_uses_model_window_not_output_tokens(self):
         messages = [

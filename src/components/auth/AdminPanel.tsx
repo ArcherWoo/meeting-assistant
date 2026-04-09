@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 管理员面板 - 用户、用户组和资源授权管理
  */
 import { useCallback, useEffect, useState } from 'react';
@@ -82,6 +82,23 @@ function useToast() {
   const dismissToast = () => setToastState(null);
 
   return { toast, showToast, dismissToast };
+}
+
+function formatCount(value?: number): string {
+  return new Intl.NumberFormat('zh-CN').format(Math.max(0, Number(value ?? 0)));
+}
+
+function formatLastLogin(value?: string | null): string {
+  if (!value) return '暂未登录';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 export default function AdminPanel() {
@@ -907,6 +924,8 @@ function EnhancedUserManagementTable({
             <th className="px-4 py-2 text-left font-medium">显示名</th>
             <th className="px-4 py-2 text-left font-medium">角色</th>
             <th className="px-4 py-2 text-left font-medium">用户组</th>
+            <th className="px-4 py-2 text-left font-medium">登录统计</th>
+            <th className="px-4 py-2 text-left font-medium">Token 流量</th>
             <th className="px-4 py-2 text-left font-medium">组内 Know-how 管理</th>
             <th className="px-4 py-2 text-right font-medium">操作</th>
           </tr>
@@ -935,6 +954,18 @@ function EnhancedUserManagementTable({
                   </span>
                 </td>
                 <td className="px-4 py-2 text-text-secondary">{getGroupName(user.group_id)}</td>
+                <td className="px-4 py-2">
+                  <div className="space-y-1 text-xs text-text-secondary">
+                    <div>登录 {formatCount(user.login_count)} 次</div>
+                    <div>{formatLastLogin(user.last_login_at)}</div>
+                  </div>
+                </td>
+                <td className="px-4 py-2">
+                  <div className="space-y-1 text-xs text-text-secondary">
+                    <div>总计 {formatCount(user.token_total)}</div>
+                    <div>输入 {formatCount(user.token_input_total)} / 输出 {formatCount(user.token_output_total)}</div>
+                  </div>
+                </td>
                 <td className="px-4 py-2">
                   <div className="flex flex-wrap items-center gap-2">
                     {isAdmin ? (
@@ -999,7 +1030,7 @@ function EnhancedUserManagementTable({
           })}
           {users.length === 0 && (
             <tr>
-              <td colSpan={6} className="px-4 py-8 text-center text-text-secondary">暂无用户</td>
+              <td colSpan={8} className="px-4 py-8 text-center text-text-secondary">暂无用户</td>
             </tr>
           )}
         </tbody>

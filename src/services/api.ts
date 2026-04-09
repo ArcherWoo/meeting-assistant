@@ -215,6 +215,7 @@ export async function streamChat(
   onMetadata?: (metadata: ContextMetadata) => void,
   onSkillSuggestion?: (suggestion: SkillSuggestionEvent) => void,
   onStatus?: (status: ChatStatusEvent) => void,
+  onUsage?: (usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }) => void,
 ): Promise<void> {
   try {
     let finished = false;
@@ -247,6 +248,9 @@ export async function streamChat(
         if (parsed.type === 'status') {
           onStatus?.(parsed as ChatStatusEvent);
           return false;
+        }
+        if (parsed.usage && typeof parsed.usage === 'object') {
+          onUsage?.(parsed.usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number });
         }
 
         const content = parsed.choices?.[0]?.delta?.content;

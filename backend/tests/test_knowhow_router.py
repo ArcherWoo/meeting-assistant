@@ -132,6 +132,8 @@ class KnowhowRouterApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(rule["trigger_terms"])
         self.assertTrue(rule["applies_when"])
         self.assertTrue(rule["examples"])
+        self.assertTrue(rule["retrieval_summary"])
+        self.assertTrue(rule["retrieval_queries"])
 
     async def test_category_profile_auto_refreshes_after_simple_rule_save(self):
         await knowhow_router.add_rule(
@@ -173,6 +175,8 @@ class KnowhowRouterApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(updated["title"])
         self.assertIn("payment", " ".join(updated["trigger_terms"]).lower())
         self.assertTrue(updated["examples"])
+        self.assertTrue(updated["retrieval_summary"])
+        self.assertTrue(updated["retrieval_queries"])
 
     async def test_default_rules_backfill_category_registry(self):
         added = await knowhow_service.ensure_defaults()
@@ -252,6 +256,8 @@ class KnowhowRouterApiTests(unittest.IsolatedAsyncioTestCase):
         columns = await storage._table_columns("knowhow_rules")
         self.assertIn("owner_id", columns)
         self.assertIn("owner_group_id", columns)
+        self.assertIn("retrieval_summary", columns)
+        self.assertIn("retrieval_queries", columns)
 
 
 if __name__ == "__main__":

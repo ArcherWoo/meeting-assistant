@@ -78,9 +78,10 @@ python start.py --backend-port 5173 --frontend-port 4173
 
 ## 生产环境一键部署
 
-当前生产部署分两条入口：
+当前生产部署分三条入口：
 
 - Windows: [deploy.ps1](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy.ps1)
+- Windows CMD: [deploy.bat](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy.bat)
 - Linux: [deploy.sh](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy.sh)
 
 这两个脚本都基于同一套 [deploy/](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy) 逻辑，负责：
@@ -158,6 +159,30 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 如果你不想让前台服务一直挂着，等看到“服务启动成功”后，按 `Ctrl + C` 停掉即可。
 
+从这版开始，生产部署的 Python 依赖准备逻辑已经和 `python start.py` 对齐：
+
+- `.server-venv` 默认会复用当前 Python 环境里已经可用的包
+- 只会安装真正缺失的后端依赖，不再强制整包重装 `backend/requirements.txt`
+- 如果公司镜像里缺少某个精确版本，会自动回退尝试安装该包的可用版本
+- 如果服务器上残留的是旧版 `.server-venv`，且没有开启 `system-site-packages`，脚本会自动重建这个 venv
+
+这对“只能使用公司内部镜像源”的服务器尤其重要，因为它能最大程度复用已经被验证可用、并且能直接跑通 `python start.py` 的 Python 环境。
+
+而且默认不需要你手动先改 `deploy/server.env`：
+
+- 首次执行 `.\deploy.ps1` 时，脚本会自动生成 `deploy/server.env`
+- 会优先从当前机器已有的 pip 环境变量和 pip 配置里自动探测公司镜像
+- 如果服务器上已经存在旧版 `deploy/server.env`，脚本也会自动回填这些镜像相关字段
+- 只有在机器本身既没有可复用依赖、也没有可探测的 pip 镜像配置时，才需要你手工补配置
+
+如果你是在 Windows Server 的 `cmd.exe` 里操作，也可以直接运行：
+
+```bat
+deploy.bat
+```
+
+它会自动转调 `deploy.ps1`，不需要你自己先切到 PowerShell。
+
 #### 5. 修改生产配置
 
 打开：
@@ -175,6 +200,24 @@ MEETING_ASSISTANT_SERVE_FRONTEND=1
 MEETING_ASSISTANT_FRONTEND_DIST=./dist
 ```
 
+如果你的服务器只能访问公司内部 pip 镜像，再补上这些项：
+
+```env
+MEETING_ASSISTANT_VENV_SYSTEM_SITE_PACKAGES=1
+MEETING_ASSISTANT_PIP_INDEX_URL=https://你的公司镜像/simple
+MEETING_ASSISTANT_PIP_EXTRA_INDEX_URL=
+MEETING_ASSISTANT_PIP_TRUSTED_HOST=你的公司镜像域名
+MEETING_ASSISTANT_PIP_FIND_LINKS=
+MEETING_ASSISTANT_PIP_NO_INDEX=
+MEETING_ASSISTANT_PIP_ARGS=
+```
+
+说明：
+
+- `MEETING_ASSISTANT_VENV_SYSTEM_SITE_PACKAGES=1` 建议保留开启
+- 如果当前服务器上的 Python 已经能直接运行 `python start.py`，生产部署会优先复用这套已安装依赖
+- 只有缺失的包才会走 pip 安装
+
 Windows 单机建议起步值：
 
 - `MEETING_ASSISTANT_WORKERS=2`
@@ -187,6 +230,12 @@ Windows 单机建议起步值：
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\deploy.ps1
+```
+
+如果你只使用 `cmd.exe`，等价命令是：
+
+```bat
+deploy.bat
 ```
 
 它会自动：
@@ -284,11 +333,23 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\deploy.ps1 -Stop
 ```
 
+或者在 `cmd.exe` 里：
+
+```bat
+deploy.bat -Stop
+```
+
 如果连 Nginx 也一起优雅关闭：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\deploy.ps1 -Stop -StopNginx
+```
+
+或者在 `cmd.exe` 里：
+
+```bat
+deploy.bat -Stop -StopNginx
 ```
 
 说明：
@@ -299,6 +360,13 @@ Set-ExecutionPolicy -Scope Process Bypass
 - 这样更不容易留下端口占用
 
 Linux：
+
+```bash
+./deploy.sh --prepare
+./deploy.sh --foreground
+```
+
+以及：
 
 ```bash
 ./deploy.sh --stop

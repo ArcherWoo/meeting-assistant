@@ -89,6 +89,14 @@ def _serialize_user(user: dict, *, include_is_active: bool = False) -> dict:
         "system_role": user.get("system_role"),
         "group_id": user.get("group_id"),
         "can_manage_group_knowhow": bool(user.get("can_manage_group_knowhow")),
+        "login_count": int(user.get("login_count") or 0),
+        "last_login_at": user.get("last_login_at"),
+        "token_input_total": int(user.get("token_input_total") or 0),
+        "token_output_total": int(user.get("token_output_total") or 0),
+        "token_total": int(
+            user.get("token_total")
+            or (int(user.get("token_input_total") or 0) + int(user.get("token_output_total") or 0))
+        ),
     }
     if include_is_active:
         payload["is_active"] = user.get("is_active")
@@ -143,6 +151,7 @@ async def login(req: LoginRequest):
     if not user.get("is_active"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号已被禁用")
 
+    user = await storage.record_user_login(user["id"]) or user
     token = create_access_token(user["id"], user["username"], user["system_role"])
     return {
         "token": token,
@@ -152,7 +161,8 @@ async def login(req: LoginRequest):
 
 @router.get("/auth/me")
 async def get_me(user: dict = Depends(get_current_user)):
-    return _serialize_user(user)
+    fresh_user = await storage.get_user_by_id_with_stats(user["id"])
+    return _serialize_user(fresh_user or user)
 
 
 @router.post("/auth/register", status_code=201)

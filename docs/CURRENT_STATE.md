@@ -335,6 +335,7 @@ chat persistence or Prompt Template / Prompt Pack runtime support.
 
 - 开发环境入口：`python start.py`
 - Windows 生产入口：`.\deploy.ps1`
+- Windows CMD 入口：`deploy.bat`
 - Linux 生产入口：`./deploy.sh`
 
 ### 开发环境
@@ -367,6 +368,29 @@ chat persistence or Prompt Template / Prompt Pack runtime support.
 
 - Nginx 本体不会随项目一起安装，仍需在 Windows Server 上预先安装
 - 但装好后，`deploy.ps1` 已经可以自动把它接进整条部署链路
+- 如果运维习惯使用 `cmd.exe`，现在可以直接运行 `deploy.bat`，它会自动转调 `deploy.ps1`
+
+### 生产依赖准备自动化
+
+生产部署的依赖准备逻辑现在已经与 `start.py` 对齐：
+
+- `.server-venv` 默认启用 `system-site-packages`
+- 优先复用当前 Python 环境里已经可用的包
+- 只安装真正缺失的后端依赖
+- 对公司内部镜像缺少精确版本的场景，允许自动回退到可用版本
+- 如果机器上残留旧版 `.server-venv` 且没有启用 `system-site-packages`，脚本会自动重建
+- 脚本会自动读取当前机器的 pip 环境变量和 `pip config list`
+- 首次创建或后续回填 `deploy/server.env` 时，会自动补齐镜像相关字段
+
+### Linux 生产入口
+
+`deploy.sh` 当前也已经补齐了明确的命令入口：
+
+- `./deploy.sh`
+- `./deploy.sh --prepare`
+- `./deploy.sh --foreground`
+- `./deploy.sh --stop`
+- `./deploy.sh --stop --stop-nginx`
 
 ### 生产优雅关闭
 

@@ -13,6 +13,18 @@ ok() { printf '[OK] %s\n' "$1"; }
 warn() { printf '[WARN] %s\n' "$1"; }
 err() { printf '[ERR] %s\n' "$1"; }
 
+usage() {
+  cat <<'EOF'
+Usage:
+  ./deploy.sh
+  ./deploy.sh --foreground
+  ./deploy.sh --prepare
+  ./deploy.sh --stop
+  ./deploy.sh --stop --stop-nginx
+  ./deploy.sh --help
+EOF
+}
+
 read_env_value() {
   local key="$1"
   local default_value="${2:-}"
@@ -97,15 +109,59 @@ show_service_endpoints() {
   fi
 }
 
-if [[ "${1:-}" == "--foreground" ]]; then
-  PYTHON_BIN="${PYTHON_BIN:-python3}"
-  if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-    PYTHON_BIN="python"
+detect_python_bin() {
+  local candidate="${PYTHON_BIN:-python3}"
+  if command -v "${candidate}" >/dev/null 2>&1; then
+    printf '%s' "${candidate}"
+    return
   fi
+  if command -v python >/dev/null 2>&1; then
+    printf '%s' "python"
+    return
+  fi
+  err "未检测到可用的 Python，请先安装 Python 3.10+。"
+  exit 1
+}
+
+MODE="service"
+STOP_NGINX=0
+for arg in "$@"; do
+  case "${arg}" in
+    --foreground)
+      MODE="foreground"
+      ;;
+    --prepare)
+      MODE="prepare"
+      ;;
+    --stop)
+      MODE="stop"
+      ;;
+    --stop-nginx)
+      STOP_NGINX=1
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      err "不支持的参数：${arg}"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+PYTHON_BIN="$(detect_python_bin)"
+
+if [[ "${MODE}" == "foreground" ]]; then
   exec "${PYTHON_BIN}" "${ROOT_DIR}/deploy/deploy.py" foreground --env-file "${ENV_FILE}"
 fi
 
-if [[ "${1:-}" == "--stop" ]]; then
+if [[ "${MODE}" == "prepare" ]]; then
+  exec "${PYTHON_BIN}" "${ROOT_DIR}/deploy/deploy.py" prepare --env-file "${ENV_FILE}"
+fi
+
+if [[ "${MODE}" == "stop" ]]; then
   if [[ "${EUID}" -ne 0 ]]; then
     SUDO="sudo"
   else
@@ -113,7 +169,7 @@ if [[ "${1:-}" == "--stop" ]]; then
   fi
   ${SUDO} systemctl stop "${SERVICE_NAME}"
   ok "应用服务已优雅停止"
-  if [[ "${2:-}" == "--stop-nginx" ]]; then
+  if [[ "${STOP_NGINX}" -eq 1 ]]; then
     if command -v nginx >/dev/null 2>&1; then
       ${SUDO} nginx -s quit || true
       ok "Nginx 已优雅停止"
@@ -122,11 +178,6 @@ if [[ "${1:-}" == "--stop" ]]; then
     fi
   fi
   exit 0
-fi
-
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-  PYTHON_BIN="python"
 fi
 
 info "准备生产环境"
@@ -191,5 +242,7 @@ echo ""
 echo "常用命令:"
 echo "  查看状态: sudo systemctl status ${SERVICE_NAME}"
 echo "  查看日志: sudo journalctl -u ${SERVICE_NAME} -f"
+echo "  仅准备环境: ./deploy.sh --prepare"
+echo "  前台启动: ./deploy.sh --foreground"
 echo "  优雅停止应用: ./deploy.sh --stop"
 echo "  优雅停止应用和 Nginx: ./deploy.sh --stop --stop-nginx"

@@ -515,6 +515,12 @@ export interface User {
   system_role: SystemRole;
   group_id: string | null;
   can_manage_group_knowhow?: boolean;
+  is_active?: number;
+  login_count?: number;
+  last_login_at?: string | null;
+  token_input_total?: number;
+  token_output_total?: number;
+  token_total?: number;
 }
 
 export interface AuthResponse {

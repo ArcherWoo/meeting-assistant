@@ -440,12 +440,16 @@ def launch_backend() -> subprocess.Popen:
 
 def _launch_backend(*, reload: bool) -> subprocess.Popen:
     backend_log = LOG_DIR / "backend.log"
-    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    env = {
+        **os.environ,
+        "PYTHONUNBUFFERED": "1",
+        "MEETING_ASSISTANT_FRONTEND_PORT": str(ARGS.frontend_port),
+    }
     command = [
         sys.executable,
         "main.py",
         "--host",
-        "127.0.0.1",
+        "0.0.0.0",
         "--port",
         str(ARGS.backend_port),
     ]
@@ -465,7 +469,17 @@ def launch_frontend() -> subprocess.Popen:
     env = {**os.environ, "VITE_DEV_API_TARGET": f"http://127.0.0.1:{ARGS.backend_port}"}
     return _launch_process(
         "frontend",
-        [_npm_command(), "run", "dev"],
+        [
+            _npm_command(),
+            "run",
+            "dev",
+            "--",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(ARGS.frontend_port),
+            "--strictPort",
+        ],
         cwd=ROOT_DIR,
         env=env,
         log_file=frontend_log,

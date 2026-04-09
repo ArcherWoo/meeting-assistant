@@ -125,6 +125,22 @@ class LLMService:
         return headers
 
     @staticmethod
+    def _should_retry_without_stream_usage(error_message: str) -> bool:
+        normalized = str(error_message or "").lower()
+        if "stream_options" not in normalized and "include_usage" not in normalized:
+            return False
+        unsupported_markers = (
+            "unknown",
+            "unsupported",
+            "not permitted",
+            "unexpected",
+            "extra inputs",
+            "invalid",
+            "unrecognized",
+        )
+        return any(marker in normalized for marker in unsupported_markers)
+
+    @staticmethod
     def _extract_model_ids(payload: dict[str, Any]) -> list[str]:
         raw_models = payload.get("data")
         if not isinstance(raw_models, list):
@@ -294,22 +310,33 @@ class LLMService:
             "max_tokens": max_tokens,
             "stream": True,
         }
+        payload_variants = [
+            {**payload, "stream_options": {"include_usage": True}},
+            payload,
+        ]
 
-        async with self._client.stream(
-            "POST",
-            url,
-            json=payload,
-            headers=headers,
-            timeout=self._stream_timeout(),
-        ) as response:
-            self._raise_for_status_with_detail(response)
-            async for line in response.aiter_lines():
-                if line.startswith("data: "):
-                    data = line[6:]
-                    if data.strip() == "[DONE]":
-                        yield "data: [DONE]\n\n"
-                        return
-                    yield f"data: {data}\n\n"
+        for index, active_payload in enumerate(payload_variants):
+            try:
+                async with self._client.stream(
+                    "POST",
+                    url,
+                    json=active_payload,
+                    headers=headers,
+                    timeout=self._stream_timeout(),
+                ) as response:
+                    self._raise_for_status_with_detail(response)
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: "):
+                            data = line[6:]
+                            if data.strip() == "[DONE]":
+                                yield "data: [DONE]\n\n"
+                                return
+                            yield f"data: {data}\n\n"
+                return
+            except RuntimeError as exc:
+                if index == 0 and self._should_retry_without_stream_usage(str(exc)):
+                    continue
+                raise
 
     async def stream_chat(
         self,

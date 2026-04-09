@@ -149,6 +149,15 @@ class KnowhowService:
     """Know-how 规则管理与检索支持服务。"""
 
     @staticmethod
+    async def _invalidate_router_cache() -> None:
+        try:
+            from services.knowhow_router import knowhow_router
+
+            knowhow_router.clear_caches()
+        except Exception:
+            logger.debug("清理 knowhow 路由缓存失败", exc_info=True)
+
+    @staticmethod
     def _normalize_text(value: Any) -> str:
         return str(value or "").strip()
 
@@ -201,6 +210,8 @@ class KnowhowService:
         serialized["applies_when"] = cls._normalize_text(serialized.get("applies_when"))
         serialized["not_applies_when"] = cls._normalize_text(serialized.get("not_applies_when"))
         serialized["examples"] = cls._load_list(serialized.get("examples"))
+        serialized["retrieval_summary"] = cls._normalize_text(serialized.get("retrieval_summary"))
+        serialized["retrieval_queries"] = cls._load_list(serialized.get("retrieval_queries"))
         return serialized
 
     @classmethod
@@ -427,6 +438,57 @@ class KnowhowService:
         return [f"Does this satisfy the {seed} requirement?"]
 
     @classmethod
+    def _infer_retrieval_summary(
+        cls,
+        *,
+        category: str,
+        title: str,
+        rule_text: str,
+        trigger_terms: list[str],
+        applies_when: str,
+        not_applies_when: str,
+        examples: list[str],
+    ) -> str:
+        return " ".join(
+            part
+            for part in [
+                cls._normalize_text(category),
+                cls._normalize_text(title),
+                cls._normalize_text(applies_when),
+                cls._normalize_text(rule_text),
+                cls._normalize_text(not_applies_when),
+                " ".join(trigger_terms[:4]),
+                " ".join(examples[:2]),
+            ]
+            if part
+        ).strip()
+
+    @classmethod
+    def _infer_retrieval_queries(
+        cls,
+        *,
+        category: str,
+        title: str,
+        trigger_terms: list[str],
+        applies_when: str,
+        examples: list[str],
+        retrieval_summary: str,
+    ) -> list[str]:
+        phrases: list[str] = []
+        phrases.extend(examples[:3])
+        phrases.extend(
+            item for item in [
+                title,
+                f"{category} {title}".strip(),
+                " ".join(trigger_terms[:3]).strip(),
+                applies_when,
+                retrieval_summary,
+            ]
+            if cls._normalize_text(item)
+        )
+        return cls._merge_unique_items(phrases, limit=8)
+
+    @classmethod
     def _prepare_rule_fields(
         cls,
         *,
@@ -453,20 +515,41 @@ class KnowhowService:
             normalized_trigger_terms,
             examples,
         )
+        inferred_applies_when = cls._infer_applies_when(
+            normalized_category,
+            normalized_trigger_terms,
+            normalized_rule_text,
+            applies_when,
+        )
+        normalized_not_applies_when = cls._normalize_text(not_applies_when)
+        retrieval_summary = cls._infer_retrieval_summary(
+            category=normalized_category,
+            title=normalized_title,
+            rule_text=normalized_rule_text,
+            trigger_terms=normalized_trigger_terms,
+            applies_when=inferred_applies_when,
+            not_applies_when=normalized_not_applies_when,
+            examples=normalized_examples,
+        )
+        retrieval_queries = cls._infer_retrieval_queries(
+            category=normalized_category,
+            title=normalized_title,
+            trigger_terms=normalized_trigger_terms,
+            applies_when=inferred_applies_when,
+            examples=normalized_examples,
+            retrieval_summary=retrieval_summary,
+        )
         return {
             "category": normalized_category,
             "title": normalized_title,
             "rule_text": normalized_rule_text,
             "trigger_terms": normalized_trigger_terms,
             "exclude_terms": cls._normalize_list(exclude_terms),
-            "applies_when": cls._infer_applies_when(
-                normalized_category,
-                normalized_trigger_terms,
-                normalized_rule_text,
-                applies_when,
-            ),
-            "not_applies_when": cls._normalize_text(not_applies_when),
+            "applies_when": inferred_applies_when,
+            "not_applies_when": normalized_not_applies_when,
             "examples": normalized_examples,
+            "retrieval_summary": retrieval_summary,
+            "retrieval_queries": retrieval_queries,
         }
 
     async def _refresh_category_profile(self, category: str) -> None:
@@ -484,6 +567,7 @@ class KnowhowService:
             inferred_terms.extend(rule.get("trigger_terms") or [])
             inferred_terms.extend(self._extract_keywords(rule.get("rule_text", "")))
             inferred_examples.extend(rule.get("examples") or [])
+            inferred_examples.extend(rule.get("retrieval_queries") or [])
 
         top_terms = self._merge_unique_items(inferred_terms, limit=4)
         merged_aliases = self._merge_unique_items(existing.get("aliases"), defaults.get("aliases"), top_terms, limit=6)
@@ -580,12 +664,15 @@ class KnowhowService:
             applies_when=prepared["applies_when"],
             not_applies_when=prepared["not_applies_when"],
             examples=self._dump_list(prepared["examples"]),
+            retrieval_summary=prepared["retrieval_summary"],
+            retrieval_queries=self._dump_list(prepared["retrieval_queries"]),
             weight=self._normalize_weight(weight),
             source=source,
             owner_id=owner_id,
             owner_group_id=self._normalize_text(owner_group_id) or None,
         )
         await self._refresh_category_profile(prepared["category"])
+        await self._invalidate_router_cache()
         return rule_id
 
     async def update_rule(self, rule_id: str, updates: dict) -> bool:
@@ -617,6 +704,8 @@ class KnowhowService:
             "applies_when": prepared["applies_when"],
             "not_applies_when": prepared["not_applies_when"],
             "examples": self._dump_list(prepared["examples"]),
+            "retrieval_summary": prepared["retrieval_summary"],
+            "retrieval_queries": self._dump_list(prepared["retrieval_queries"]),
         }
         if "weight" in updates:
             persisted_updates["weight"] = self._normalize_weight(updates.get("weight"), existing_raw.get("weight", 2))
@@ -635,6 +724,7 @@ class KnowhowService:
         await self._refresh_category_profile(prepared["category"])
         if prepared["category"] != old_category:
             await self._refresh_category_profile(old_category)
+        await self._invalidate_router_cache()
         return True
 
     async def delete_rule(self, rule_id: str) -> bool:
@@ -645,6 +735,7 @@ class KnowhowService:
         await storage.db.execute("DELETE FROM knowhow_rules WHERE id=?", (rule_id,))
         await storage.db.commit()
         await self._refresh_category_profile(category)
+        await self._invalidate_router_cache()
         return True
 
     def _extract_import_rules(self, payload: Any) -> list[dict]:
@@ -828,6 +919,8 @@ class KnowhowService:
                     prepared["applies_when"],
                     prepared["not_applies_when"],
                     self._dump_list(prepared["examples"]),
+                    prepared["retrieval_summary"],
+                    self._dump_list(prepared["retrieval_queries"]),
                     self._normalize_weight(rule["weight"]),
                     rule["hit_count"],
                     rule["confidence"],
@@ -852,14 +945,15 @@ class KnowhowService:
             await storage.db.executemany(
                 "INSERT INTO knowhow_rules ("
                 "id, category, title, rule_text, trigger_terms, exclude_terms, applies_when, not_applies_when, "
-                "examples, weight, hit_count, confidence, source, is_active, owner_id, owner_group_id, created_at, updated_at"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "examples, retrieval_summary, retrieval_queries, weight, hit_count, confidence, source, is_active, owner_id, owner_group_id, created_at, updated_at"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 rows,
             )
         await storage.db.commit()
         await self._sync_categories_from_rules()
         for category in sorted(touched_categories):
             await self._refresh_category_profile(category)
+        await self._invalidate_router_cache()
 
         total_after_import = len(await storage.list_knowhow_rules(active_only=False))
         return {
@@ -876,6 +970,8 @@ class KnowhowService:
         bag.extend(self._extract_keywords(rule.get("rule_text", "")))
         bag.extend(self._normalize_list(rule.get("trigger_terms")))
         bag.extend(self._normalize_list(rule.get("examples")))
+        bag.extend(self._extract_keywords(rule.get("retrieval_summary", "")))
+        bag.extend(self._normalize_list(rule.get("retrieval_queries")))
         if rule.get("category"):
             bag.extend(self._normalize_list([rule["category"]]))
 
@@ -1094,6 +1190,7 @@ class KnowhowService:
             example_queries=self._dump_list(example_queries),
             applies_to=self._normalize_text(applies_to),
         )
+        await self._invalidate_router_cache()
         return {
             "name": normalized,
             "description": self._normalize_text(description),
@@ -1124,6 +1221,7 @@ class KnowhowService:
             payload["applies_to"] = self._normalize_text(updates.get("applies_to"))
         await storage.update_knowhow_category_profile(normalized_name, **payload)
         refreshed = {item["name"]: item for item in await self.list_categories()}
+        await self._invalidate_router_cache()
         return refreshed[normalized_name]
 
     async def rename_category(self, old_name: str, new_name: str) -> int:
@@ -1137,6 +1235,7 @@ class KnowhowService:
         )
         await storage.db.commit()
         await self._refresh_category_profile(normalized_new_name)
+        await self._invalidate_router_cache()
         return cursor.rowcount
 
     async def rename_category_for_group(
@@ -1196,6 +1295,7 @@ class KnowhowService:
         ]
         if not remaining:
             await storage.delete_knowhow_category(normalized_old_name)
+        await self._invalidate_router_cache()
         return cursor.rowcount
 
     async def delete_category(self, name: str, delete_rules: bool = True) -> int:
@@ -1210,6 +1310,7 @@ class KnowhowService:
             await self._refresh_category_profile(UNCATEGORIZED)
         await storage.delete_knowhow_category(name)
         await storage.db.commit()
+        await self._invalidate_router_cache()
         return cursor.rowcount
 
     async def delete_category_for_group(
@@ -1260,6 +1361,7 @@ class KnowhowService:
         ]
         if not remaining:
             await storage.delete_knowhow_category(normalized_name)
+        await self._invalidate_router_cache()
         return cursor.rowcount
 
 

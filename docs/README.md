@@ -25,6 +25,7 @@
 
 ## 最近更新关注点
 
+- 2026-04-09：生产部署新增 `deploy.bat`，Linux `deploy.sh` 补齐 `--prepare / --foreground / --stop` 入口，生产脚本默认自动探测公司 pip 镜像并回填 `deploy/server.env`：[deployment/SERVER_DEPLOYMENT.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/deployment/SERVER_DEPLOYMENT.md)
 - 2026-04-09：开发启动脚本与生产部署脚本已统一成干净中文输出；Windows 生产部署已支持自动接管 Nginx，生产环境也新增了正式的优雅关闭入口：[../README.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/README.md)
 - 文档解析与 OCR 当前基线：[CURRENT_STATE.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/CURRENT_STATE.md)
 - 聊天首回体验、实时 Markdown、附件分析预览：[CURRENT_STATE.md](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/docs/CURRENT_STATE.md)

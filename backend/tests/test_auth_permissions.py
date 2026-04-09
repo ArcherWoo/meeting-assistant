@@ -188,6 +188,112 @@ class AuthPermissionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(created["conversation"]["roleId"], role["id"])
 
+    async def test_login_increments_login_count(self):
+        await auth_router.register(
+            auth_router.RegisterRequest(
+                username="login-user",
+                display_name="Login User",
+                password="pw123456",
+                system_role="user",
+            ),
+            _admin=self.admin,
+        )
+
+        first_login = await auth_router.login(
+            auth_router.LoginRequest(username="login-user", password="pw123456")
+        )
+        second_login = await auth_router.login(
+            auth_router.LoginRequest(username="login-user", password="pw123456")
+        )
+
+        self.assertEqual(first_login["user"]["login_count"], 1)
+        self.assertEqual(second_login["user"]["login_count"], 2)
+        self.assertTrue(second_login["user"]["last_login_at"])
+
+    async def test_admin_user_list_returns_token_totals(self):
+        created_user = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="stats-user",
+                display_name="Stats User",
+                password="pw123456",
+                system_role="user",
+            ),
+            _admin=self.admin,
+        )
+        user_row = await storage.get_user_by_id(created_user["id"])
+        self.assertIsNotNone(user_row)
+
+        conversation = await storage.create_conversation(
+            workspace_id=await storage.get_default_workspace_id(),
+            title="Stats Chat",
+            surface="chat",
+            role_id="copilot",
+            owner_id=created_user["id"],
+        )
+        await storage.add_message(
+            conversation_id=conversation["id"],
+            role="assistant",
+            content="reply",
+            token_input=120,
+            token_output=45,
+        )
+        await storage.add_message(
+            conversation_id=conversation["id"],
+            role="assistant",
+            content="reply 2",
+            token_input=30,
+            token_output=15,
+        )
+
+        users = await auth_router.list_users(_admin=self.admin)
+        stats_user = next(item for item in users if item["id"] == created_user["id"])
+        self.assertEqual(stats_user["token_input_total"], 150)
+        self.assertEqual(stats_user["token_output_total"], 60)
+        self.assertEqual(stats_user["token_total"], 210)
+
+    async def test_record_user_token_usage_seeds_from_message_history_then_accumulates(self):
+        created_user = await auth_router.register(
+            auth_router.RegisterRequest(
+                username="usage-user",
+                display_name="Usage User",
+                password="pw123456",
+                system_role="user",
+            ),
+            _admin=self.admin,
+        )
+
+        conversation = await storage.create_conversation(
+            workspace_id=await storage.get_default_workspace_id(),
+            title="Usage Chat",
+            surface="chat",
+            role_id="copilot",
+            owner_id=created_user["id"],
+        )
+        await storage.add_message(
+            conversation_id=conversation["id"],
+            role="assistant",
+            content="historical reply",
+            token_input=10,
+            token_output=5,
+        )
+
+        updated_user = await storage.record_user_token_usage(
+            created_user["id"],
+            token_input=7,
+            token_output=3,
+        )
+        self.assertIsNotNone(updated_user)
+        assert updated_user is not None
+        self.assertEqual(updated_user["token_input_total"], 17)
+        self.assertEqual(updated_user["token_output_total"], 8)
+        self.assertEqual(updated_user["token_total"], 25)
+
+        users = await auth_router.list_users(_admin=self.admin)
+        usage_user = next(item for item in users if item["id"] == created_user["id"])
+        self.assertEqual(usage_user["token_input_total"], 17)
+        self.assertEqual(usage_user["token_output_total"], 8)
+        self.assertEqual(usage_user["token_total"], 25)
+
     async def test_user_owned_knowhow_stays_visible_with_category_filter(self):
         group = await storage.create_group("team-b", "Team B")
         created_user = await auth_router.register(

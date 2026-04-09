@@ -160,6 +160,18 @@ class RetrievalPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hello_plan.actions, [])
         self.assertEqual([action.surface for action in file_plan.actions], ["knowledge"])
 
+    async def test_decision_style_material_queries_include_knowhow_in_fallback(self):
+        planner = RetrievalPlanner()
+
+        plan = await planner.plan(
+            user_query="30%预付款、70%验收后支付是否合理",
+            enabled_surfaces={"knowledge", "knowhow", "skill"},
+            settings=RetrievalPlannerSettings(),
+        )
+
+        self.assertEqual(plan.strategy, "fallback")
+        self.assertEqual([action.surface for action in plan.actions], ["knowledge", "knowhow"])
+
 
 class ContextAssemblerPlannerTests(unittest.IsolatedAsyncioTestCase):
     async def test_context_assembler_only_executes_surfaces_selected_by_plan(self):

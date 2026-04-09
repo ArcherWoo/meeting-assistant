@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
+import time
 from collections import Counter
 from dataclasses import dataclass
 from typing import Iterable, Literal
@@ -30,6 +32,7 @@ class KnowhowRouteDecision:
     rationale: str = ""
     confidence: Literal["low", "medium", "high"] = "low"
     notes: tuple[str, ...] = ()
+    rewritten_query: str = ""
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,9 @@ class KnowhowLibraryDecision:
 
 
 class KnowhowRouter:
+    CACHE_TTL_SECONDS = 30.0
+    CACHE_MAX_ENTRIES = 256
+
     SMALL_TALK_HINTS: tuple[str, ...] = (
         "你好",
         "您好",
@@ -170,6 +176,14 @@ class KnowhowRouter:
 
     def __init__(self, llm_service: LLMService | None = None) -> None:
         self._llm_service = llm_service or shared_llm_service
+        self._route_cache: dict[tuple, tuple[float, KnowhowRouteDecision, tuple[str, ...]]] = {}
+        self._library_cache: dict[tuple, tuple[float, KnowhowLibraryDecision]] = {}
+        self._result_cache: dict[tuple, tuple[float, KnowhowRoutingResult]] = {}
+
+    def clear_caches(self) -> None:
+        self._route_cache.clear()
+        self._library_cache.clear()
+        self._result_cache.clear()
 
     async def retrieve_rules(
         self,
@@ -180,6 +194,17 @@ class KnowhowRouter:
         limit: int = 5,
         settings: RetrievalPlannerSettings | None = None,
     ) -> KnowhowRoutingResult:
+        result_cache_key = self._build_result_cache_key(
+            query=query,
+            rules=rules,
+            category_profiles=category_profiles or [],
+            limit=limit,
+            settings=settings,
+        )
+        cached_result = self._get_cached_result(result_cache_key)
+        if cached_result is not None:
+            return cached_result
+
         decision, candidate_categories = await self.route(
             query,
             rules,
@@ -193,8 +218,13 @@ class KnowhowRouter:
                 candidate_categories=tuple(candidate_categories),
             )
 
-        query_terms = self._extract_terms(query)
-        query_text = self._normalize_text(query)
+        routing_query = " ".join(
+            part.strip()
+            for part in (query, decision.rewritten_query)
+            if part and part.strip()
+        )
+        query_terms = self._extract_terms(routing_query)
+        query_text = self._normalize_text(routing_query)
         routed_categories = set(decision.categories)
         filtered_rules = [
             rule for rule in rules
@@ -216,6 +246,8 @@ class KnowhowRouter:
             enriched_rule["route_confidence"] = decision.confidence
             enriched_rule["route_rationale"] = decision.rationale
             enriched_rule["route_categories"] = list(decision.categories)
+            if decision.rewritten_query:
+                enriched_rule["route_rewritten_query"] = decision.rewritten_query
             scored_rules.append((score, enriched_rule))
 
         scored_rules.sort(
@@ -234,18 +266,29 @@ class KnowhowRouter:
             if score >= score_cutoff
         ] or scored_rules
         selected_rules = [rule for _, rule in filtered_scored_rules[: max(limit, 6)]]
-        if settings and settings.is_configured and selected_rules:
+        if (
+            settings
+            and settings.is_configured
+            and selected_rules
+            and self._should_use_llm_rule_judge(
+                decision=decision,
+                scored_rules=filtered_scored_rules,
+                limit=limit,
+            )
+        ):
             selected_rules = await self._judge_rules_with_llm(
                 query=query,
                 rules=selected_rules,
                 settings=settings,
                 limit=limit,
             )
-        return KnowhowRoutingResult(
+        result = KnowhowRoutingResult(
             decision=decision,
             rules=tuple(selected_rules[:limit]),
             candidate_categories=tuple(candidate_categories),
         )
+        self._store_result_cache(result_cache_key, result)
+        return result
 
     async def inspect_library_query(
         self,
@@ -258,32 +301,34 @@ class KnowhowRouter:
         if len(normalized_query) < 2:
             return KnowhowLibraryDecision(False, rationale="query_too_short", notes=("too_short",))
 
+        cache_key = self._build_library_cache_key(
+            query=normalized_query,
+            category_profiles=category_profiles or [],
+            settings=settings,
+        )
+        cached_decision = self._get_cached_library_decision(cache_key)
+        if cached_decision is not None:
+            return cached_decision
+
+        heuristic_decision = self._heuristic_library_decision(normalized_query)
+        if heuristic_decision is None:
+            return KnowhowLibraryDecision(False, rationale="not_a_library_question", notes=("library_query_not_detected",))
+
         planner_settings = settings or RetrievalPlannerSettings()
-        if planner_settings.is_configured:
+        if planner_settings.is_configured and heuristic_decision.confidence != "high":
             try:
-                return await self._inspect_library_query_with_llm(
+                llm_decision = await self._inspect_library_query_with_llm(
                     query=query,
                     category_profiles=category_profiles or [],
                     settings=planner_settings,
                 )
+                self._store_library_cache(cache_key, llm_decision)
+                return llm_decision
             except Exception as exc:
                 logger.info("[KnowhowRouter] Library intent fallback: %s", exc)
 
-        if self._contains_any(normalized_query, self.LIBRARY_HINTS):
-            focus = "overview"
-            if any(term in normalized_query for term in ("分类", "类别")):
-                focus = "categories"
-            elif any(term in normalized_query for term in ("几条", "多少", "数量", "统计", "总数")):
-                focus = "stats"
-            return KnowhowLibraryDecision(
-                True,
-                focus=focus,
-                rationale="library_inventory_question",
-                confidence="medium",
-                notes=("heuristic_library_query",),
-            )
-
-        return KnowhowLibraryDecision(False, rationale="not_a_library_question", notes=("library_query_not_detected",))
+        self._store_library_cache(cache_key, heuristic_decision)
+        return heuristic_decision
 
     async def route(
         self,
@@ -296,6 +341,15 @@ class KnowhowRouter:
         normalized_query = self._normalize_text(query)
         query_terms = self._extract_terms(query)
         profiles = self._build_category_profiles(rules, category_profiles or [])
+        cache_key = self._build_route_cache_key(
+            query=normalized_query,
+            rules=rules,
+            category_profiles=category_profiles or [],
+            settings=settings,
+        )
+        cached_route = self._get_cached_route(cache_key)
+        if cached_route is not None:
+            return cached_route
         ranked_categories = self._rank_categories(
             query_terms=query_terms,
             query_text=normalized_query,
@@ -312,7 +366,7 @@ class KnowhowRouter:
             candidate_categories = rule_candidate_categories
 
         if not normalized_query or not query_terms or (not profiles and not rules):
-            return (
+            result = (
                 KnowhowRouteDecision(
                     should_retrieve=False,
                     strategy="heuristic_skip",
@@ -321,12 +375,30 @@ class KnowhowRouter:
                 ),
                 candidate_categories,
             )
+            self._store_route_cache(cache_key, *result)
+            return result
 
         gate_result = self._hard_skip_gate(query_text=normalized_query, ranked_categories=ranked_categories)
         if gate_result is not None:
-            return gate_result, candidate_categories
+            result = (gate_result, candidate_categories)
+            self._store_route_cache(cache_key, *result)
+            return result
 
+        heuristic_gate = self._heuristic_gate(
+            query_text=normalized_query,
+            query_terms=query_terms,
+            ranked_categories=ranked_categories,
+            ranked_rule_categories=ranked_rule_categories,
+        )
         planner_settings = settings or RetrievalPlannerSettings()
+        if heuristic_gate is not None and (
+            heuristic_gate.confidence == "high"
+            or not (planner_settings.is_configured and profiles)
+        ):
+            result = (heuristic_gate, candidate_categories)
+            self._store_route_cache(cache_key, *result)
+            return result
+
         if planner_settings.is_configured and profiles:
             try:
                 llm_decision = await self._route_with_llm(
@@ -343,20 +415,28 @@ class KnowhowRouter:
                         strategy="llm_route",
                         rationale=llm_decision.rationale or "llm_selected_knowhow",
                         confidence=llm_decision.confidence,
+                        rewritten_query=llm_decision.rewritten_query,
                         notes=llm_decision.notes + ("fallback_to_top_category",),
                     )
-                return llm_decision, candidate_categories
+                if (
+                    heuristic_gate is not None
+                    and heuristic_gate.should_retrieve
+                    and not llm_decision.should_retrieve
+                    and llm_decision.confidence == "low"
+                ):
+                    result = (heuristic_gate, candidate_categories)
+                    self._store_route_cache(cache_key, *result)
+                    return result
+                result = (llm_decision, candidate_categories)
+                self._store_route_cache(cache_key, *result)
+                return result
             except Exception as exc:
                 logger.info("[KnowhowRouter] LLM route fallback: %s", exc)
 
-        gate_result = self._heuristic_gate(
-            query_text=normalized_query,
-            query_terms=query_terms,
-            ranked_categories=ranked_categories,
-            ranked_rule_categories=ranked_rule_categories,
-        )
-        if gate_result is not None:
-            return gate_result, candidate_categories
+        if heuristic_gate is not None:
+            result = (heuristic_gate, candidate_categories)
+            self._store_route_cache(cache_key, *result)
+            return result
 
         top_score = ranked_categories[0][0] if ranked_categories else 0.0
         if top_score >= 3.8 and candidate_categories:
@@ -372,7 +452,7 @@ class KnowhowRouter:
                 candidate_categories,
             )
 
-        return (
+        result = (
             KnowhowRouteDecision(
                 should_retrieve=False,
                 strategy="heuristic_skip",
@@ -382,6 +462,8 @@ class KnowhowRouter:
             ),
             candidate_categories,
         )
+        self._store_route_cache(cache_key, *result)
+        return result
 
     def _hard_skip_gate(
         self,
@@ -505,6 +587,7 @@ class KnowhowRouter:
             strategy="llm_route" if payload.get("use_knowhow") else "llm_skip",
             rationale=" ".join(str(payload.get("rationale") or "").split()) or "llm_route_decision",
             confidence=confidence,
+            rewritten_query=self._compact_rewritten_query(str(payload.get("rewritten_query") or ""), original_query=query),
             notes=("llm_routed",),
         )
 
@@ -648,6 +731,8 @@ class KnowhowRouter:
                 keyword_counter.update(self._extract_rule_keywords(rule))
                 keyword_counter.update(self._extract_terms(str(rule.get("rule_text") or "")))
                 keyword_counter.update(self._extract_terms(str(rule.get("title") or "")))
+                keyword_counter.update(self._extract_terms(str(rule.get("retrieval_summary") or "")))
+                keyword_counter.update(self._extract_terms(" ".join(rule.get("retrieval_queries") or [])))
 
             category_terms = self._extract_terms(category)
             alias_terms = self._extract_terms(" ".join(profile_payload.get("aliases") or []))
@@ -675,6 +760,11 @@ class KnowhowRouter:
                         *example_query_terms,
                         *top_keywords,
                         *sample_rules,
+                        *[
+                            str(rule.get("retrieval_summary") or "")
+                            for rule in ranked_rules[:3]
+                            if str(rule.get("retrieval_summary") or "").strip()
+                        ],
                     ]
                 )
             )
@@ -693,6 +783,61 @@ class KnowhowRouter:
 
         profiles.sort(key=lambda item: item.name)
         return profiles
+
+    @staticmethod
+    def _compact_rewritten_query(rewritten_query: str, *, original_query: str) -> str:
+        compact = " ".join((rewritten_query or "").split())
+        if len(compact) < 2:
+            return ""
+        if compact == " ".join((original_query or "").split()):
+            return ""
+        return compact[:120]
+
+    def _heuristic_library_decision(
+        self,
+        normalized_query: str,
+    ) -> KnowhowLibraryDecision | None:
+        if not self._contains_any(normalized_query, self.LIBRARY_HINTS):
+            return None
+
+        focus = "overview"
+        confidence: Literal["low", "medium", "high"] = "medium"
+        if any(term in normalized_query for term in ("分类", "类别")):
+            focus = "categories"
+            confidence = "high"
+        elif any(term in normalized_query for term in ("几条", "多少", "数量", "统计", "总数")):
+            focus = "stats"
+            confidence = "high"
+        return KnowhowLibraryDecision(
+            True,
+            focus=focus,
+            rationale="library_inventory_question",
+            confidence=confidence,
+            notes=("heuristic_library_query",),
+        )
+
+    @staticmethod
+    def _should_use_llm_rule_judge(
+        *,
+        decision: KnowhowRouteDecision,
+        scored_rules: list[tuple[float, dict]],
+        limit: int,
+    ) -> bool:
+        if len(scored_rules) <= 1:
+            return False
+
+        top_score = scored_rules[0][0]
+        second_score = scored_rules[1][0]
+        score_gap = top_score - second_score
+        relative_second = (second_score / top_score) if top_score > 0 else 1.0
+
+        if (
+            decision.confidence == "high"
+            and len(scored_rules) <= max(limit + 1, 3)
+            and (score_gap >= 2.0 or relative_second <= 0.62)
+        ):
+            return False
+        return True
 
     def _rank_categories(
         self,
@@ -844,10 +989,162 @@ class KnowhowRouter:
                     str(rule.get("not_applies_when") or ""),
                     " ".join(rule.get("trigger_terms") or []),
                     " ".join(rule.get("examples") or []),
+                    str(rule.get("retrieval_summary") or ""),
+                    " ".join(rule.get("retrieval_queries") or []),
                     str(rule.get("category") or ""),
                 ]
             )
         )
+
+    def _build_scope_fingerprint(self, rules: Iterable[dict], category_profiles: list[dict]) -> str:
+        hasher = hashlib.sha1()
+        for rule in sorted(
+            rules,
+            key=lambda item: (
+                str(item.get("id") or ""),
+                str(item.get("updated_at") or ""),
+                str(item.get("category") or ""),
+            ),
+        ):
+            hasher.update(
+                "||".join(
+                    [
+                        str(rule.get("id") or ""),
+                        str(rule.get("updated_at") or ""),
+                        str(rule.get("category") or ""),
+                        str(rule.get("title") or ""),
+                        str(rule.get("retrieval_summary") or ""),
+                    ]
+                ).encode("utf-8", errors="ignore")
+            )
+        for profile in sorted(category_profiles, key=lambda item: str(item.get("name") or "")):
+            hasher.update(
+                "||".join(
+                    [
+                        str(profile.get("name") or ""),
+                        str(profile.get("updated_at") or ""),
+                        str(profile.get("description") or ""),
+                        " ".join(profile.get("aliases") or []),
+                        " ".join(profile.get("example_queries") or []),
+                    ]
+                ).encode("utf-8", errors="ignore")
+            )
+        return hasher.hexdigest()
+
+    def _build_route_cache_key(
+        self,
+        *,
+        query: str,
+        rules: list[dict],
+        category_profiles: list[dict],
+        settings: RetrievalPlannerSettings | None,
+    ) -> tuple:
+        return (
+            "route",
+            query,
+            bool(settings and settings.is_configured),
+            str((settings.model if settings else "") or ""),
+            self._build_scope_fingerprint(rules, category_profiles),
+        )
+
+    def _build_library_cache_key(
+        self,
+        *,
+        query: str,
+        category_profiles: list[dict],
+        settings: RetrievalPlannerSettings | None,
+    ) -> tuple:
+        return (
+            "library",
+            query,
+            bool(settings and settings.is_configured),
+            str((settings.model if settings else "") or ""),
+            self._build_scope_fingerprint([], category_profiles),
+        )
+
+    def _build_result_cache_key(
+        self,
+        *,
+        query: str,
+        rules: list[dict],
+        category_profiles: list[dict],
+        limit: int,
+        settings: RetrievalPlannerSettings | None,
+    ) -> tuple:
+        return (
+            "result",
+            self._normalize_text(query),
+            int(limit),
+            bool(settings and settings.is_configured),
+            str((settings.model if settings else "") or ""),
+            self._build_scope_fingerprint(rules, category_profiles),
+        )
+
+    def _prune_cache(self, cache: dict) -> None:
+        now = time.monotonic()
+        expired_keys = [key for key, (expires_at, *_) in cache.items() if expires_at <= now]
+        for key in expired_keys:
+            cache.pop(key, None)
+        if len(cache) <= self.CACHE_MAX_ENTRIES:
+            return
+        for key, _ in sorted(cache.items(), key=lambda item: item[1][0])[: len(cache) - self.CACHE_MAX_ENTRIES]:
+            cache.pop(key, None)
+
+    def _get_cached_route(self, cache_key: tuple) -> tuple[KnowhowRouteDecision, list[str]] | None:
+        self._prune_cache(self._route_cache)
+        payload = self._route_cache.get(cache_key)
+        if not payload:
+            return None
+        _, decision, categories = payload
+        return decision, list(categories)
+
+    def _store_route_cache(
+        self,
+        cache_key: tuple,
+        decision: KnowhowRouteDecision,
+        candidate_categories: list[str],
+    ) -> None:
+        self._route_cache[cache_key] = (
+            time.monotonic() + self.CACHE_TTL_SECONDS,
+            decision,
+            tuple(candidate_categories),
+        )
+        self._prune_cache(self._route_cache)
+
+    def _get_cached_library_decision(self, cache_key: tuple) -> KnowhowLibraryDecision | None:
+        self._prune_cache(self._library_cache)
+        payload = self._library_cache.get(cache_key)
+        if not payload:
+            return None
+        _, decision = payload
+        return decision
+
+    def _store_library_cache(self, cache_key: tuple, decision: KnowhowLibraryDecision) -> None:
+        self._library_cache[cache_key] = (time.monotonic() + self.CACHE_TTL_SECONDS, decision)
+        self._prune_cache(self._library_cache)
+
+    def _get_cached_result(self, cache_key: tuple) -> KnowhowRoutingResult | None:
+        self._prune_cache(self._result_cache)
+        payload = self._result_cache.get(cache_key)
+        if not payload:
+            return None
+        _, result = payload
+        return KnowhowRoutingResult(
+            decision=result.decision,
+            rules=tuple(dict(rule) for rule in result.rules),
+            candidate_categories=result.candidate_categories,
+        )
+
+    def _store_result_cache(self, cache_key: tuple, result: KnowhowRoutingResult) -> None:
+        self._result_cache[cache_key] = (
+            time.monotonic() + self.CACHE_TTL_SECONDS,
+            KnowhowRoutingResult(
+                decision=result.decision,
+                rules=tuple(dict(rule) for rule in result.rules),
+                candidate_categories=result.candidate_categories,
+            ),
+        )
+        self._prune_cache(self._result_cache)
 
     @staticmethod
     def _normalize_text(text: str) -> str:
@@ -931,6 +1228,7 @@ Schema:
   "use_knowhow": true,
   "categories": ["category_name"],
   "confidence": "low | medium | high",
+  "rewritten_query": "optional short retrieval-oriented rewrite",
   "rationale": "short reason"
 }
 
@@ -939,6 +1237,7 @@ Rules:
 - Questions about qualification, compliance, approval flow, risk, single source, whether something is reasonable, or whether supporting rationale is sufficient usually mean "use_knowhow": true.
 - Only choose categories from the provided candidates.
 - Return at most 3 categories.
+- If use_knowhow is true, you may provide a short rewritten_query that makes retrieval easier by adding likely business-rule terms from the user intent. Do not invent facts that are not implied by the question.
 - If use_knowhow is false, return an empty categories array.
 """.strip()
 

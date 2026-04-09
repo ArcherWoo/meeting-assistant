@@ -2,9 +2,10 @@
 
 ## 目标
 
-这份文档对应当前 Phase 2 的服务器部署基线，目标是把项目收敛成两套统一入口：
+这份文档对应当前 Phase 2 的服务器部署基线，目标是把项目收敛成统一的生产部署入口：
 
 - Windows：`deploy.ps1`
+- Windows CMD：`deploy.bat`
 - Linux：`deploy.sh`
 
 两套脚本都基于同一套 [deploy/](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy) 逻辑，负责：
@@ -23,7 +24,7 @@
 
 Windows 是当前优先部署形态，推荐方案：
 
-1. 用 [deploy.ps1](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy.ps1) 做一键部署
+1. 用 [deploy.ps1](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy.ps1) 或 [deploy.bat](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy.bat) 做一键部署
 2. 后端由 [service_runner.py](/c:/Users/ArcherWoo/Desktop/meeting-assistant-main/meeting-assistant-main/deploy/service_runner.py) 托管
 3. 用 Windows 计划任务实现开机自启
 4. 前面接 Nginx 作为统一入口
@@ -82,7 +83,7 @@ python start.py --verbose
 python start.py --skip-install
 ```
 
-### 生产环境入口：`deploy.ps1 / deploy.sh`
+### 生产环境入口：`deploy.ps1 / deploy.bat / deploy.sh`
 
 生产脚本负责：
 
@@ -96,6 +97,25 @@ python start.py --skip-install
 - 输出部署结果、日志路径、访问地址
 - 生成 rendered Nginx 配置
 
+从这版开始，生产脚本的后端依赖准备逻辑已经和 `start.py` 对齐：
+
+- `.server-venv` 默认启用 `system-site-packages`
+- 优先复用当前 Python 环境里已经可用的包
+- 只安装真正缺失的后端依赖
+- 如果公司内部镜像缺少某个精确版本，会自动回退到该包的可用版本
+- 如果机器上遗留了旧版 `.server-venv`，且没有开启 `system-site-packages`，脚本会自动重建这个 venv
+
+这意味着：如果同一台服务器上 `python start.py` 能正常启动，新的生产部署脚本通常也能走通，不再因为 fresh venv 强制解析精确版本而失败。
+
+默认也不需要手动先编辑 `deploy/server.env`：
+
+- 首次运行部署脚本时会自动生成 `deploy/server.env`
+- 会自动读取当前机器的 `PIP_INDEX_URL` 等环境变量
+- 也会尝试读取当前 Python 的 `pip config list`
+- 如果已经存在旧版 `deploy/server.env`，脚本会自动回填镜像相关字段
+
+所以在大多数公司内网服务器上，只要这台机器本身已经能通过当前 Python 正常 `pip install` 或运行 `python start.py`，直接执行 `.\deploy.ps1` 就应该能走通。
+
 ## 一键部署入口
 
 ### Windows
@@ -107,10 +127,22 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\deploy.ps1
 ```
 
+如果你使用的是 `cmd.exe`：
+
+```bat
+deploy.bat
+```
+
 如果只想前台运行，不注册计划任务：
 
 ```powershell
 .\deploy.ps1 -Foreground
+```
+
+如果你使用的是 `cmd.exe`：
+
+```bat
+deploy.bat -Foreground
 ```
 
 部署成功后脚本会输出：
@@ -144,6 +176,12 @@ chmod +x deploy.sh
 ./deploy.sh --foreground
 ```
 
+如果只想先准备环境、构建前端、补全 `deploy/server.env`，但暂时不注册服务：
+
+```bash
+./deploy.sh --prepare
+```
+
 ## 部署目录约定
 
 脚本会自动创建并使用以下目录：
@@ -171,6 +209,10 @@ chmod +x deploy.sh
 - 日志：`MEETING_ASSISTANT_LOG_LEVEL`、`MEETING_ASSISTANT_LOG_FORMAT`
 - 运行时协调：`MEETING_ASSISTANT_RUNTIME_COORDINATION`
 - Python 覆盖：`MEETING_ASSISTANT_PYTHON_EXECUTABLE`
+- Python 依赖准备：`MEETING_ASSISTANT_VENV_SYSTEM_SITE_PACKAGES`
+- pip 镜像：`MEETING_ASSISTANT_PIP_INDEX_URL`、`MEETING_ASSISTANT_PIP_EXTRA_INDEX_URL`、`MEETING_ASSISTANT_PIP_TRUSTED_HOST`
+- pip 本地包/离线源：`MEETING_ASSISTANT_PIP_FIND_LINKS`、`MEETING_ASSISTANT_PIP_NO_INDEX`
+- pip 附加参数：`MEETING_ASSISTANT_PIP_ARGS`
 - 进程参数：`MEETING_ASSISTANT_WORKERS`、`MEETING_ASSISTANT_TIMEOUT_KEEP_ALIVE`、`MEETING_ASSISTANT_BACKLOG`
 - 代理参数：`MEETING_ASSISTANT_PROXY_HEADERS`、`MEETING_ASSISTANT_FORWARDED_ALLOW_IPS`
 - Uvicorn 限制：`MEETING_ASSISTANT_LIMIT_CONCURRENCY`、`MEETING_ASSISTANT_LIMIT_MAX_REQUESTS`
@@ -178,8 +220,34 @@ chmod +x deploy.sh
 当前建议：
 
 - `MEETING_ASSISTANT_RUNTIME_COORDINATION=sqlite`
+- `MEETING_ASSISTANT_VENV_SYSTEM_SITE_PACKAGES=1`
 - Windows 先从 `MEETING_ASSISTANT_WORKERS=2` 起压测
 - Linux 先从 `MEETING_ASSISTANT_WORKERS=1` 或 `2` 起压测
+
+如果服务器只能访问公司内部镜像，建议在 `deploy/server.env` 里至少配置：
+
+```env
+MEETING_ASSISTANT_VENV_SYSTEM_SITE_PACKAGES=1
+MEETING_ASSISTANT_PIP_INDEX_URL=https://你的公司镜像/simple
+MEETING_ASSISTANT_PIP_TRUSTED_HOST=你的公司镜像域名
+```
+
+如果你们公司还提供额外源、离线 wheel 目录或特定 pip 参数，也可以继续补：
+
+```env
+MEETING_ASSISTANT_PIP_EXTRA_INDEX_URL=
+MEETING_ASSISTANT_PIP_FIND_LINKS=
+MEETING_ASSISTANT_PIP_NO_INDEX=
+MEETING_ASSISTANT_PIP_ARGS=
+```
+
+不过当前脚本默认会自动探测并回填这些值：
+
+- 读取当前机器的 `PIP_INDEX_URL / PIP_TRUSTED_HOST` 等环境变量
+- 读取 `python -m pip config list`
+- 对旧版 `deploy/server.env` 自动补齐空白镜像字段
+
+所以多数情况下，不需要手工编辑 `deploy/server.env`。
 
 ## 健康检查与运行时诊断
 
@@ -276,6 +344,12 @@ MEETING_ASSISTANT_NGINX_HOME=C:\你的Nginx目录
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\deploy.ps1
+```
+
+如果你只用 `cmd.exe`，等价命令是：
+
+```bat
+deploy.bat
 ```
 
 5. 确保 Nginx 已安装在脚本能找到的位置，或在 `deploy/server.env` 中设置 `MEETING_ASSISTANT_NGINX_HOME`

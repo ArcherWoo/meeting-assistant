@@ -1,7 +1,7 @@
 import os
 import sys
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 
 BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -124,8 +124,31 @@ class KnowhowRoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         router = KnowhowRouter(llm_service=llm_service)
 
+        with patch.object(router, "_hard_skip_gate", return_value=None):
+            with patch.object(router, "_heuristic_gate", return_value=None):
+                decision, _ = await router.route(
+                    "What else should we add to these payment clauses before approval?",
+                    self.rules,
+                    category_profiles=self.category_profiles,
+                    settings=RetrievalPlannerSettings(
+                        api_url="https://example.com/v1",
+                        api_key="sk-test",
+                        model="deepseek-chat",
+                    ),
+                )
+
+        llm_service.chat.assert_awaited_once()
+        self.assertTrue(decision.should_retrieve)
+        self.assertEqual(decision.strategy, "llm_route")
+        self.assertEqual(decision.categories, ("contract_review",))
+
+    async def test_high_confidence_heuristic_route_skips_llm(self):
+        llm_service = AsyncMock()
+        llm_service.extract_text_content = Mock(return_value="")
+        router = KnowhowRouter(llm_service=llm_service)
+
         decision, _ = await router.route(
-            "What else should we add to these payment clauses?",
+            "Does this supplier have the required ISO9001 qualification and certification?",
             self.rules,
             category_profiles=self.category_profiles,
             settings=RetrievalPlannerSettings(
@@ -135,10 +158,9 @@ class KnowhowRoutingTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        llm_service.chat.assert_awaited_once()
         self.assertTrue(decision.should_retrieve)
-        self.assertEqual(decision.strategy, "llm_route")
-        self.assertEqual(decision.categories, ("contract_review",))
+        self.assertIn(decision.strategy, {"heuristic_route", "heuristic_category_match", "heuristic_rule_match"})
+        llm_service.chat.assert_not_awaited()
 
     async def test_llm_rule_judge_prunes_candidates(self):
         llm_service = AsyncMock()
@@ -149,7 +171,7 @@ class KnowhowRoutingTests(unittest.IsolatedAsyncioTestCase):
                         "message": {
                             "content": (
                                 '{"use_knowhow": true, "categories": ["procurement_review"], '
-                                '"confidence": "high", "rationale": "procurement risk intent"}'
+                                '"confidence": "medium", "rationale": "procurement risk intent"}'
                             )
                         }
                     }
@@ -167,14 +189,56 @@ class KnowhowRoutingTests(unittest.IsolatedAsyncioTestCase):
         ]
         llm_service.extract_text_content = Mock(
             side_effect=[
-                '{"use_knowhow": true, "categories": ["procurement_review"], "confidence": "high", "rationale": "procurement risk intent"}',
+                '{"use_knowhow": true, "categories": ["procurement_review"], "confidence": "medium", "rationale": "procurement risk intent"}',
                 '{"selected_ids": ["rule-proc-2"], "rationale": "single-source focus"}',
             ]
         )
         router = KnowhowRouter(llm_service=llm_service)
 
+        with patch.object(router, "_hard_skip_gate", return_value=None):
+            with patch.object(router, "_heuristic_gate", return_value=None):
+                with patch.object(router, "_should_use_llm_rule_judge", return_value=True):
+                    result = await router.retrieve_rules(
+                        "Is the single-source risk rationale sufficient?",
+                        self.rules,
+                        category_profiles=self.category_profiles,
+                        limit=2,
+                        settings=RetrievalPlannerSettings(
+                            api_url="https://example.com/v1",
+                            api_key="sk-test",
+                            model="deepseek-chat",
+                        ),
+                    )
+
+        self.assertEqual([rule["id"] for rule in result.rules], ["rule-proc-2"])
+        self.assertEqual(llm_service.chat.await_count, 2)
+
+    async def test_llm_rewritten_query_improves_rule_match(self):
+        llm_service = AsyncMock()
+        llm_service.chat.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"use_knowhow": true, "categories": ["procurement_review"], '
+                            '"confidence": "medium", "rewritten_query": "supplier qualification certification", '
+                            '"rationale": "supplier access review"}'
+                        )
+                    }
+                }
+            ]
+        }
+        llm_service.extract_text_content = Mock(
+            return_value=(
+                '{"use_knowhow": true, "categories": ["procurement_review"], '
+                '"confidence": "medium", "rewritten_query": "supplier qualification certification", '
+                '"rationale": "supplier access review"}'
+            )
+        )
+        router = KnowhowRouter(llm_service=llm_service)
+
         result = await router.retrieve_rules(
-            "Is the single-source risk rationale sufficient?",
+            "Are the vendor credentials sufficient for onboarding?",
             self.rules,
             category_profiles=self.category_profiles,
             limit=2,
@@ -185,8 +249,9 @@ class KnowhowRoutingTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertEqual([rule["id"] for rule in result.rules], ["rule-proc-2"])
-        self.assertEqual(llm_service.chat.await_count, 2)
+        self.assertTrue(result.rules)
+        self.assertEqual(result.rules[0]["id"], "rule-proc-1")
+        self.assertEqual(result.rules[0].get("route_rewritten_query"), "supplier qualification certification")
 
     async def test_llm_rule_judge_can_return_no_matching_rules(self):
         llm_service = AsyncMock()
@@ -197,7 +262,7 @@ class KnowhowRoutingTests(unittest.IsolatedAsyncioTestCase):
                         "message": {
                             "content": (
                                 '{"use_knowhow": true, "categories": ["procurement_review"], '
-                                '"confidence": "high", "rationale": "procurement risk intent"}'
+                                '"confidence": "medium", "rationale": "procurement risk intent"}'
                             )
                         }
                     }
@@ -215,23 +280,26 @@ class KnowhowRoutingTests(unittest.IsolatedAsyncioTestCase):
         ]
         llm_service.extract_text_content = Mock(
             side_effect=[
-                '{"use_knowhow": true, "categories": ["procurement_review"], "confidence": "high", "rationale": "procurement risk intent"}',
+                '{"use_knowhow": true, "categories": ["procurement_review"], "confidence": "medium", "rationale": "procurement risk intent"}',
                 '{"selected_ids": [], "rationale": "no rule is specific enough"}',
             ]
         )
         router = KnowhowRouter(llm_service=llm_service)
 
-        result = await router.retrieve_rules(
-            "Please just say hello and do not apply any procurement rule.",
-            self.rules,
-            category_profiles=self.category_profiles,
-            limit=2,
-            settings=RetrievalPlannerSettings(
-                api_url="https://example.com/v1",
-                api_key="sk-test",
-                model="deepseek-chat",
-            ),
-        )
+        with patch.object(router, "_hard_skip_gate", return_value=None):
+            with patch.object(router, "_heuristic_gate", return_value=None):
+                with patch.object(router, "_should_use_llm_rule_judge", return_value=True):
+                    result = await router.retrieve_rules(
+                        "Please just say hello and do not apply any procurement rule.",
+                        self.rules,
+                        category_profiles=self.category_profiles,
+                        limit=2,
+                        settings=RetrievalPlannerSettings(
+                            api_url="https://example.com/v1",
+                            api_key="sk-test",
+                            model="deepseek-chat",
+                        ),
+                    )
 
         self.assertEqual(list(result.rules), [])
         self.assertEqual(llm_service.chat.await_count, 2)
@@ -246,6 +314,87 @@ class KnowhowRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(decision.use_summary)
         self.assertEqual(decision.focus, "stats")
+
+    async def test_non_library_query_does_not_call_llm_library_detector(self):
+        llm_service = AsyncMock()
+        llm_service.extract_text_content = Mock(return_value="")
+        router = KnowhowRouter(llm_service=llm_service)
+
+        decision = await router.inspect_library_query(
+            "Is this single-source rationale sufficient?",
+            category_profiles=self.category_profiles,
+            settings=RetrievalPlannerSettings(
+                api_url="https://example.com/v1",
+                api_key="sk-test",
+                model="deepseek-chat",
+            ),
+        )
+
+        self.assertFalse(decision.use_summary)
+        llm_service.chat.assert_not_awaited()
+
+    async def test_retrieve_rules_uses_short_ttl_cache_for_repeated_query(self):
+        llm_service = AsyncMock()
+        llm_service.chat.side_effect = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"use_knowhow": true, "categories": ["procurement_review"], '
+                                '"confidence": "medium", "rationale": "procurement risk intent"}'
+                            )
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"selected_ids": ["rule-proc-2"], "rationale": "single-source focus"}'
+                        }
+                    }
+                ]
+            },
+        ]
+        llm_service.extract_text_content = Mock(
+            side_effect=[
+                '{"use_knowhow": true, "categories": ["procurement_review"], "confidence": "medium", "rationale": "procurement risk intent"}',
+                '{"selected_ids": ["rule-proc-2"], "rationale": "single-source focus"}',
+            ]
+        )
+        router = KnowhowRouter(llm_service=llm_service)
+
+        with patch.object(router, "_hard_skip_gate", return_value=None):
+            with patch.object(router, "_heuristic_gate", return_value=None):
+                with patch.object(router, "_should_use_llm_rule_judge", return_value=True):
+                    first = await router.retrieve_rules(
+                        "Is the single-source risk rationale sufficient?",
+                        self.rules,
+                        category_profiles=self.category_profiles,
+                        limit=2,
+                        settings=RetrievalPlannerSettings(
+                            api_url="https://example.com/v1",
+                            api_key="sk-test",
+                            model="deepseek-chat",
+                        ),
+                    )
+                    second = await router.retrieve_rules(
+                        "Is the single-source risk rationale sufficient?",
+                        self.rules,
+                        category_profiles=self.category_profiles,
+                        limit=2,
+                        settings=RetrievalPlannerSettings(
+                            api_url="https://example.com/v1",
+                            api_key="sk-test",
+                            model="deepseek-chat",
+                        ),
+                    )
+
+        self.assertEqual([rule["id"] for rule in first.rules], ["rule-proc-2"])
+        self.assertEqual([rule["id"] for rule in second.rules], ["rule-proc-2"])
+        self.assertEqual(llm_service.chat.await_count, 2)
 
 
 if __name__ == "__main__":

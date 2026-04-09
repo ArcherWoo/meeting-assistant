@@ -215,6 +215,74 @@ function getGenerationPhaseLabel(phase?: ChatGenerationPhase): string {
   return '正在准备回答';
 }
 
+function getReasoningStepState(stepIndex: number, phase?: ChatGenerationPhase): 'done' | 'active' | 'pending' {
+  if (phase === 'streaming') return 'done';
+  if (phase === 'calling_model') return stepIndex <= 1 ? 'done' : stepIndex === 2 ? 'active' : 'pending';
+  if (phase === 'retrieving') return stepIndex === 0 ? 'done' : stepIndex === 1 ? 'active' : 'pending';
+  return stepIndex === 0 ? 'active' : 'pending';
+}
+
+function ReasoningSummaryCard({
+  phase,
+  detail,
+  preview,
+  compact = false,
+}: {
+  phase?: ChatGenerationPhase;
+  detail?: string;
+  preview?: GenerationPreview;
+  compact?: boolean;
+}) {
+  if (!preview?.title && !preview?.steps?.length) {
+    return null;
+  }
+
+  return (
+    <div className={clsx('rounded-xl border border-primary/12 bg-primary/5 px-3 py-3', compact ? 'mb-3' : 'mt-3')}>
+      <div className="flex items-center gap-2">
+        <span className="inline-flex h-2 w-2 rounded-full bg-primary animate-pulse" />
+        <p className="text-[12px] font-semibold text-text-primary dark:text-text-dark-primary">分析路径</p>
+      </div>
+      <p className="mt-1 text-[11px] leading-5 text-text-secondary dark:text-text-dark-secondary">
+        {detail?.trim() || preview.title}
+      </p>
+      {preview.steps.length > 0 && (
+        <div className="mt-2 space-y-1.5">
+          {preview.steps.map((step, index) => {
+            const state = getReasoningStepState(index, phase);
+            return (
+              <div key={`${step}-${index}`} className="flex items-start gap-2">
+                <span
+                  className={clsx(
+                    'mt-[5px] inline-flex h-1.5 w-1.5 rounded-full',
+                    state === 'done'
+                      ? 'bg-emerald-500'
+                      : state === 'active'
+                        ? 'bg-primary animate-pulse'
+                        : 'bg-slate-300 dark:bg-slate-600',
+                  )}
+                />
+                <p
+                  className={clsx(
+                    'text-[11px] leading-5',
+                    state === 'done'
+                      ? 'text-text-primary dark:text-text-dark-primary'
+                      : state === 'active'
+                        ? 'text-primary'
+                        : 'text-text-secondary dark:text-text-dark-secondary',
+                  )}
+                >
+                  {step}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AssistantPendingState({
   phase,
   detail,
@@ -235,25 +303,7 @@ function AssistantPendingState({
       <p className="mt-2 text-xs leading-5 text-text-secondary dark:text-text-dark-secondary">
         {detail?.trim() || '模型开始输出后会立即显示。'}
       </p>
-      {preview?.title && (
-        <div className="mt-3 rounded-xl border border-primary/10 bg-primary/5 px-3 py-3">
-          <p className="text-[12px] font-medium text-text-primary dark:text-text-dark-primary">
-            {preview.title}
-          </p>
-          {preview.steps.length > 0 && (
-            <div className="mt-2 space-y-1.5">
-              {preview.steps.map((step, index) => (
-                <p
-                  key={`${step}-${index}`}
-                  className="text-[11px] leading-5 text-text-secondary dark:text-text-dark-secondary"
-                >
-                  {index + 1}. {step}
-                </p>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+      <ReasoningSummaryCard phase={phase} detail={detail} preview={preview} />
       <div className="mt-4 space-y-2">
         <div className="h-2.5 w-[82%] rounded-full bg-slate-200/90 dark:bg-slate-700/70 animate-pulse" />
         <div className="h-2.5 w-[68%] rounded-full bg-slate-200/80 dark:bg-slate-700/60 animate-pulse [animation-delay:150ms]" />
@@ -660,6 +710,12 @@ function MessageBubble({
             </>
           ) : isStreaming && message.content ? (
             <>
+              <ReasoningSummaryCard
+                phase={generationPhase}
+                detail={generationStatusText}
+                preview={generationPreview}
+                compact
+              />
               <Suspense fallback={<p className="whitespace-pre-wrap">{message.content}</p>}>
                 <RichMarkdown content={message.content} streaming />
               </Suspense>

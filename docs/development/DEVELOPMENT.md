@@ -174,6 +174,46 @@ interface Role {
 - Linux 应用和 Nginx 一起停：`./deploy.sh --stop --stop-nginx`
 
 Windows 下的实现不是硬停计划任务，而是通过运行时控制目录下发停止标记，让 `service_runner` 主动收尾退出。
+
+## 2026-04-09 生产部署链路补强
+
+这轮继续把“公司内网镜像 + 一键部署”这条链路收紧了。
+
+### 生产依赖准备逻辑
+
+- `deploy/deploy.py` 不再强制 fresh venv 后整包安装 `backend/requirements.txt`
+- 现在会优先复用当前 Python 环境里已经可用的包
+- 只会安装真正缺失的后端依赖
+- 如果公司镜像缺少精确版本，会自动回退尝试可用版本
+
+### 自动探测与回填
+
+- `deploy/common.py` 现在会自动读取：
+  - `PIP_INDEX_URL`
+  - `PIP_EXTRA_INDEX_URL`
+  - `PIP_TRUSTED_HOST`
+  - `PIP_FIND_LINKS`
+  - `PIP_NO_INDEX`
+- 也会调用 `python -m pip config list` 做补充探测
+- 首次生成 `deploy/server.env` 时会自动带出这些值
+- 如果是旧版 `deploy/server.env`，也会自动回填空白镜像字段
+- 旧版 `.server-venv` 如果没启用 `system-site-packages`，会自动重建
+
+### 入口脚本
+
+- 新增 Windows CMD 入口：`deploy.bat`
+- `deploy.sh` 补齐了：
+  - `--prepare`
+  - `--foreground`
+  - `--stop`
+  - `--stop-nginx`
+
+### 本轮验证
+
+- `python -m py_compile deploy/common.py deploy/deploy.py deploy/service_runner.py backend/tests/test_deploy_common.py`
+- `pytest backend/tests/test_deploy_common.py -q`
+- `pytest backend/tests/test_service_runner.py -q`
+- `pytest backend/tests -q` -> `160 passed`
 - 生产部署时不再区分这两个端口，而是默认只暴露一个应用端口 `5173`
 
 ### 手动分别启动

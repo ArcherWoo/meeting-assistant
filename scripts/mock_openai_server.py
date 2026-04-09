@@ -36,6 +36,7 @@ def build_handler(*, model_id: str, delay_ms: int):
                 return
 
             stream = bool(payload.get("stream"))
+            include_usage = bool((payload.get("stream_options") or {}).get("include_usage"))
             requested_model = str(payload.get("model") or model_id).strip() or model_id
             if requested_model != model_id:
                 self._send_json(400, {"error": {"message": f"model {requested_model} not available"}})
@@ -48,11 +49,17 @@ def build_handler(*, model_id: str, delay_ms: int):
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
+
                 chunks = [
-                    f'data: {json.dumps({"choices":[{"delta":{"content":"你好，"}}]}, ensure_ascii=False)}\n\n',
-                    f'data: {json.dumps({"choices":[{"delta":{"content":"我是本地压测模型。"}}]}, ensure_ascii=False)}\n\n',
-                    "data: [DONE]\n\n",
+                    f'data: {json.dumps({"choices": [{"delta": {"content": "你好，"}}]}, ensure_ascii=False)}\n\n',
+                    f'data: {json.dumps({"choices": [{"delta": {"content": "我是本地压测模型。"}}]}, ensure_ascii=False)}\n\n',
                 ]
+                if include_usage:
+                    chunks.append(
+                        f'data: {json.dumps({"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}}, ensure_ascii=False)}\n\n'
+                    )
+                chunks.append("data: [DONE]\n\n")
+
                 for chunk in chunks:
                     self.wfile.write(chunk.encode("utf-8"))
                     self.wfile.flush()
@@ -74,6 +81,11 @@ def build_handler(*, model_id: str, delay_ms: int):
                             "finish_reason": "stop",
                         }
                     ],
+                    "usage": {
+                        "prompt_tokens": 12,
+                        "completion_tokens": 8,
+                        "total_tokens": 20,
+                    },
                 },
             )
 

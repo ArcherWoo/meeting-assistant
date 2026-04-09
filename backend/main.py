@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from routers import agent, auth, chat, conversations, health, knowhow, knowledge, ppt, settings, skills
 from services.logging_config import configure_logging
@@ -113,6 +113,17 @@ def _configure_frontend_routes(app: FastAPI, dist_dir: Path) -> None:
         return FileResponse(index_file)
 
 
+def _frontend_redirect_target(request: Request) -> str:
+    configured_url = os.getenv("MEETING_ASSISTANT_FRONTEND_URL", "").strip()
+    if configured_url:
+        return configured_url.rstrip("/")
+
+    configured_port = os.getenv("MEETING_ASSISTANT_FRONTEND_PORT", "").strip() or "4173"
+    host = request.url.hostname or "127.0.0.1"
+    scheme = request.url.scheme or "http"
+    return f"{scheme}://{host}:{configured_port}"
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Meeting Assistant Backend",
@@ -142,6 +153,10 @@ def create_app() -> FastAPI:
 
     if _should_serve_frontend():
         _configure_frontend_routes(app, _resolve_frontend_dist_dir())
+    else:
+        @app.get("/", include_in_schema=False)
+        async def redirect_frontend_root(request: Request) -> RedirectResponse:
+            return RedirectResponse(url=_frontend_redirect_target(request), status_code=307)
 
     return app
 

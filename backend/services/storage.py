@@ -121,6 +121,8 @@ CREATE TABLE IF NOT EXISTS knowhow_rules (
     applies_when TEXT DEFAULT '',
     not_applies_when TEXT DEFAULT '',
     examples    TEXT DEFAULT '[]',
+    retrieval_summary TEXT DEFAULT '',
+    retrieval_queries TEXT DEFAULT '[]',
     weight      INTEGER DEFAULT 2,
     hit_count   INTEGER DEFAULT 0,
     confidence  REAL DEFAULT 0.5,
@@ -272,6 +274,8 @@ CREATE TABLE IF NOT EXISTS users (
     system_role   TEXT DEFAULT 'user',
     group_id      TEXT,
     can_manage_group_knowhow INTEGER DEFAULT 0,
+    login_count   INTEGER DEFAULT 0,
+    last_login_at DATETIME,
     is_active     INTEGER DEFAULT 1,
     created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -322,6 +326,14 @@ CREATE TABLE IF NOT EXISTS runtime_application_metrics (
     updated_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_runtime_application_metrics_updated ON runtime_application_metrics(updated_at);
+
+CREATE TABLE IF NOT EXISTS user_usage_totals (
+    user_id            TEXT PRIMARY KEY,
+    token_input_total  INTEGER DEFAULT 0,
+    token_output_total INTEGER DEFAULT 0,
+    updated_at         TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
 """
 
 _VALID_RESOURCE_TYPES = {"role", "skill", "knowledge", "knowhow"}
@@ -547,6 +559,14 @@ class StorageService:
             "CREATE INDEX IF NOT EXISTS idx_runtime_application_metrics_updated "
             "ON runtime_application_metrics(updated_at)"
         )
+        await self.db.execute(
+            "CREATE TABLE IF NOT EXISTS user_usage_totals ("
+            "user_id TEXT PRIMARY KEY, "
+            "token_input_total INTEGER DEFAULT 0, "
+            "token_output_total INTEGER DEFAULT 0, "
+            "updated_at TEXT NOT NULL, "
+            "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)"
+        )
 
         # --- RBAC migrations: add owner_id to resource tables ---
         for table in ("roles", "knowhow_rules", "ppt_imports", "conversations", "workspaces"):
@@ -587,6 +607,10 @@ class StorageService:
             await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN not_applies_when TEXT DEFAULT ''")
         if "examples" not in knowhow_rule_columns:
             await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN examples TEXT DEFAULT '[]'")
+        if "retrieval_summary" not in knowhow_rule_columns:
+            await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN retrieval_summary TEXT DEFAULT ''")
+        if "retrieval_queries" not in knowhow_rule_columns:
+            await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN retrieval_queries TEXT DEFAULT '[]'")
         if "owner_group_id" not in knowhow_rule_columns:
             await self.db.execute("ALTER TABLE knowhow_rules ADD COLUMN owner_group_id TEXT")
         await self.db.execute(
@@ -607,6 +631,14 @@ class StorageService:
         if "can_manage_group_knowhow" not in user_columns:
             await self.db.execute(
                 "ALTER TABLE users ADD COLUMN can_manage_group_knowhow INTEGER DEFAULT 0"
+            )
+        if "login_count" not in user_columns:
+            await self.db.execute(
+                "ALTER TABLE users ADD COLUMN login_count INTEGER DEFAULT 0"
+            )
+        if "last_login_at" not in user_columns:
+            await self.db.execute(
+                "ALTER TABLE users ADD COLUMN last_login_at DATETIME"
             )
 
     # ===== RBAC User/Group CRUD =====
@@ -637,6 +669,8 @@ class StorageService:
         return {"id": uid, "username": username, "display_name": display_name,
                 "system_role": system_role, "group_id": group_id,
                 "can_manage_group_knowhow": 1 if can_manage_group_knowhow else 0,
+                "login_count": 0,
+                "last_login_at": None,
                 "is_active": 1,
                 "created_at": now, "updated_at": now}
 
@@ -646,11 +680,136 @@ class StorageService:
     async def get_user_by_id(self, user_id: str) -> Optional[dict]:
         return await self._fetchone("SELECT * FROM users WHERE id=?", (user_id,))
 
+    @staticmethod
+    def _user_message_stats_subquery() -> str:
+        return (
+            "LEFT JOIN ("
+            "    SELECT "
+            "    c.owner_id AS owner_id, "
+            "    SUM(COALESCE(m.token_input, 0)) AS token_input_total, "
+            "    SUM(COALESCE(m.token_output, 0)) AS token_output_total "
+            "    FROM conversations c "
+            "    LEFT JOIN messages m ON m.conversation_id = c.id "
+            "    WHERE COALESCE(c.owner_id, '') <> '' "
+            "    GROUP BY c.owner_id"
+            ") AS message_stats ON message_stats.owner_id = u.id "
+        )
+
+    @staticmethod
+    def _user_usage_stats_join() -> str:
+        return (
+            "LEFT JOIN user_usage_totals usage_stats ON usage_stats.user_id = u.id "
+        )
+
+    async def get_user_by_id_with_stats(self, user_id: str) -> Optional[dict]:
+        return await self._fetchone(
+            "SELECT "
+            "u.*, "
+            "COALESCE(usage_stats.token_input_total, message_stats.token_input_total, 0) AS token_input_total, "
+            "COALESCE(usage_stats.token_output_total, message_stats.token_output_total, 0) AS token_output_total, "
+            "("
+            "COALESCE(usage_stats.token_input_total, message_stats.token_input_total, 0) + "
+            "COALESCE(usage_stats.token_output_total, message_stats.token_output_total, 0)"
+            ") AS token_total "
+            "FROM users u "
+            + self._user_usage_stats_join()
+            + self._user_message_stats_subquery() +
+            "WHERE u.id = ?",
+            (user_id,),
+        )
+
     async def list_users(self) -> list[dict]:
         return await self._fetchall(
-            "SELECT id, username, display_name, system_role, group_id, can_manage_group_knowhow, is_active, created_at, updated_at "
-            "FROM users ORDER BY created_at ASC"
+            "SELECT "
+            "u.id, "
+            "u.username, "
+            "u.display_name, "
+            "u.system_role, "
+            "u.group_id, "
+            "u.can_manage_group_knowhow, "
+            "u.login_count, "
+            "u.last_login_at, "
+            "u.is_active, "
+            "u.created_at, "
+            "u.updated_at, "
+            "COALESCE(usage_stats.token_input_total, message_stats.token_input_total, 0) AS token_input_total, "
+            "COALESCE(usage_stats.token_output_total, message_stats.token_output_total, 0) AS token_output_total, "
+            "("
+            "COALESCE(usage_stats.token_input_total, message_stats.token_input_total, 0) + "
+            "COALESCE(usage_stats.token_output_total, message_stats.token_output_total, 0)"
+            ") AS token_total "
+            "FROM users u "
+            + self._user_usage_stats_join()
+            + self._user_message_stats_subquery() +
+            "ORDER BY u.created_at ASC"
         )
+
+    async def _get_message_token_totals_for_user(self, user_id: str) -> tuple[int, int]:
+        row = await self._fetchone(
+            "SELECT "
+            "COALESCE(SUM(COALESCE(m.token_input, 0)), 0) AS token_input_total, "
+            "COALESCE(SUM(COALESCE(m.token_output, 0)), 0) AS token_output_total "
+            "FROM conversations c "
+            "LEFT JOIN messages m ON m.conversation_id = c.id "
+            "WHERE c.owner_id = ?",
+            (user_id,),
+        )
+        return (
+            int(row.get("token_input_total") or 0) if row else 0,
+            int(row.get("token_output_total") or 0) if row else 0,
+        )
+
+    async def record_user_token_usage(
+        self,
+        user_id: str,
+        *,
+        token_input: int = 0,
+        token_output: int = 0,
+    ) -> Optional[dict]:
+        normalized_input = max(0, int(token_input or 0))
+        normalized_output = max(0, int(token_output or 0))
+        if normalized_input == 0 and normalized_output == 0:
+            return await self.get_user_by_id_with_stats(user_id)
+
+        now = utc_now_iso()
+        existing = await self._fetchone(
+            "SELECT user_id FROM user_usage_totals WHERE user_id=?",
+            (user_id,),
+        )
+        if existing:
+            await self.db.execute(
+                "UPDATE user_usage_totals "
+                "SET token_input_total = COALESCE(token_input_total, 0) + ?, "
+                "token_output_total = COALESCE(token_output_total, 0) + ?, "
+                "updated_at = ? "
+                "WHERE user_id = ?",
+                (normalized_input, normalized_output, now, user_id),
+            )
+        else:
+            base_input, base_output = await self._get_message_token_totals_for_user(user_id)
+            await self.db.execute(
+                "INSERT INTO user_usage_totals (user_id, token_input_total, token_output_total, updated_at) "
+                "VALUES (?,?,?,?)",
+                (
+                    user_id,
+                    base_input + normalized_input,
+                    base_output + normalized_output,
+                    now,
+                ),
+            )
+        await self.db.commit()
+        return await self.get_user_by_id_with_stats(user_id)
+
+    async def record_user_login(self, user_id: str) -> Optional[dict]:
+        now = utc_now_iso()
+        await self.db.execute(
+            "UPDATE users "
+            "SET login_count = COALESCE(login_count, 0) + 1, last_login_at = ?, updated_at = ? "
+            "WHERE id = ?",
+            (now, now, user_id),
+        )
+        await self.db.commit()
+        return await self.get_user_by_id_with_stats(user_id)
 
     async def update_user(self, user_id: str, **kwargs) -> Optional[dict]:
         allowed = {
@@ -668,7 +827,7 @@ class StorageService:
         set_clause = ", ".join(f"{k}=?" for k in fields)
         await self.db.execute(f"UPDATE users SET {set_clause} WHERE id=?", (*fields.values(), user_id))
         await self.db.commit()
-        return await self.get_user_by_id(user_id)
+        return await self.get_user_by_id_with_stats(user_id)
 
     async def delete_user(self, user_id: str) -> bool:
         row = await self._fetchone("SELECT id FROM users WHERE id=?", (user_id,))
@@ -1868,6 +2027,8 @@ class StorageService:
         applies_when: str = "",
         not_applies_when: str = "",
         examples: str = "[]",
+        retrieval_summary: str = "",
+        retrieval_queries: str = "[]",
         weight: int = 2,
         source: str = "user",
         owner_id: Optional[str] = None,
@@ -1878,8 +2039,8 @@ class StorageService:
         await self.db.execute(
             "INSERT INTO knowhow_rules ("
             "id, category, title, rule_text, trigger_terms, exclude_terms, applies_when, not_applies_when, "
-            "examples, weight, source, owner_id, owner_group_id, created_at, updated_at"
-            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "examples, retrieval_summary, retrieval_queries, weight, source, owner_id, owner_group_id, created_at, updated_at"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 rid,
                 category,
@@ -1890,6 +2051,8 @@ class StorageService:
                 applies_when,
                 not_applies_when,
                 examples,
+                retrieval_summary,
+                retrieval_queries,
                 weight,
                 source,
                 owner_id,

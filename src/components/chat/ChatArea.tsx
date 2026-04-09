@@ -6,7 +6,7 @@
 import { lazy, Suspense, useState, useRef, useEffect, useCallback, useMemo, type ChangeEvent } from 'react';
 import { useAppStore } from '@/stores/appStore';
 import { useChatStore, DEFAULT_CONVERSATION_TITLE } from '@/stores/chatStore';
-import { streamChat, extractFilesText, generateAutoTitle } from '@/services/api';
+import { streamChat, extractFilesText, generateAutoTitle, updateMessageRecord } from '@/services/api';
 import { type Attachment, type ChatStatusEvent, type GenerationPreview, type LLMConfig, type Message, type SkillSuggestionEvent } from '@/types';
 import MessageBubble from './MessageBubble';
 import ChatInput from './ChatInput';
@@ -341,6 +341,7 @@ export default function ChatArea() {
 
     let fullContent = '';
     let hasReceivedChunk = false;
+    let latestUsage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null = null;
 
     const handleStreamError = (error: string) => {
       setStreaming(false, conversationId);
@@ -373,7 +374,7 @@ export default function ChatArea() {
             {
               generationPhase: 'streaming',
               generationStatusText: '正在生成回答',
-              generationPreview: undefined,
+              generationPreview: preview,
             },
             conversationId,
             { persist: false },
@@ -388,6 +389,12 @@ export default function ChatArea() {
         delete abortMapRef.current[conversationId];
         clearPendingStreamState(conversationId);
         void updateMessage(assistantMessageId, fullContent, conversationId).catch(() => {});
+        if (latestUsage) {
+          void updateMessageRecord(assistantMessageId, {
+            tokenInput: Math.max(0, Number(latestUsage.prompt_tokens ?? 0)),
+            tokenOutput: Math.max(0, Number(latestUsage.completion_tokens ?? 0)),
+          }).catch(() => {});
+        }
         void updateMessageMetadata(
           assistantMessageId,
           {
@@ -420,11 +427,14 @@ export default function ChatArea() {
           {
             generationPhase: status.phase,
             generationStatusText: status.detail?.trim() || status.label,
-            generationPreview: status.phase === 'streaming' ? undefined : preview,
+            generationPreview: preview,
           },
           conversationId,
           { persist: false },
         ).catch(() => {});
+      },
+      (usage) => {
+        latestUsage = usage;
       },
     ).catch((error: unknown) => {
       handleStreamError((error as Error).message || '网络错误');

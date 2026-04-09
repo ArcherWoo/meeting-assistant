@@ -1,0 +1,82 @@
+[
+  {
+    "id": "skip-greeting",
+    "query": "你好",
+    "kind": "skip",
+    "notes": "寒暄不应触发 knowhow"
+  },
+  {
+    "id": "skip-translation",
+    "query": "把这段英文翻译成中文",
+    "kind": "skip",
+    "notes": "纯翻译请求不应触发 knowhow"
+  },
+  {
+    "id": "rule-supplier-qualification",
+    "query": "这个供应商缺少 ISO 认证还能继续推进吗",
+    "kind": "rule",
+    "expected_category": "采购预审",
+    "expected_title_contains": "供应商资质"
+  },
+  {
+    "id": "rule-single-source",
+    "query": "唯一供应商方案是否还需要补充单一来源说明",
+    "kind": "rule",
+    "expected_category": "采购预审",
+    "expected_title_contains": "单一来源"
+  },
+  {
+    "id": "rule-price-reasonable",
+    "query": "这次报价比历史均价高很多是否合理",
+    "kind": "rule",
+    "expected_category": "采购预审",
+    "expected_title_contains": "价格"
+  },
+  {
+    "id": "rule-payment-clause",
+    "query": "30%预付款、70%验收后支付是否合理",
+    "kind": "rule",
+    "expected_category": "合同审查",
+    "expected_title_contains": "付款"
+  },
+  {
+    "id": "rule-delivery-plan",
+    "query": "交付计划只写了一个月底完成，这样够不够",
+    "kind": "rule",
+    "expected_category": "合同审查",
+    "expected_title_contains": "交付"
+  },
+  {
+    "id": "library-stats",
+    "query": "Knowhow 规则库现在有几条规则",
+    "kind": "library",
+    "expected_focus": "stats"
+  },
+  {
+    "id": "library-categories",
+    "query": "Knowhow 规则库现在有哪些分类",
+    "kind": "library",
+    "expected_focus": "categories"
+  },
+  {
+    "id": "rule-file-risk",
+    "query": "请结合这份采购材料看看供应商资质和报价偏差是否需要补充说明",
+    "kind": "rule",
+    "expected_category": "采购预审",
+    "expected_title_contains": "供应商资质"
+  },
+  {
+    "id": "skip-polish",
+    "query": "帮我润色一下这段会议纪要",
+    "kind": "skip",
+    "notes": "纯润色请求不应触发 knowhow"
+  },
+  {
+    "id": "llm-route-vendor-onboarding",
+    "query": "Are the vendor credentials sufficient for onboarding approval?",
+    "kind": "rule",
+    "expected_category": "采购预审",
+    "expected_title_contains": "供应商资质",
+    "requires_llm": true
+  }
+]

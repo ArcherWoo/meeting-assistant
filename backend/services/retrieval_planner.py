@@ -150,6 +150,21 @@ class RetrievalPlanner:
         "售后",
         "违约",
     )
+    _DECISION_HINTS: tuple[str, ...] = (
+        "是否",
+        "合理",
+        "合规",
+        "够不够",
+        "足不足",
+        "需不需要",
+        "要不要",
+        "能不能",
+        "可不可以",
+        "需要补充",
+        "要补充",
+        "有没有风险",
+        "有没有问题",
+    )
     _SKILL_HINTS: tuple[str, ...] = (
         "模板",
         "流程",
@@ -181,6 +196,7 @@ Planning rules:
 - Query strings must be short retrieval queries, not long natural-language paragraphs.
 - Prefer knowledge when the user needs factual evidence or file-based recall.
 - Prefer knowhow when the user is asking about norms, qualifications, compliance, risk, approval, or policy judgment.
+- When the user wants to assess a file, material, or attachment against rules, risk, qualification, approval, or compliance requirements, it is valid to retrieve both knowledge and knowhow.
 - Prefer skill only when the user clearly needs a reusable workflow, template, or task capability.
 - It is valid to return zero actions when retrieval is unnecessary.
 - normalized_query should preserve the original meaning while making it easier to retrieve.
@@ -568,6 +584,10 @@ JSON schema:
         wants_skill = "skill" in allowed_set and self._contains_any(normalized_query, self._SKILL_HINTS)
         wants_knowledge = "knowledge" in allowed_set and self._contains_any(normalized_query, self._KNOWLEDGE_HINTS)
         wants_knowhow = "knowhow" in allowed_set and self._contains_any(normalized_query, self._KNOWHOW_HINTS)
+        is_decision_query = self._contains_any(normalized_query, self._DECISION_HINTS)
+
+        if "knowhow" in allowed_set and wants_knowledge and is_decision_query:
+            wants_knowhow = True
 
         actions: list[RetrievalPlanAction] = []
         if wants_skill:

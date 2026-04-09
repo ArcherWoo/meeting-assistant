@@ -314,6 +314,34 @@ def _is_content_sse_chunk(chunk: str) -> bool:
 
     return bool(delta.get("content"))
 
+
+def _extract_usage_from_sse_chunk(chunk: str) -> dict[str, int] | None:
+    stripped = chunk.strip()
+    if not stripped.startswith("data: "):
+        return None
+
+    data = stripped[6:].strip()
+    if not data or data == "[DONE]":
+        return None
+
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None
+
+    return {
+        "prompt_tokens": max(0, int(usage.get("prompt_tokens") or 0)),
+        "completion_tokens": max(0, int(usage.get("completion_tokens") or 0)),
+        "total_tokens": max(0, int(usage.get("total_tokens") or 0)),
+    }
+
 class ChatMessage(BaseModel):
     """单条消息"""
     role: str  # system / user / assistant / tool
@@ -610,6 +638,7 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
             status = "completed"
             error_type = ""
             llm_started_at: float | None = None
+            usage_metrics: dict[str, int] | None = None
             timing_metrics = ChatTimingMetrics(
                 attachment_ms=max(1, round(request.attachment_prepare_ms))
                 if request.attachment_prepare_ms > 0
@@ -684,6 +713,9 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
                     timing_metrics,
                     lambda: _finalize_stream_timings(timing_metrics, llm_started_at, request_started_at),
                 ):
+                    usage = _extract_usage_from_sse_chunk(chunk)
+                    if usage:
+                        usage_metrics = usage
                     if not has_emitted_streaming and _is_content_sse_chunk(chunk):
                         has_emitted_streaming = True
                         timing_metrics.llm_first_token_ms = _elapsed_ms(llm_started_at)
@@ -714,6 +746,12 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
                 error_payload = json.dumps({"stream_error": str(exc)}, ensure_ascii=False)
                 yield f"data: {error_payload}\n\n"
             finally:
+                if usage_metrics:
+                    await storage.record_user_token_usage(
+                        user_id,
+                        token_input=usage_metrics.get("prompt_tokens", 0),
+                        token_output=usage_metrics.get("completion_tokens", 0),
+                    )
                 if llm_started_at is not None:
                     _finalize_stream_timings(timing_metrics, llm_started_at, request_started_at)
                 elif timing_metrics.end_to_end_ms is None:
@@ -838,6 +876,13 @@ async def chat_completions(request: ChatRequest, user: dict = Depends(get_curren
                 user_id=user_id,
                 request_kind="stream",
             )
+            usage = result.get("usage") if isinstance(result, dict) else None
+            if isinstance(usage, dict):
+                await storage.record_user_token_usage(
+                    user_id,
+                    token_input=max(0, int(usage.get("prompt_tokens") or 0)),
+                    token_output=max(0, int(usage.get("completion_tokens") or 0)),
+                )
             timing_metrics.llm_total_ms = _elapsed_ms(llm_started_at)
             timing_metrics.end_to_end_ms = _elapsed_ms(request_started_at)
             response = dict(result)
