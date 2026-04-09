@@ -90,10 +90,11 @@ class AgentCitation(BaseModel):
 
 
 class AgentArtifact(BaseModel):
-    type: Literal["report", "table", "checklist", "json"]
+    type: Literal["report", "table", "checklist", "json", "file"]
     title: str
     content: str
     mime_type: str | None = None
+    download_url: str | None = None
 
 
 class AgentFinalResult(BaseModel):
@@ -233,6 +234,45 @@ class SearchKnowhowRulesOutput(BaseModel):
     citations: list[AgentCitation] = Field(default_factory=list)
 
 
+class RunExcelCategoryMappingInput(BaseModel):
+    template_import_id: str
+    data_import_id: str
+    template_sheet: str = ""
+    data_sheet: str = ""
+    name_column: int = 2
+    knowhow_categories: str = ""
+    mode: Literal["strict", "balanced", "recall"] = "balanced"
+    review_threshold: float = 0.55
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> "RunExcelCategoryMappingInput":
+        self.template_import_id = self.template_import_id.strip()
+        self.data_import_id = self.data_import_id.strip()
+        self.template_sheet = self.template_sheet.strip()
+        self.data_sheet = self.data_sheet.strip()
+        self.knowhow_categories = self.knowhow_categories.strip()
+        if not self.template_import_id:
+            raise ValueError("template_import_id is required")
+        if not self.data_import_id:
+            raise ValueError("data_import_id is required")
+        if self.name_column < 1:
+            raise ValueError("name_column must be >= 1")
+        self.review_threshold = max(0.0, min(1.0, float(self.review_threshold)))
+        return self
+
+
+class RunExcelCategoryMappingOutput(BaseModel):
+    summary: str
+    output_path: str
+    output_filename: str
+    processed_count: int
+    matched_count: int
+    review_count: int
+    template_path_count: int
+    knowhow_rule_count: int
+    preview_rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
 @dataclass
 class AgentRuntimeMemory:
     used_tools: list[str] = field(default_factory=list)
@@ -257,6 +297,9 @@ class AgentDeps:
     model: str
     run_id: str
     request_params: dict[str, Any]
+    user_id: str | None = None
+    group_id: str | None = None
+    is_admin: bool = False
     conversation_id: str | None = None
     llm_profile_id: str | None = None
     skill: Any = None

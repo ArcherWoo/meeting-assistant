@@ -36,3 +36,5 @@ DATA_DIR = _resolve_path(os.getenv("MEETING_ASSISTANT_DATA_DIR", "").strip()) if
 DB_PATH = DATA_DIR / "main.db"
 VECTORS_DIR = DATA_DIR / "vectors"
 USER_SKILLS_DIR = APP_HOME / "skills"
+CLASSIFICATION_OUTPUTS_DIR = DATA_DIR / "classification_outputs"
+IMPORTED_FILES_DIR = DATA_DIR / "imported_files"

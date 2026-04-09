@@ -5,6 +5,7 @@
  */
 import { lazy, memo, Suspense, useState } from 'react';
 import clsx from 'clsx';
+import { downloadAgentArtifact } from '@/services/api';
 import type {
   ChatGenerationPhase,
   ContextCitation,
@@ -222,6 +223,7 @@ function getReasoningStepState(stepIndex: number, phase?: ChatGenerationPhase): 
   return stepIndex === 0 ? 'active' : 'pending';
 }
 
+
 function ReasoningSummaryCard({
   phase,
   detail,
@@ -364,6 +366,7 @@ function MessageBubble({
   canRetryGeneration = false,
 }: Props) {
   const [copyState, setCopyState] = useState<CopyState>('idle');
+  const [downloadingArtifactKey, setDownloadingArtifactKey] = useState<string>('');
   const isUser = message.role === 'user';
   const generationPhase = message.metadata?.generationPhase;
   const generationStatusText = message.metadata?.generationStatusText;
@@ -417,6 +420,15 @@ function MessageBubble({
     window.setTimeout(() => {
       setCopyState('idle');
     }, 1600);
+  };
+
+  const handleDownloadArtifact = async (downloadUrl: string, filename: string, artifactKey: string) => {
+    setDownloadingArtifactKey(artifactKey);
+    try {
+      await downloadAgentArtifact(downloadUrl, filename);
+    } finally {
+      setDownloadingArtifactKey('');
+    }
   };
 
   return (
@@ -902,6 +914,22 @@ function MessageBubble({
                           <span className="text-[10px] text-text-secondary dark:text-text-dark-secondary">
                             {artifact.mime_type}
                           </span>
+                        )}
+                        {artifact.download_url && (
+                          <button
+                            type="button"
+                            className="win-button ml-auto h-7 px-3 text-xs"
+                            disabled={downloadingArtifactKey === `${artifact.type}-${artifact.title}-${index}`}
+                            onClick={() => {
+                              void handleDownloadArtifact(
+                                artifact.download_url!,
+                                artifact.title,
+                                `${artifact.type}-${artifact.title}-${index}`,
+                              );
+                            }}
+                          >
+                            {downloadingArtifactKey === `${artifact.type}-${artifact.title}-${index}` ? '下载中...' : '下载文件'}
+                          </button>
                         )}
                       </div>
                       <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-lg bg-black/5 p-3 text-[11px] leading-5 dark:bg-white/5">

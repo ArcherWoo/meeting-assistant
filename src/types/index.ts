@@ -128,10 +128,11 @@ export interface AgentResultSnapshot {
   used_tools: string[];
   citations: ContextCitation[];
   artifacts: Array<{
-    type: 'report' | 'table' | 'checklist' | 'json';
+    type: 'report' | 'table' | 'checklist' | 'json' | 'file';
     title: string;
     content: string;
     mime_type?: string;
+    download_url?: string;
   }>;
   next_actions: string[];
   structured_payload?: Record<string, unknown>;
@@ -407,10 +408,11 @@ export interface AgentFinalResult {
     location?: string;
   }>;
   artifacts: Array<{
-    type: 'report' | 'table' | 'checklist' | 'json';
+    type: 'report' | 'table' | 'checklist' | 'json' | 'file';
     title: string;
     content: string;
     mime_type?: string;
+    download_url?: string;
   }>;
   next_actions: string[];
   structured_payload?: Record<string, unknown>;

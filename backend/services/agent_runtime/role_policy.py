@@ -26,6 +26,7 @@ def _default_allowed_tools(capabilities: list[str], agent_preflight: list[str]) 
         "get_skill_definition",
         "extract_file_text",
         "search_knowhow_rules",
+        "run_excel_category_mapping",
     ]
     if "rag" in capabilities or "auto_knowledge" in agent_preflight:
         tools.append("query_knowledge")

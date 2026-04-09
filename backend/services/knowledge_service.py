@@ -8,6 +8,7 @@ import json
 import io
 import logging
 import os
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +18,7 @@ from services.document_parsing import chunk_parsed_document, document_parser_reg
 from services.document_parsing.models import ParsedDocument
 from services.document_parsing.prompt_render import render_document_for_prompt
 from services.runtime_controls import attachment_parse_controller
-from services.runtime_paths import VECTORS_DIR
+from services.runtime_paths import IMPORTED_FILES_DIR, VECTORS_DIR
 from services.storage import storage, gen_id
 from utils.decryption_handler import decrypt_esafenet_file
 
@@ -66,6 +67,23 @@ class KnowledgeService:
     def __init__(self) -> None:
         self._lance_db = None
         self._chunks_table = None
+
+    @staticmethod
+    def _build_imported_file_path(import_id: str, filename: str) -> Path:
+        safe_name = Path(filename or "uploaded-file").name or "uploaded-file"
+        return (IMPORTED_FILES_DIR / import_id / safe_name).resolve()
+
+    async def _persist_imported_file(self, import_id: str, filename: str, file_content: bytes) -> Path:
+        target_path = self._build_imported_file_path(import_id, filename)
+
+        def _write_file() -> Path:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_bytes(file_content)
+            return target_path
+
+        written_path = await asyncio.to_thread(_write_file)
+        await storage.update_ppt_import_file_path(import_id, str(written_path))
+        return written_path
 
     @staticmethod
     def _build_chunk_metadata(import_id: str, chunk: dict) -> str:

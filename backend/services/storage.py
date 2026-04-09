@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS ppt_imports (
     id                   TEXT PRIMARY KEY,
     file_name            TEXT NOT NULL,
     file_hash            TEXT UNIQUE NOT NULL,
+    stored_file_path     TEXT DEFAULT '',
     file_size            INTEGER,
     slide_count          INTEGER,
     import_status        TEXT DEFAULT 'pending',
@@ -593,6 +594,10 @@ class StorageService:
         knowledge_chunk_columns = await self._table_columns("knowledge_chunks")
         if "metadata_json" not in knowledge_chunk_columns:
             await self.db.execute("ALTER TABLE knowledge_chunks ADD COLUMN metadata_json TEXT DEFAULT '{}'")
+
+        ppt_import_columns = await self._table_columns("ppt_imports")
+        if "stored_file_path" not in ppt_import_columns:
+            await self.db.execute("ALTER TABLE ppt_imports ADD COLUMN stored_file_path TEXT DEFAULT ''")
 
         knowhow_rule_columns = await self._table_columns("knowhow_rules")
         if "title" not in knowhow_rule_columns:
@@ -1128,6 +1133,7 @@ class StorageService:
                     "get_skill_definition",
                     "extract_file_text",
                     "search_knowhow_rules",
+                    "run_excel_category_mapping",
                 ]),
                 "is_builtin": 1,
                 "sort_order": 1,
@@ -1152,6 +1158,7 @@ class StorageService:
                     "extract_file_text",
                     "search_knowhow_rules",
                     "query_knowledge",
+                    "run_excel_category_mapping",
                 ]),
                 "is_builtin": 1,
                 "sort_order": 2,
@@ -1182,7 +1189,7 @@ class StorageService:
                     "chat_capabilities=COALESCE(NULLIF(chat_capabilities, ''), ?), "
                     "agent_preflight=COALESCE(NULLIF(agent_preflight, ''), ?), "
                     "allowed_surfaces=COALESCE(NULLIF(allowed_surfaces, ''), ?), "
-                    "agent_allowed_tools=COALESCE(NULLIF(agent_allowed_tools, ''), ?), "
+                    "agent_allowed_tools=?, "
                     "agent_prompt=COALESCE(agent_prompt, '') "
                     "WHERE id=?",
                     (role["chat_capabilities"], role["agent_preflight"], role["allowed_surfaces"], role["agent_allowed_tools"], role["id"]),
@@ -2208,18 +2215,32 @@ class StorageService:
     async def record_ppt_import(
         self, file_name: str, file_hash: str, file_size: int, slide_count: int,
         owner_id: Optional[str] = None,
+        stored_file_path: Optional[str] = None,
     ) -> str:
         """记录 PPT 导入，返回 import_id。若 hash 已存在则返回已有记录 ID"""
         existing = await self._fetchone("SELECT id FROM ppt_imports WHERE file_hash=?", (file_hash,))
         if existing:
+            if stored_file_path:
+                await self.db.execute(
+                    "UPDATE ppt_imports SET stored_file_path=COALESCE(NULLIF(stored_file_path, ''), ?) WHERE id=?",
+                    (stored_file_path, existing["id"]),
+                )
+                await self.db.commit()
             return existing["id"]
         iid = gen_id()
         await self.db.execute(
-            "INSERT INTO ppt_imports (id, file_name, file_hash, file_size, slide_count, owner_id) VALUES (?,?,?,?,?,?)",
-            (iid, file_name, file_hash, file_size, slide_count, owner_id),
+            "INSERT INTO ppt_imports (id, file_name, file_hash, stored_file_path, file_size, slide_count, owner_id) VALUES (?,?,?,?,?,?,?)",
+            (iid, file_name, file_hash, stored_file_path or "", file_size, slide_count, owner_id),
         )
         await self.db.commit()
         return iid
+
+    async def update_ppt_import_file_path(self, import_id: str, stored_file_path: str) -> None:
+        await self.db.execute(
+            "UPDATE ppt_imports SET stored_file_path=? WHERE id=?",
+            (stored_file_path, import_id),
+        )
+        await self.db.commit()
 
     async def get_ppt_import(self, import_id: str) -> Optional[dict]:
         return await self._fetchone("SELECT * FROM ppt_imports WHERE id=?", (import_id,))

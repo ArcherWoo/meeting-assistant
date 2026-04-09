@@ -1,11 +1,11 @@
-/**
+﻿/**
  * AgentExecutionPanel — 端到端 Agent 执行面板
  * 生命周期：matching → ready (参数表单) → executing (SSE步骤流) → completed / error / cancelled
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
 import clsx from 'clsx';
 import { useAppStore } from '@/stores/appStore';
-import { agentMatch, agentExecute, cancelAgentRun, getAgentRun, listKnowledgeImports } from '@/services/api';
+import { agentMatch, agentExecute, cancelAgentRun, getAgentRun, listKnowledgeImports, uploadFile } from '@/services/api';
 import type { AgentMatchResult, AgentFinalResult, AgentExecutionEvent, AgentRunRecord, AgentRunStep, SkillParam, MessageMetadata } from '@/types';
 import { buildAgentWriteBackPayload } from '@/utils/agentResult';
 import { hasInvalidatedResource, subscribeAppDataInvalidation } from '@/utils/appInvalidation';
@@ -43,8 +43,10 @@ interface PanelUIProps {
   knowledgeImports: KnowledgeImport[];
   isStopping: boolean;
   isFinalizing: boolean;
+  uploadingParamName: string | null;
   stepsEndRef: React.RefObject<HTMLDivElement>;
   onParamChange: (name: string, val: string) => void;
+  onParamUpload: (name: string, file: File) => void;
   onExecute: () => void;
   onStop: () => void;
   onCancel: () => void;
@@ -100,6 +102,7 @@ export default function AgentExecutionPanel({ query, conversationId, onComplete,
   const [finalRun, setFinalRun] = useState<AgentRunRecord | null>(null);
   const [isStopping, setIsStopping] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
+  const [uploadingParamName, setUploadingParamName] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const stepsEndRef = useRef<HTMLDivElement>(null);
@@ -175,6 +178,20 @@ export default function AgentExecutionPanel({ query, conversationId, onComplete,
       .catch((e: Error) => { if (!cancelled) { setErrorMsg(e.message); setPhase('error'); } });
     return () => { cancelled = true; };
   }, [query, currentRoleId]);
+
+  const handleParamUpload = useCallback(async (name: string, file: File) => {
+    setUploadingParamName(name);
+    setErrorMsg(null);
+    try {
+      const result = await uploadFile(file);
+      setParamValues((prev) => ({ ...prev, [name]: result.import_id }));
+      await refreshKnowledgeImports();
+    } catch (error) {
+      setErrorMsg((error as Error).message || '文件上传失败');
+    } finally {
+      setUploadingParamName(null);
+    }
+  }, [refreshKnowledgeImports]);
 
   const handleExecute = useCallback(async () => {
     if (!activeLLMConfig || !hasUsableLLMConfig) { setErrorMsg('请先由管理员配置 LLM'); setPhase('error'); return; }
@@ -341,8 +358,10 @@ export default function AgentExecutionPanel({ query, conversationId, onComplete,
       knowledgeImports={knowledgeImports}
       isStopping={isStopping}
       isFinalizing={isFinalizing}
+      uploadingParamName={uploadingParamName}
       stepsEndRef={stepsEndRef}
       onParamChange={(name, val) => setParamValues((prev) => ({ ...prev, [name]: val }))}
+      onParamUpload={(name, file) => { void handleParamUpload(name, file); }}
       onExecute={() => { void handleExecute(); }}
       onStop={handleStop}
       onCancel={handleCancel}
@@ -353,7 +372,7 @@ export default function AgentExecutionPanel({ query, conversationId, onComplete,
 
 // ─── PanelUI ──────────────────────────────────────────────────────────────────
 
-function PanelUI({ phase, matchResult, paramValues, steps, finalResult, errorMsg, knowledgeImports, isStopping, isFinalizing, stepsEndRef, onParamChange, onExecute, onStop, onCancel, onFinalize }: PanelUIProps) {
+function PanelUI({ phase, matchResult, paramValues, steps, finalResult, errorMsg, knowledgeImports, isStopping, isFinalizing, uploadingParamName, stepsEndRef, onParamChange, onParamUpload, onExecute, onStop, onCancel, onFinalize }: PanelUIProps) {
   const card = 'win-panel my-3 p-4 rounded-lg border border-surface-divider dark:border-dark-divider bg-white dark:bg-dark-sidebar';
 
   if (phase === 'matching') return (
@@ -397,9 +416,20 @@ function PanelUI({ phase, matchResult, paramValues, steps, finalResult, errorMsg
         {params.length > 0 && (
           <div className="space-y-3 mb-4">
             {params.map((p) => (
-              <ParamField key={p.name} param={p} value={paramValues[p.name] ?? ''} imports={knowledgeImports} onChange={(v) => onParamChange(p.name, v)} />
+              <ParamField
+                key={p.name}
+                param={p}
+                value={paramValues[p.name] ?? ''}
+                imports={knowledgeImports}
+                uploading={uploadingParamName === p.name}
+                onChange={(v) => onParamChange(p.name, v)}
+                onUpload={(file) => onParamUpload(p.name, file)}
+              />
             ))}
           </div>
+        )}
+        {errorMsg && (
+          <p className="mb-3 text-xs text-red-600 dark:text-red-400">{errorMsg}</p>
         )}
         <div className="flex gap-2">
           <button onClick={onExecute} className="win-button-primary h-8 px-4 text-sm">▶ 开始执行</button>
@@ -488,7 +518,21 @@ function PanelUI({ phase, matchResult, paramValues, steps, finalResult, errorMsg
 
 // ─── ParamField ───────────────────────────────────────────────────────────────
 
-function ParamField({ param, value, imports, onChange }: { param: SkillParam; value: string; imports: KnowledgeImport[]; onChange: (v: string) => void }) {
+function ParamField({
+  param,
+  value,
+  imports,
+  uploading,
+  onChange,
+  onUpload,
+}: {
+  param: SkillParam;
+  value: string;
+  imports: KnowledgeImport[];
+  uploading: boolean;
+  onChange: (v: string) => void;
+  onUpload: (file: File) => void;
+}) {
   const cls = 'w-full rounded border border-surface-divider dark:border-dark-divider bg-white dark:bg-dark px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary';
   const label = (
     <label className="block text-xs font-medium mb-1">
@@ -517,10 +561,31 @@ function ParamField({ param, value, imports, onChange }: { param: SkillParam; va
 
   if (param.source === 'knowledge_import' || param.type === 'file') return (
     <div>{label}
-      <select value={value} onChange={(e) => onChange(e.target.value)} className={cls}>
-        <option value="">（请选择已导入文件）</option>
-        {imports.map((imp) => <option key={imp.id} value={imp.id}>{imp.file_name}</option>)}
-      </select>
+      <div className="space-y-2">
+        <select value={value} onChange={(e) => onChange(e.target.value)} className={cls}>
+          <option value="">（请选择已导入文件）</option>
+          {imports.map((imp) => <option key={imp.id} value={imp.id}>{imp.file_name}</option>)}
+        </select>
+        <div className="flex items-center gap-2">
+          <label className="win-button inline-flex h-8 cursor-pointer items-center px-3 text-xs">
+            {uploading ? '上传中...' : '上传新文件'}
+            <input
+              type="file"
+              accept=".xls,.xlsx,.csv,.tsv"
+              className="hidden"
+              disabled={uploading}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.currentTarget.value = '';
+                if (file) onUpload(file);
+              }}
+            />
+          </label>
+          <span className="text-[11px] text-text-secondary">
+            上传后会自动导入并选中这份文件
+          </span>
+        </div>
+      </div>
     </div>
   );
 

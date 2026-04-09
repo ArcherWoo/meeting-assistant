@@ -21,6 +21,7 @@ _TRACE_LABELS = {
     "retrieve_skill": "检索技能库",
     "get_skill_definition": "读取 Skill 定义",
     "extract_file_text": "提取文件文本",
+    "run_excel_category_mapping": "执行 Excel 分类映射",
     "query_knowledge": "查询知识库",
     "search_knowhow_rules": "查询规则库",
     "finalize": "整理最终结果",

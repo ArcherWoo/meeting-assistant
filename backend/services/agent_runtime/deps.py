@@ -15,6 +15,7 @@ from services.knowhow_service import knowhow_service
 from services.knowledge_service import knowledge_service
 from services.llm_profiles import get_runtime_llm_config
 from services.skill_manager import skill_manager
+from services.access_control import is_admin
 from services.storage import gen_id, storage
 
 
@@ -50,7 +51,7 @@ def _apply_skill_profile(policy, skill):
     return execution_profile, updated_policy
 
 
-async def build_agent_deps(request: AgentExecuteRequest) -> AgentDeps:
+async def build_agent_deps(request: AgentExecuteRequest, user: dict | None = None) -> AgentDeps:
     llm_config = await get_runtime_llm_config(
         profile_id=request.llm_profile_id,
         api_url=request.api_url,
@@ -87,6 +88,9 @@ async def build_agent_deps(request: AgentExecuteRequest) -> AgentDeps:
         model=llm_config["model"],
         run_id=run_id,
         request_params=dict(request.params),
+        user_id=str((user or {}).get("id") or "") or None,
+        group_id=str((user or {}).get("group_id") or "") or None,
+        is_admin=is_admin(user),
         conversation_id=request.conversation_id,
         llm_profile_id=llm_config["profile_id"],
         skill=active_skill,

@@ -9,6 +9,8 @@ DELETE /api/knowledge/imports/{id} - 删除已导入记录
 """
 import asyncio
 import logging
+import shutil
+from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
@@ -18,9 +20,11 @@ from services.knowledge_service import knowledge_service
 from services.hybrid_search import hybrid_search
 from services.embedding_service import embedding_service
 from services.retrieval_planner import RetrievalPlannerSettings
+from services.runtime_paths import IMPORTED_FILES_DIR
 from services.runtime_controls import AttachmentParseBusyError, attachment_parse_controller
 from services.storage import storage
 from routers.auth import get_current_user
+from utils.decryption_handler import decrypt_esafenet_file
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -129,6 +133,23 @@ async def _validate_and_read_upload(file: UploadFile) -> tuple[str, bytes]:
     return file.filename, content
 
 
+async def _store_imported_original_file(import_id: str, filename: str, file_content: bytes, *, is_encrypted: bool) -> str:
+    effective_content = decrypt_esafenet_file(file_content, filename) if is_encrypted else file_content
+    target_path = (IMPORTED_FILES_DIR / import_id / (Path(filename).name or "uploaded-file")).resolve()
+
+    def _write_file() -> str:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(effective_content)
+        return str(target_path)
+
+    stored_file_path = await asyncio.to_thread(_write_file)
+    try:
+        await storage.update_ppt_import_file_path(import_id, stored_file_path)
+    except RuntimeError:
+        logger.debug("skip imported file path persistence because storage is not initialized")
+    return stored_file_path
+
+
 @router.post("/knowledge/ingest")
 async def ingest_file(
     file: UploadFile | None = File(None),
@@ -166,6 +187,14 @@ async def ingest_file(
                         llm_fn=None,
                         embedding_fn=embedding_fn,
                         owner_id=user.get("id"),
+                        is_encrypted=is_encrypted,
+                    )
+                import_id = str(result.get("import_id") or "").strip()
+                if import_id:
+                    await _store_imported_original_file(
+                        import_id,
+                        validated_filename,
+                        content,
                         is_encrypted=is_encrypted,
                     )
                 result["embedding_status"] = dict(embedding_status)
@@ -322,9 +351,15 @@ async def list_imports(user: dict = Depends(get_current_user)) -> dict:
 async def delete_import(import_id: str, user: dict = Depends(get_current_user)) -> dict:
     """删除指定的知识库导入记录"""
     try:
+        import_row = await storage.get_ppt_import(import_id)
         result = await knowledge_service.delete_import(import_id)
         if not result.get("deleted"):
             raise HTTPException(status_code=404, detail=result.get("message", "记录不存在"))
+        stored_file_path = str((import_row or {}).get("stored_file_path") or "").strip()
+        if stored_file_path:
+            target_dir = Path(stored_file_path).resolve().parent
+            if target_dir.exists() and target_dir.is_dir() and target_dir.is_relative_to(IMPORTED_FILES_DIR.resolve()):
+                await asyncio.to_thread(shutil.rmtree, target_dir, True)
         return result
     except HTTPException:
         raise

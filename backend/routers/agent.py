@@ -2,9 +2,11 @@
 
 import json
 import logging
+import re
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from routers.auth import get_current_user
 from services.access_control import can_access_role, filter_accessible_skills, get_accessible_skill
@@ -27,6 +29,7 @@ from services.agent_runtime.role_policy import (
 from services.agent_runtime.run_registry import run_registry
 from services.agent_runtime.runner import execute_agent_stream
 from services.observability import log_structured, new_request_id, publish_runtime_metrics, runtime_metrics
+from services.runtime_paths import CLASSIFICATION_OUTPUTS_DIR
 from services.skill_manager import skill_manager
 from services.skill_matcher import skill_matcher
 from services.storage import storage
@@ -199,6 +202,23 @@ async def get_agent_run(run_id: str, user: dict = Depends(get_current_user)) -> 
     if not run:
         raise HTTPException(status_code=404, detail="Agent run 不存在")
     return {"run": run}
+
+
+@router.get("/agent/artifacts/classification/{file_name}")
+async def download_classification_artifact(file_name: str, user: dict = Depends(get_current_user)):
+    normalized_user_id = str((user or {}).get("id") or "").strip()
+    safe_segment = re.sub(r"[^a-zA-Z0-9._-]+", "_", normalized_user_id) if normalized_user_id else "anonymous"
+    base_dir = (CLASSIFICATION_OUTPUTS_DIR / safe_segment).resolve()
+    candidate = (base_dir / Path(file_name).name).resolve()
+    if not candidate.is_relative_to(base_dir):
+        raise HTTPException(status_code=400, detail="无效的文件名")
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="结果文件不存在")
+    return FileResponse(
+        candidate,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=candidate.name,
+    )
 
 
 @router.post("/agent/runs/{run_id}/cancel")

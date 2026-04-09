@@ -159,7 +159,10 @@ async def _resolve_continuation_request(
 async def execute_agent_stream(request: AgentExecuteRequest, user: dict | None = None):
     queue: asyncio.Queue[dict | None] = asyncio.Queue()
     effective_request, source_run = await _resolve_continuation_request(request)
-    deps = await build_agent_deps(effective_request)
+    try:
+        deps = await build_agent_deps(effective_request, user=user)
+    except TypeError:
+        deps = await build_agent_deps(effective_request)
 
     if source_run:
         prior_message_history = await load_run_message_history(source_run["runId"])

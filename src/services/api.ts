@@ -875,6 +875,23 @@ export async function deleteKnowledgeImport(importId: string): Promise<{ deleted
 }
 
 /** 知识库混合检索 */
+export async function downloadAgentArtifact(downloadUrl: string, filename: string): Promise<void> {
+  const res = await authFetch(downloadUrl);
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: '下载文件失败' }));
+    throw new Error(error.detail || '下载文件失败');
+  }
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
 export async function queryKnowledge(
   query: string,
   filters?: { category?: string; min_amount?: number; max_amount?: number }

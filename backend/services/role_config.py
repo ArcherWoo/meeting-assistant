@@ -9,6 +9,7 @@ VALID_AGENT_TOOLS = {
     "extract_file_text",
     "query_knowledge",
     "search_knowhow_rules",
+    "run_excel_category_mapping",
 }
 VALID_CHAT_CAPABILITIES = {
     "auto_knowledge",
